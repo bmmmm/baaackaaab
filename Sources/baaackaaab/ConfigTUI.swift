@@ -11,8 +11,9 @@ import Darwin
 //
 // Pure Foundation + termios — no curses, no dependency. One screen:
 //   browse  — walk the directory tree, toggle folders in/out of the set
-//   review  — a panel that toggles in (v) directly under the folder list,
-//             showing everything selected; remove entries
+//   review  — the selected-set panel under the folder list, shown as soon as
+//             anything is picked; navigation stays up top, `v` drops focus into
+//             it to remove entries, esc/v hands focus back
 //   albums  — a Photos album picker (a) that lists your iCloud albums with
 //             counts so you toggle them like folders, instead of typing names
 //
@@ -68,9 +69,10 @@ final class ConfigTUI {
     private var existed = false
     private var loadFailed = false
 
-    // The review list is a panel that toggles in under the folder browser
-    // (v). When shown it takes input focus; the folder list stays visible above.
-    private var showReview = false
+    // The selected-set panel is always visible under the folder browser once
+    // anything is picked. Navigation stays on the folder browser by default;
+    // `v` moves focus DOWN into the panel to prune entries, esc/v hands it back.
+    private var panelFocused = false
     // The album picker (a) takes over the content area with the user's Photos
     // albums. It's loaded lazily on first open (triggers the Photos prompt).
     private var pickAlbums = false
@@ -119,7 +121,7 @@ final class ConfigTUI {
             statusMsg = ""
             let keepGoing: Bool
             if pickAlbums { keepGoing = handleAlbumPicker(key) }
-            else if showReview { keepGoing = handleReview(key) }
+            else if panelFocused && !setRows().isEmpty { keepGoing = handleReview(key) }
             else { keepGoing = handleBrowse(key) }
             if !keepGoing { break loop }
         }
@@ -148,7 +150,9 @@ final class ConfigTUI {
             if browseCursor < rows.count, case .dir(let url) = rows[browseCursor] { toggle(url) }
         case .char("c"): toggle(cwd)
         case .char("a"): openAlbumPicker()
-        case .char("v"), .tab: showReview = true; reviewCursor = 0; reviewTop = 0
+        case .char("v"), .tab:
+            if !setRows().isEmpty { panelFocused = true; reviewCursor = 0; reviewTop = 0 }
+            else { statusMsg = "nothing selected yet" }
         case .char("."): showHidden.toggle(); invalidate(); browseCursor = 0; browseTop = 0
         case .char("g"): jumpICloud()
         case .char("~"): jumpHome()
@@ -172,11 +176,12 @@ final class ConfigTUI {
                 case .album(let a): set.photoAlbums.removeAll { $0 == a }; dirty = true; statusMsg = "removed album \(a)"
                 }
                 reviewCursor = max(0, min(reviewCursor, setRows().count - 1))
+                if setRows().isEmpty { panelFocused = false }   // nothing left to prune
             }
         case .char("a"): openAlbumPicker()
-        // v/esc/left close the panel and hand focus back to the folder browser;
-        // the whole editor only quits on q / Ctrl-C.
-        case .char("v"), .tab, .esc, .left, .char("h"): showReview = false
+        // v/esc/left hand focus back UP to the folder browser; the panel stays
+        // visible. The whole editor only quits on q / Ctrl-C.
+        case .char("v"), .tab, .esc, .left, .char("h"): panelFocused = false
         case .char("s"): save()
         case .char("q"), .ctrlC: if confirmQuit() { return false }
         case .eof: return false
@@ -386,14 +391,17 @@ final class ConfigTUI {
 
         if pickAlbums {
             appendAlbumRows(&lines, height: contentH, cols: cols)
-        } else if showReview {
+        } else if !setRows().isEmpty {
+            // Folder browser and selected-set panel are both always visible; the
+            // cursor + key target sit on whichever side panelFocused points to.
             let setCount = setRows().count
             var reviewH = min(max(setCount, 3), max(1, contentH / 3))
             reviewH = max(1, min(reviewH, max(1, contentH - 2)))   // leave folder + divider
             let folderH = max(1, contentH - reviewH - 1)           // -1 for the divider
-            appendFolderRows(&lines, height: folderH, cols: cols, focused: false)
-            lines.append(divider("selected — space remove \u{2022} v/esc back ", cols))
-            appendReviewRows(&lines, height: reviewH, cols: cols, focused: true)
+            appendFolderRows(&lines, height: folderH, cols: cols, focused: !panelFocused)
+            let hint = panelFocused ? "selected — space remove \u{2022} v/esc back " : "selected — v to prune "
+            lines.append(divider(hint, cols))
+            appendReviewRows(&lines, height: reviewH, cols: cols, focused: panelFocused)
         } else {
             appendFolderRows(&lines, height: contentH, cols: cols, focused: true)
         }
@@ -531,10 +539,10 @@ final class ConfigTUI {
         if pickAlbums {
             return "up/dn move \u{2022} space toggle \u{2022} a/esc back \u{2022} s save \u{2022} q quit"
         }
-        if showReview {
+        if panelFocused && !setRows().isEmpty {
             return "up/dn move \u{2022} space remove \u{2022} a albums \u{2022} v/esc back \u{2022} s save \u{2022} q quit"
         }
-        return "up/dn move \u{2022} right open \u{2022} left/\u{232B} back \u{2022} space pick \u{2022} c pick-dir \u{2022} a albums \u{2022} v review \u{2022} . hidden \u{2022} g iCloud \u{2022} ~ home \u{2022} s save \u{2022} q quit"
+        return "up/dn move \u{2022} right open \u{2022} left/\u{232B} back \u{2022} space pick \u{2022} c pick-dir \u{2022} a albums \u{2022} v prune \u{2022} . hidden \u{2022} g iCloud \u{2022} ~ home \u{2022} s save \u{2022} q quit"
     }
 
     // MARK: - Terminal primitives
