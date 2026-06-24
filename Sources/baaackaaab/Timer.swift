@@ -21,9 +21,10 @@ enum TimerError: Error, CustomStringConvertible {
 ///
 /// The job runs in the user's GUI (aqua) session, so it can read the Keychain
 /// and (with a granted TCC entitlement) Photos — same identity as an interactive
-/// run. The catch: an ad-hoc-signed binary's code identity changes on every
-/// rebuild, which resets its TCC grant and can re-lock the Keychain ACL. After a
-/// rebuild, prime it once interactively (see the install hint).
+/// run. The catch: code identity. Build with a stable self-signed signing
+/// identity (`make release` re-signs after each build), otherwise an ad-hoc
+/// binary's identity churns on every rebuild and resets the TCC grant + Keychain
+/// ACL. With a stable identity, grant Photos + Keychain once and they persist.
 enum LaunchdTimer {
     static let label = "io.baaackaaab.backup"
 
@@ -76,7 +77,7 @@ enum LaunchdTimer {
         }
 
         Console.success("timer installed and loaded")
-        Console.warn("After every rebuild the binary's code identity changes, which resets its Photos (TCC) grant and can re-lock the Keychain ACL. Prime it once interactively after a rebuild: run `baaackaaab --check` (Keychain) and one manual backup with a Photos album (TCC), so the unattended run isn't blocked on a prompt it can't answer.")
+        Console.warn("Build with `make release` so the binary carries a stable code-signing identity — then its Photos (TCC) and Keychain grants survive rebuilds. Grant them once after install: run `baaackaaab --check` (Keychain) and one manual backup of a Photos album (TCC), so the unattended run isn't blocked on a prompt it can't answer. If you ever rebuild with bare `swift build`, re-run `make sign` to restore the identity.")
         Console.note("verify:  launchctl print \(domain)/\(label)\nlogs:    tail -f \(logURL.path)\nremove:  baaackaaab --uninstall-timer")
     }
 

@@ -89,7 +89,7 @@ func printUsage() {
         ("--uninstall-timer", "remove the LaunchAgent, then exit"),
         ("--timer-status", "show whether the timer is installed + loaded, then exit"),
     ])
-    Console.note("The timer runs `baaackaaab --run-tag scheduled` (backs up the set). After a rebuild, prime the Keychain (`--check`) and Photos (one manual backup) so the unattended run isn't blocked on a permission prompt.")
+    Console.note("The timer runs `baaackaaab --run-tag scheduled` (backs up the set). Build with `make release` so the binary keeps a stable signing identity — then grant the Keychain (`--check`) and Photos (one manual backup) once and the unattended run is never blocked on a prompt.")
 
     Console.section("Quota (soft pre-flight gauge)")
     Console.info([
@@ -156,6 +156,9 @@ func resolveRepoOrExit() -> String {
         Console.error("no repository — pass --restic-repo, set RESTIC_REPOSITORY, or run `baaackaaab --init-credentials` first")
         exit(1)
     }
+    // Export the URL so restic reads it from RESTIC_REPOSITORY rather than an
+    // `-r` argument — it embeds the endpoint password and argv is `ps`-visible.
+    setenv("RESTIC_REPOSITORY", repo, 1)
     if ProcessInfo.processInfo.environment["RESTIC_PASSWORD"] == nil,
        let pw = (try? Keychain.get(account: Credentials.repoPasswordAccount)) ?? nil {
         setenv("RESTIC_PASSWORD", pw, 1)

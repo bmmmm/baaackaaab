@@ -461,6 +461,10 @@ final class ConfigTUI {
     private func syncNow() {
         guard !set.isEmpty else { statusMsg = "backup set is empty \u{2014} press e to add folders / albums"; return }
         if dirty { save() }   // back up exactly what's on screen
+        // Resolve + export credentials in this process so the re-exec'd child
+        // inherits RESTIC_REPOSITORY + RESTIC_PASSWORD and never touches the
+        // Keychain itself — fewer authorizations per sync.
+        ensureRepoResolved()
         emit("\u{1B}[?25h\u{1B}[?1049l")   // show cursor, leave the alternate screen
         term.restore()                      // cooked, so the child's output behaves
         let code = runSyncChild()
@@ -508,6 +512,9 @@ final class ConfigTUI {
         let env = ProcessInfo.processInfo.environment
         repo = argValue("--restic-repo") ?? env["RESTIC_REPOSITORY"]
             ?? ((try? Keychain.get(account: Credentials.repoURLAccount)) ?? nil)
+        // Export both secrets so a re-exec'd sync child inherits them from the
+        // environment and never reads the Keychain a second time.
+        if let repo = repo { setenv("RESTIC_REPOSITORY", repo, 1) }
         if getenv("RESTIC_PASSWORD") == nil,
            let pw = (try? Keychain.get(account: Credentials.repoPasswordAccount)) ?? nil {
             setenv("RESTIC_PASSWORD", pw, 1)

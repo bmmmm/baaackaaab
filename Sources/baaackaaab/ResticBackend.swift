@@ -18,10 +18,11 @@ enum ResticError: Error, CustomStringConvertible {
 ///
 /// The Mac stays strictly write-only towards the store: this only ever runs
 /// `init`/`backup`/`cat config`, never `forget`/`prune` (those run server-side
-/// on the append-only host). The repo password is read from the environment
-/// (`RESTIC_PASSWORD`) and is NEVER passed as an argument — arguments are
-/// visible to other processes via `ps`. The repository location is not secret
-/// and is passed with `-r`.
+/// on the append-only host). Both secrets reach restic through the environment,
+/// never argv (argv is world-readable via `ps`): the encryption password as
+/// `RESTIC_PASSWORD`, and the repository URL as `RESTIC_REPOSITORY`. The URL
+/// embeds the rest-server endpoint password, so it is just as sensitive as the
+/// password — hence we never pass `-r` on the command line.
 final class ResticBackend {
     let repository: String
     private let executable: String
@@ -29,21 +30,25 @@ final class ResticBackend {
     init(repository: String, executable: String = "restic") {
         self.repository = repository
         self.executable = executable
+        // Export the repo URL so restic reads it from the environment instead of
+        // an `-r` argument — the URL embeds the endpoint password and argv is
+        // world-readable via `ps`. Idempotent; mirrors how RESTIC_PASSWORD flows.
+        setenv("RESTIC_REPOSITORY", repository, 1)
     }
 
     /// Initialize the repo if it does not exist yet. Uses repository format v2
     /// so zstd compression is available (helps text/PDF; photos won't shrink).
     func ensureInitialized() throws {
-        if try run(["-r", repository, "cat", "config"], quiet: true) == 0 { return }
+        if try run(["cat", "config"], quiet: true) == 0 { return }
         Console.step("restic: initializing repository (format v2) at \(Credentials.redact(repository))")
-        let code = try run(["-r", repository, "init", "--repository-version", "2"])
+        let code = try run(["init", "--repository-version", "2"])
         if code != 0 { throw ResticError.failed(command: "init", code: code) }
     }
 
     /// Back up the given paths into a single snapshot. restic output streams
     /// live to the terminal so progress is visible.
     func backup(paths: [URL], tags: [String], host: String?) throws {
-        var args = ["-r", repository, "backup", "--compression", "auto"]
+        var args = ["backup", "--compression", "auto"]
         if let host { args += ["--host", host] }
         for tag in tags { args += ["--tag", tag] }
         args += paths.map { $0.path }
@@ -64,7 +69,7 @@ final class ResticBackend {
     func repoSizeBytes() -> Int? {
         // `--quiet` suppresses restic's progress counter, which it otherwise
         // prints on stdout *before* the JSON (e.g. "[0:00] 100.00% 1/1 ...").
-        guard let out = try? runCapturing(["-r", repository, "stats", "--quiet", "--mode", "raw-data", "--json"], command: "stats")
+        guard let out = try? runCapturing(["stats", "--quiet", "--mode", "raw-data", "--json"], command: "stats")
         else { return nil }
         // Belt and braces: even if a stray line slips onto stdout, the JSON is a
         // single object on its own line — take the last line that starts with
@@ -114,7 +119,7 @@ final class ResticBackend {
     /// mode restic emits a single JSON array; we still slice from the first '['
     /// in case a stray line precedes it.
     private func snapshotsJSON() throws -> [[String: Any]] {
-        let out = try runCapturing(["-r", repository, "snapshots", "--json"], command: "snapshots")
+        let out = try runCapturing(["snapshots", "--json"], command: "snapshots")
         guard let start = out.firstIndex(of: "[") else { return [] }
         let json = String(out[start...])
         guard let data = json.data(using: .utf8),
