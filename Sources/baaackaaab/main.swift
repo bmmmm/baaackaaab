@@ -37,6 +37,12 @@ func printUsage() {
     Console.section("Usage")
     Console.note("baaackaaab --restic-repo <repo> [--drive-folder <dir> ...] [--photo-album <name>] [options]")
 
+    Console.section("Setup (first run)")
+    Console.info([
+        ("--init-credentials", "generate + store both secrets in the Keychain, print the server hash"),
+        ("--check", "verify the server is reachable, init the repo, then exit"),
+    ])
+
     Console.section("Sources")
     Console.info([
         ("--drive-folder <dir>", "iCloud Drive folder to back up (repeatable)"),
@@ -47,11 +53,11 @@ func printUsage() {
 
     Console.section("Restic target")
     Console.info([
-        ("--restic-repo <repo>", "restic repository (or set RESTIC_REPOSITORY)"),
+        ("--restic-repo <repo>", "restic repo (else RESTIC_REPOSITORY, else the Keychain)"),
         ("--host <name>", "host tag for snapshots (default: this machine)"),
         ("--run-tag <tag>", "tag for this run (default: run-<timestamp>)"),
     ])
-    Console.note("Password is read from the RESTIC_PASSWORD env var, never an argument.")
+    Console.note("Password comes from RESTIC_PASSWORD or the Keychain, never an argument.")
 
     Console.section("Quota (soft pre-flight gauge)")
     Console.info([
@@ -70,6 +76,74 @@ func printUsage() {
     Console.note("baaackaaab --restic-repo rest:https://host/repo \\\n             --drive-folder ~/Documents --photo-album \"Backup\"")
     Console.note("RESTIC_REPOSITORY=rest:https://host/repo baaackaaab \\\n             --drive-folder ~/Documents --repo-quota-bytes 50000000000")
     print("")
+}
+
+/// First-run credential setup. Generates both secrets, stores them in the
+/// Keychain, and prints the one-way bcrypt line plus the command to create the
+/// endpoint user on the server. The cleartext endpoint password never leaves the
+/// Keychain; only its hash is printed.
+func initCredentials() throws {
+    Console.banner("baaackaaab", tagline: "credential setup")
+
+    let endpointPW = Credentials.randomURLSafe(byteCount: 24)   // ~192 bits, endpoint auth
+    let repoPW = Credentials.randomURLSafe(byteCount: 32)       // ~256 bits, encryption key
+    let repoURL = Credentials.repoURL(password: endpointPW)
+
+    try Keychain.set(account: Credentials.repoURLAccount, value: repoURL)
+    try Keychain.set(account: Credentials.repoPasswordAccount, value: repoPW)
+
+    Console.section("Keychain")
+    Console.success("stored endpoint URL + encryption password (service '\(Keychain.service)')")
+    Console.info([("repo", Credentials.redact(repoURL))])
+    Console.warn("The encryption password lives ONLY in this Keychain — the server never has it. Lose it and the backups are unrecoverable.")
+
+    let line = try Credentials.htpasswdLine(user: Credentials.endpointUser, password: endpointPW)
+    Console.section("Server", detail: "create the endpoint user on garage")
+    Console.note("One-way bcrypt hash (safe to paste); the cleartext password is not shown. Run once — it creates /data/.htpasswd with user '\(Credentials.endpointUser)':")
+    print("")
+    print("    printf '%s\\n' '\(line)' \\")
+    print("      | ssh bmadmin@10.0.10.2 'docker exec -i restic-rest-server sh -c \"cat >> /data/.htpasswd\"'")
+    print("")
+    Console.section("Verify")
+    Console.step("then run:  baaackaaab --check")
+    Console.note("reaches the server with the stored credentials and initializes the repository.")
+    Console.note("If --check returns 401, the server cached the old .htpasswd — run `ssh bmadmin@10.0.10.2 docker restart restic-rest-server`, then retry.")
+}
+
+/// Resolve the restic repo URL from --restic-repo, then RESTIC_REPOSITORY, then
+/// the Keychain — and load the encryption password from the Keychain into our
+/// environment (the restic child inherits RESTIC_PASSWORD) when it is not
+/// already set. Exits with an actionable message if no repo can be found.
+func resolveRepoOrExit() -> String {
+    let repo: String
+    if let r = argValue("--restic-repo") ?? ProcessInfo.processInfo.environment["RESTIC_REPOSITORY"] {
+        repo = r
+    } else if let stored = (try? Keychain.get(account: Credentials.repoURLAccount)) ?? nil {
+        repo = stored
+    } else {
+        Console.error("no repository — pass --restic-repo, set RESTIC_REPOSITORY, or run `baaackaaab --init-credentials` first")
+        exit(1)
+    }
+    if ProcessInfo.processInfo.environment["RESTIC_PASSWORD"] == nil,
+       let pw = (try? Keychain.get(account: Credentials.repoPasswordAccount)) ?? nil {
+        setenv("RESTIC_PASSWORD", pw, 1)
+    }
+    return repo
+}
+
+/// Reach the server with the stored credentials and ensure the repo exists.
+/// A fast end-to-end check of DNS + Traefik + htpasswd auth + restic init.
+func checkRemote() {
+    Console.banner("baaackaaab", tagline: "remote check")
+    let repo = resolveRepoOrExit()
+    Console.info([("repo", Credentials.redact(repo))])
+    do {
+        try ResticBackend(repository: repo).ensureInitialized()
+        Console.success("server reachable, authentication OK, repository ready")
+    } catch {
+        Console.error("\(error)")
+        exit(1)
+    }
 }
 
 // Line-buffer stdout so our logs interleave in the right order with restic's
@@ -108,6 +182,18 @@ if let matTarget = argValue("--materialize-test") {
     }
 }
 
+// First-run setup: generate + store both secrets, print the server hash.
+if CommandLine.arguments.contains("--init-credentials") {
+    do { try initCredentials(); exit(0) }
+    catch { Console.error("\(error)"); exit(1) }
+}
+
+// Connectivity + auth + repo-init check, then exit.
+if CommandLine.arguments.contains("--check") {
+    checkRemote()
+    exit(0)
+}
+
 let driveFolders = argValues("--drive-folder")
 let photoAlbum = argValue("--photo-album")
 let stagingURL = URL(fileURLWithPath: argValue("--staging", default: "./tmp/staging")!, isDirectory: true)
@@ -120,10 +206,7 @@ let host = argValue("--host") ?? ProcessInfo.processInfo.hostName
 let repoQuotaBytes = argValue("--repo-quota-bytes").flatMap { Int($0) }
 let quotaWarnFraction = argValue("--quota-warn-fraction").flatMap { Double($0) } ?? 0.85
 
-guard let repo = argValue("--restic-repo") ?? ProcessInfo.processInfo.environment["RESTIC_REPOSITORY"] else {
-    Console.error("set --restic-repo or the RESTIC_REPOSITORY env var")
-    exit(1)
-}
+let repo = resolveRepoOrExit()
 
 let runFmt = DateFormatter()
 runFmt.locale = Locale(identifier: "en_US_POSIX")
@@ -135,7 +218,7 @@ do {
     let restic = ResticBackend(repository: repo)
     Console.banner("baaackaaab", tagline: "one-way iCloud → restic backup")
     Console.info([
-        ("repo", repo),
+        ("repo", Credentials.redact(repo)),
         ("host", host),
         ("run-tag", runTag),
         ("staging", "\(stagingURL.path) (scratch for photo batches only)"),
