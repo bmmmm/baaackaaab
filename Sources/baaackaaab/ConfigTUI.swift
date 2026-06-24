@@ -3,19 +3,31 @@ import Foundation
 import Darwin
 #endif
 
-// Interactive full-screen editor for the declarative backup set.
+// Interactive full-screen TUI: the command center AND the backup-set editor, in
+// one raw-mode loop. Launched bare (`baaackaaab`) it opens on the home screen;
+// `--configure` jumps straight to the editor.
 //
-// The CLI (--add-folder/--add-album) is the headless path; this is the same
-// edit, but you browse the real filesystem and toggle folders instead of typing
-// paths. It writes the identical BackupSet JSON, so the two are interchangeable.
+// The CLI (--add-folder/--add-album) is the headless path; the editor is the
+// same edit, but you browse the real filesystem and toggle folders instead of
+// typing paths. It writes the identical BackupSet JSON, so the two are
+// interchangeable.
 //
-// Pure Foundation + termios — no curses, no dependency. One screen:
-//   browse  — walk the directory tree, toggle folders in/out of the set
+// Pure Foundation + termios — no curses, no dependency. Everything lives in ONE
+// raw terminal so screens never nest (nesting two raw TUIs over one tty breaks
+// input on return — the whole reason this is a single class). Screens:
+//   home    — dashboard (backup set + remote status) with the action keys
+//             e edit / s sync / r remote / q quit; the landing screen
+//   browse  — walk the directory tree, toggle folders in/out of the set;
+//             esc backs out to home (when launched there)
 //   review  — the selected-set panel under the folder list, shown as soon as
 //             anything is picked; navigation stays up top, `v` drops focus into
 //             it to remove entries, esc/v hands focus back
 //   albums  — a Photos album picker (a) that lists your iCloud albums with
 //             counts so you toggle them like folders, instead of typing names
+//
+// sync (s) drops out of the alternate screen + raw mode, re-execs this binary
+// so restic streams live to the normal screen, then re-enters — a clean shell-
+// out, not a nested TUI.
 //
 // Needs a real TTY (main.swift guards that). Off a terminal it refuses to run.
 
@@ -61,6 +73,8 @@ private final class RawTerminal {
     func restore() { var o = original; tcsetattr(STDIN_FILENO, TCSAFLUSH, &o) }
 }
 
+private enum Screen { case home, editor }
+
 final class ConfigTUI {
     private let configPath: URL
     private let home = FileManager.default.homeDirectoryForCurrentUser
@@ -68,6 +82,20 @@ final class ConfigTUI {
     private var set: BackupSet
     private var existed = false
     private var loadFailed = false
+
+    // The home screen (dashboard + actions) is the landing screen for a bare
+    // launch; the editor is its own screen. `hasHome` records whether home is the
+    // root, so esc in the editor backs out to it instead of quitting. Both share
+    // the one raw terminal — no nesting.
+    private var screen: Screen = .editor
+    private var hasHome = false
+
+    // Remote dashboard state, resolved lazily on first `r` so an edit-only
+    // session never triggers a Keychain prompt.
+    private var repo: String?
+    private var repoResolved = false
+    private var remote: ResticBackend.RemoteStatus?
+    private var remoteQueried = false
 
     // The selected-set panel is always visible under the folder browser once
     // anything is picked. Navigation stays on the folder browser by default;
@@ -102,32 +130,37 @@ final class ConfigTUI {
 
     // MARK: - Run loop
 
-    func run(embedded: Bool = false) {
+    /// `home: true` opens on the command-center dashboard (the bare-launch home);
+    /// otherwise it jumps straight to the editor (the `--configure` path).
+    func run(home: Bool = false) {
         if loadFailed {
             Console.error("backup set at \(configPath.path) is unreadable — fix or delete it, then re-run --configure")
             return
         }
         guard let term = RawTerminal() else {
-            Console.error("--configure needs an interactive terminal")
+            Console.error("the interactive TUI needs a terminal")
             return
         }
         self.term = term
+        self.hasHome = home
+        self.screen = home ? .home : .editor
         emit("\u{1B}[?1049h\u{1B}[?25l")   // alternate screen + hide cursor
         defer { term.restore() }           // always hand the terminal back cooked
 
         loop: while true {
-            render()
+            if screen == .home { renderHome() } else { render() }
             let key = readKey()
             statusMsg = ""
             let keepGoing: Bool
-            if pickAlbums { keepGoing = handleAlbumPicker(key) }
+            if screen == .home { keepGoing = handleHome(key) }
+            else if pickAlbums { keepGoing = handleAlbumPicker(key) }
             else if panelFocused && !setRows().isEmpty { keepGoing = handleReview(key) }
             else { keepGoing = handleBrowse(key) }
             if !keepGoing { break loop }
         }
 
         emit("\u{1B}[?25h\u{1B}[?1049l")   // show cursor + leave alternate screen
-        if !embedded { printExitHint() }   // the command center shows its own next-step
+        if !hasHome { printExitHint() }    // the home dashboard already shows next steps
     }
 
     // MARK: - Input handling
@@ -157,6 +190,24 @@ final class ConfigTUI {
         case .char("g"): jumpICloud()
         case .char("~"): jumpHome()
         case .char("s"): save()
+        // esc backs out to the home dashboard when that is the root; standalone
+        // (--configure) it quits. q / Ctrl-C always quit the app (with prompt).
+        case .esc:
+            if hasHome { screen = .home } else if confirmQuit() { return false }
+        case .char("q"), .ctrlC: if confirmQuit() { return false }
+        case .eof: return false
+        default: break
+        }
+        return true
+    }
+
+    /// Home screen (the command center). Routes the action keys; returns false to
+    /// quit the whole app.
+    private func handleHome(_ key: Key) -> Bool {
+        switch key {
+        case .char("e"), .enter, .right, .tab: screen = .editor
+        case .char("s"): syncNow()
+        case .char("r"): refreshRemote()
         case .char("q"), .esc, .ctrlC: if confirmQuit() { return false }
         case .eof: return false
         default: break
@@ -334,6 +385,163 @@ final class ConfigTUI {
         Console.section("Next")
         Console.step("run a backup:  \(bin) --run-tag smoke-live")
         Console.note("a bare run backs up this set; --run-tag just labels the snapshots. Run it in Terminal.app — it needs the Keychain + Photos access.")
+    }
+
+    // MARK: - Home screen (command center)
+
+    /// The landing dashboard: the backup set and the remote status, with the
+    /// action keys. Built as exactly `rows` lines, like render(), so the footer
+    /// pins to the bottom.
+    private func renderHome() {
+        let (rows, cols) = terminalSize()
+        var lines: [String] = []
+        lines.append(bold(fit("baaackaaab \u{2014} command center", cols)))
+        lines.append(cyan(fit("one-way iCloud \u{2192} restic backup", cols)))
+        lines.append("")
+
+        let helpLines = wrapHelp(homeHelpLine(), cols)
+        let footerH = 2 + helpLines.count           // blank + status + help(N)
+        let contentH = max(1, rows - 3 - footerH)   // minus header(3)
+
+        var body: [String] = []
+        body.append(divider("backup set", cols))
+        if set.isEmpty {
+            body.append(dim(fit("  empty \u{2014} press e to add folders / albums", cols)))
+        } else {
+            for f in set.driveFolders { body.append(green(fit("  [drive] " + f, cols))) }
+            for a in set.photoAlbums { body.append(green(fit("  [album] " + a, cols))) }
+            if let q = set.quotaBytes {
+                body.append(dim(fit(String(format: "  [quota] %.1f GB", Double(q) / 1_000_000_000), cols)))
+            }
+        }
+        body.append("")
+        body.append(divider("remote", cols))
+        if let repo = repo {
+            body.append(dim(fit("  repo  " + Credentials.redact(repo), cols)))
+            body.append(homeRemoteLine(cols))
+        } else if repoResolved {
+            body.append(yellow(fit("  no repository configured \u{2014} run baaackaaab --init-credentials", cols)))
+        } else {
+            body.append(dim(fit("  press r to query the remote (snapshots + size)", cols)))
+        }
+
+        if body.count < contentH { body += Array(repeating: "", count: contentH - body.count) }
+        else if body.count > contentH { body = Array(body.prefix(contentH)) }
+        lines += body
+
+        lines.append("")
+        lines.append(dim(fit(statusLine(), cols)))
+        for hl in helpLines { lines.append(dim(fit(hl, cols))) }
+        draw(lines)
+    }
+
+    private func homeRemoteLine(_ cols: Int) -> String {
+        guard remoteQueried else { return dim(fit("  press r to query snapshots + size", cols)) }
+        guard let r = remote else { return dim(fit("  (no data)", cols)) }
+        if let err = r.error { return yellow(fit("  unreachable: " + err, cols)) }
+        var parts = ["\(r.snapshotCount) snapshot(s)"]
+        if let t = r.latestTime {
+            let tags = r.latestTags.isEmpty ? "" : " [" + r.latestTags.joined(separator: ",") + "]"
+            parts.append("latest " + shortTime(t) + tags)
+        }
+        if let s = r.sizeBytes { parts.append(String(format: "%.2f GB", Double(s) / 1_000_000_000)) }
+        return green(fit("  \u{2713} " + parts.joined(separator: "  \u{2022}  "), cols))
+    }
+
+    private func homeHelpLine() -> String {
+        "e edit set \u{2022} s sync now \u{2022} r remote \u{2022} q quit"
+    }
+
+    // MARK: - Home actions
+
+    /// Run the real backup by re-execing this binary. We leave the alternate
+    /// screen + raw mode first so restic streams to the normal screen with proper
+    /// newlines, then re-enter after a keypress — a clean shell-out, never a
+    /// nested TUI.
+    private func syncNow() {
+        guard !set.isEmpty else { statusMsg = "backup set is empty \u{2014} press e to add folders / albums"; return }
+        if dirty { save() }   // back up exactly what's on screen
+        emit("\u{1B}[?25h\u{1B}[?1049l")   // show cursor, leave the alternate screen
+        term.restore()                      // cooked, so the child's output behaves
+        let code = runSyncChild()
+        let tail = code == 0 ? "sync finished" : "sync exited with code \(code)"
+        FileHandle.standardOutput.write(Data("\n\(tail) \u{2014} press any key to return\n".utf8))
+        term.enable()                       // raw again, to catch a single keypress
+        _ = readKey()
+        reclaimForeground()
+        emit("\u{1B}[?1049h\u{1B}[?25l")    // back into the alternate screen
+        remote = nil; remoteQueried = false  // repo changed — drop the cached status
+        statusMsg = code == 0 ? "sync finished \u{2014} press r to refresh remote" : "sync failed (code \(code))"
+    }
+
+    private func runSyncChild() -> Int32 {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: selfPath())
+        proc.arguments = syncArgs()
+        do { try proc.run() } catch {
+            FileHandle.standardOutput.write(Data("could not launch backup: \(error)\n".utf8))
+            return -1
+        }
+        proc.waitUntilExit()
+        return proc.terminationStatus
+    }
+
+    /// Read-only refresh of the remote panel. Resolves the repo (+ loads the
+    /// Keychain password) lazily on first use, queries snapshots + size, redraws.
+    private func refreshRemote() {
+        ensureRepoResolved()
+        guard let repo = repo else { statusMsg = "no repository \u{2014} run baaackaaab --init-credentials first"; return }
+        guard resticPasswordAvailable() else { statusMsg = "no encryption password in the Keychain \u{2014} run --init-credentials"; return }
+        statusMsg = "querying remote\u{2026}"; renderHome()
+        remote = ResticBackend(repository: repo).remoteStatus()
+        remoteQueried = true
+        reclaimForeground()   // the restic child may have grabbed the tty foreground
+        statusMsg = ""
+    }
+
+    /// Repo from --restic-repo, then RESTIC_REPOSITORY, then the Keychain. Loads
+    /// the encryption password into our environment as a side effect (so the
+    /// in-process restic query inherits it). Resolved at most once.
+    private func ensureRepoResolved() {
+        if repoResolved { return }
+        repoResolved = true
+        let env = ProcessInfo.processInfo.environment
+        repo = argValue("--restic-repo") ?? env["RESTIC_REPOSITORY"]
+            ?? ((try? Keychain.get(account: Credentials.repoURLAccount)) ?? nil)
+        if getenv("RESTIC_PASSWORD") == nil,
+           let pw = (try? Keychain.get(account: Credentials.repoPasswordAccount)) ?? nil {
+            setenv("RESTIC_PASSWORD", pw, 1)
+        }
+    }
+
+    private func syncArgs() -> [String] {
+        let fmt = DateFormatter()
+        fmt.locale = Locale(identifier: "en_US_POSIX")
+        fmt.dateFormat = "yyyyMMdd-HHmmss"
+        var args = ["--run-tag", "tui-\(fmt.string(from: Date()))"]
+        // Preserve a non-default config so the child backs up the same set.
+        if configPath.path != BackupSet.defaultPath().path { args += ["--config", configPath.path] }
+        return args
+    }
+
+    private func selfPath() -> String {
+        if let p = Bundle.main.executablePath { return p }
+        let arg0 = CommandLine.arguments.first ?? "baaackaaab"
+        return arg0.hasPrefix("/") ? arg0 : FileManager.default.currentDirectoryPath + "/" + arg0
+    }
+
+    /// Reclaim the tty's foreground process group; a spawned child can leave us in
+    /// the background, where the next read would raise SIGTTIN and stop us. SIGTTOU
+    /// is ignored because tcsetpgrp from the background would itself stop us.
+    private func reclaimForeground() {
+        guard isatty(STDIN_FILENO) != 0 else { return }
+        signal(SIGTTOU, SIG_IGN)
+        _ = tcsetpgrp(STDIN_FILENO, getpgrp())
+    }
+
+    /// "2026-06-24T17:30:32.1+02:00" -> "2026-06-24 17:30".
+    private func shortTime(_ iso: String) -> String {
+        String(iso.prefix(16)).replacingOccurrences(of: "T", with: " ")
     }
 
     // MARK: - Directory listing (cached per cwd)

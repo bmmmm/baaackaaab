@@ -294,20 +294,22 @@ let configPath: URL = argValue("--config").map {
     URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath)
 } ?? BackupSet.defaultPath()
 
-// Bare `baaackaaab` on a real terminal → the interactive command center (the
-// home that ties set-editing, sync, and the remote dashboard together). The
+// Bare `baaackaaab` on a real terminal → the interactive command center: the
+// full-screen TUI opens on its home dashboard (backup set + remote status) and
+// ties set-editing, sync, and the remote dashboard together in one raw loop. The
 // explicit --center flag forces it (e.g. with a custom --config).
 if bareInteractive || CommandLine.arguments.contains("--center") {
     guard isatty(STDIN_FILENO) != 0, isatty(STDOUT_FILENO) != 0 else {
         Console.error("the command center needs an interactive terminal — run it directly in Terminal.app")
         exit(1)
     }
-    CommandCenter(configPath: configPath).run()
+    ConfigTUI(configPath: configPath).run(home: true)
     exit(0)
 }
 
-// Interactive editor for the backup set. Needs a real terminal (the raw-mode
-// TUI can't run in a pipe or a launchd log); guard before touching termios.
+// Interactive editor for the backup set, jumping straight past the home screen.
+// Needs a real terminal (the raw-mode TUI can't run in a pipe or a launchd log);
+// guard before touching termios.
 if CommandLine.arguments.contains("--configure") {
     guard isatty(STDIN_FILENO) != 0, isatty(STDOUT_FILENO) != 0 else {
         Console.error("--configure needs an interactive terminal — run it directly in Terminal.app")
