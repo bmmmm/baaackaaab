@@ -54,6 +54,50 @@ final class ResticBackend {
         if code != 0 { throw ResticError.failed(command: "backup", code: code) }
     }
 
+    /// Best-effort current repo data size in bytes, via
+    /// `restic stats --mode raw-data --json`. This is the deduplicated blob
+    /// size — a close, slightly low approximation of what the server's
+    /// `--max-size` quota counts (which also includes index/metadata overhead).
+    /// Returns nil if stats can't be read (e.g. a fresh repo with no snapshots,
+    /// or the query failed), so the caller treats usage as unknown rather than
+    /// failing the run over a missing gauge reading.
+    func repoSizeBytes() -> Int? {
+        // `--quiet` suppresses restic's progress counter, which it otherwise
+        // prints on stdout *before* the JSON (e.g. "[0:00] 100.00% 1/1 ...").
+        guard let out = try? runCapturing(["-r", repository, "stats", "--quiet", "--mode", "raw-data", "--json"])
+        else { return nil }
+        // Belt and braces: even if a stray line slips onto stdout, the JSON is a
+        // single object on its own line — take the last line that starts with
+        // '{' rather than parsing the whole blob.
+        let lines = out.split(separator: "\n", omittingEmptySubsequences: true)
+        guard let jsonLine = lines.last(where: { $0.trimmingCharacters(in: .whitespaces).hasPrefix("{") }),
+              let data = jsonLine.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let size = (obj["total_size"] as? NSNumber)?.intValue
+        else { return nil }
+        return size
+    }
+
+    /// Run restic capturing stdout as a string (stderr discarded). Throws on a
+    /// non-zero exit. Used for the small JSON-emitting `stats` query, not for
+    /// streaming commands. Reads the pipe to EOF before waiting so a large
+    /// payload can't deadlock on a full pipe buffer.
+    private func runCapturing(_ args: [String]) throws -> String {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        proc.arguments = [executable] + args
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = FileHandle.nullDevice
+        do { try proc.run() } catch { throw ResticError.notFound }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        proc.waitUntilExit()
+        if proc.terminationStatus != 0 {
+            throw ResticError.failed(command: "stats", code: proc.terminationStatus)
+        }
+        return String(data: data, encoding: .utf8) ?? ""
+    }
+
     /// Run restic and return its exit code. With `quiet`, output is discarded
     /// (used for the existence probe); otherwise it is inherited so the user
     /// sees live progress. The child inherits our environment, so

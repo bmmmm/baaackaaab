@@ -63,6 +63,12 @@ let photoAlbum = argValue("--photo-album")
 let stagingURL = URL(fileURLWithPath: argValue("--staging", default: "./tmp/staging")!, isDirectory: true)
 let photoBatchBytes = argValue("--photo-batch-bytes").flatMap { Int($0) } ?? 3_000_000_000
 let host = argValue("--host") ?? ProcessInfo.processInfo.hostName
+// Optional remote-quota pre-flight. The rest-server's `--max-size` is a hard
+// server-side stop; this is a soft client-side gauge that warns BEFORE a run
+// when the repo is filling up, so the cap can be raised in time. We can't query
+// the server's configured quota, so the operator passes it in here.
+let repoQuotaBytes = argValue("--repo-quota-bytes").flatMap { Int($0) }
+let quotaWarnFraction = argValue("--quota-warn-fraction").flatMap { Double($0) } ?? 0.85
 
 guard let repo = argValue("--restic-repo") ?? ProcessInfo.processInfo.environment["RESTIC_REPOSITORY"] else {
     FileHandle.standardError.write("ERROR: set --restic-repo or the RESTIC_REPOSITORY env var\n".data(using: .utf8)!)
@@ -83,6 +89,25 @@ do {
     print("run-tag:  \(runTag)")
     print("staging:  \(stagingURL.path) (scratch for photo batches only)")
     try restic.ensureInitialized()
+
+    // 0) Remote-quota pre-flight (soft gauge). Reads the current repo size and,
+    //    if it is past the warn fraction of the operator-supplied quota, prints
+    //    an actionable warning. The server still hard-stops at 100%; this just
+    //    gives lead time to raise --max-size before a run gets rejected.
+    if let quota = repoQuotaBytes, quota > 0 {
+        if let used = restic.repoSizeBytes() {
+            let frac = Double(used) / Double(quota)
+            let pct = Int((frac * 100).rounded())
+            let usedGB = String(format: "%.2f", Double(used) / 1_000_000_000)
+            let quotaGB = String(format: "%.2f", Double(quota) / 1_000_000_000)
+            print("[quota] repo \(usedGB) GB / \(quotaGB) GB (\(pct)%)")
+            if frac >= quotaWarnFraction {
+                print("[quota] WARN: repo is at \(pct)% of the configured quota. Raise --max-size on the rest-server (edit the stack's docker-compose.yml, redeploy — no data migration) before it fills; the server hard-stops new backups at 100%.")
+            }
+        } else {
+            print("[quota] repo size unavailable (fresh repo or stats failed) — skipping quota gauge")
+        }
+    }
 
     // 1) iCloud Drive — materialize + verify in place, then restic reads the
     //    source tree directly (no full-size staging copy). Strict: a stub that
