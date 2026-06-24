@@ -36,6 +36,7 @@ func printUsage() {
     Console.banner("baaackaaab", tagline: "one-way iCloud → restic backup")
     Console.section("Usage")
     Console.note("baaackaaab --restic-repo <repo> [--drive-folder <dir> ...] [--photo-album <name>] [options]")
+    Console.note("Run `baaackaaab` with no arguments in a terminal to open the interactive command center (set + remote dashboard, edit, sync). --center forces it (e.g. with a custom --config).")
 
     Console.section("Setup (first run)")
     Console.info([
@@ -241,10 +242,15 @@ func manageBackupSet(configPath: URL) {
 // block-buffered, scrambling the order entirely).
 setvbuf(stdout, nil, _IOLBF, 0)
 
-// Navigation: usage on --help/-h, and on a bare invocation with no arguments
-// (arguments[0] is the program path, so count == 1 means "no args").
+// Navigation: usage on --help/-h. A bare invocation (no args) drops into the
+// interactive command center when on a real terminal, but still prints usage
+// when piped / under launchd (no TTY) — the launchd timer always passes
+// --run-tag, so it never lands here. The center launch itself happens below,
+// after the config path is resolved.
+let bareInteractive = CommandLine.arguments.count == 1
+    && isatty(STDIN_FILENO) != 0 && isatty(STDOUT_FILENO) != 0
 if CommandLine.arguments.contains("--help") || CommandLine.arguments.contains("-h")
-    || CommandLine.arguments.count == 1 {
+    || (CommandLine.arguments.count == 1 && !bareInteractive) {
     printUsage()
     exit(0)
 }
@@ -287,6 +293,18 @@ if CommandLine.arguments.contains("--check") {
 let configPath: URL = argValue("--config").map {
     URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath)
 } ?? BackupSet.defaultPath()
+
+// Bare `baaackaaab` on a real terminal → the interactive command center (the
+// home that ties set-editing, sync, and the remote dashboard together). The
+// explicit --center flag forces it (e.g. with a custom --config).
+if bareInteractive || CommandLine.arguments.contains("--center") {
+    guard isatty(STDIN_FILENO) != 0, isatty(STDOUT_FILENO) != 0 else {
+        Console.error("the command center needs an interactive terminal — run it directly in Terminal.app")
+        exit(1)
+    }
+    CommandCenter(configPath: configPath).run()
+    exit(0)
+}
 
 // Interactive editor for the backup set. Needs a real terminal (the raw-mode
 // TUI can't run in a pipe or a launchd log); guard before touching termios.

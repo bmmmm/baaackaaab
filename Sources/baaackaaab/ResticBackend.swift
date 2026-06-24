@@ -64,7 +64,7 @@ final class ResticBackend {
     func repoSizeBytes() -> Int? {
         // `--quiet` suppresses restic's progress counter, which it otherwise
         // prints on stdout *before* the JSON (e.g. "[0:00] 100.00% 1/1 ...").
-        guard let out = try? runCapturing(["-r", repository, "stats", "--quiet", "--mode", "raw-data", "--json"])
+        guard let out = try? runCapturing(["-r", repository, "stats", "--quiet", "--mode", "raw-data", "--json"], command: "stats")
         else { return nil }
         // Belt and braces: even if a stray line slips onto stdout, the JSON is a
         // single object on its own line — take the last line that starts with
@@ -78,11 +78,57 @@ final class ResticBackend {
         return size
     }
 
+    /// A read-only snapshot of the remote, for the command-center dashboard.
+    /// Never throws — failures land in `error` so the TUI can show them inline.
+    struct RemoteStatus {
+        var reachable = false
+        var snapshotCount = 0
+        var latestTime: String?
+        var latestTags: [String] = []
+        var sizeBytes: Int?
+        var error: String?
+    }
+
+    /// Query `restic snapshots --json` (+ a size stat) for the dashboard. This is
+    /// strictly read-only — it never runs forget/prune. Reachability == the
+    /// snapshots query returned; a transport/auth failure is captured in `error`.
+    func remoteStatus() -> RemoteStatus {
+        var status = RemoteStatus()
+        do {
+            let snaps = try snapshotsJSON()
+            status.reachable = true
+            status.snapshotCount = snaps.count
+            // restic lists snapshots oldest → newest, so the last one is latest.
+            if let latest = snaps.last {
+                status.latestTime = latest["time"] as? String
+                status.latestTags = (latest["tags"] as? [String]) ?? []
+            }
+            status.sizeBytes = repoSizeBytes()
+        } catch {
+            status.error = "\(error)"
+        }
+        return status
+    }
+
+    /// Parse `restic snapshots --json` into an array of dictionaries. In --json
+    /// mode restic emits a single JSON array; we still slice from the first '['
+    /// in case a stray line precedes it.
+    private func snapshotsJSON() throws -> [[String: Any]] {
+        let out = try runCapturing(["-r", repository, "snapshots", "--json"], command: "snapshots")
+        guard let start = out.firstIndex(of: "[") else { return [] }
+        let json = String(out[start...])
+        guard let data = json.data(using: .utf8),
+              let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+        else { return [] }
+        return arr
+    }
+
     /// Run restic capturing stdout as a string (stderr discarded). Throws on a
-    /// non-zero exit. Used for the small JSON-emitting `stats` query, not for
-    /// streaming commands. Reads the pipe to EOF before waiting so a large
+    /// non-zero exit, labelled with `command` so the caller's subcommand surfaces
+    /// in the error (not a generic one). Used for the small JSON-emitting queries,
+    /// not for streaming commands. Reads the pipe to EOF before waiting so a large
     /// payload can't deadlock on a full pipe buffer.
-    private func runCapturing(_ args: [String]) throws -> String {
+    private func runCapturing(_ args: [String], command: String) throws -> String {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         proc.arguments = [executable] + args
@@ -94,7 +140,7 @@ final class ResticBackend {
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         proc.waitUntilExit()
         if proc.terminationStatus != 0 {
-            throw ResticError.failed(command: "stats", code: proc.terminationStatus)
+            throw ResticError.failed(command: command, code: proc.terminationStatus)
         }
         return String(data: data, encoding: .utf8) ?? ""
     }

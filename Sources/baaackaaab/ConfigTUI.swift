@@ -102,7 +102,7 @@ final class ConfigTUI {
 
     // MARK: - Run loop
 
-    func run() {
+    func run(embedded: Bool = false) {
         if loadFailed {
             Console.error("backup set at \(configPath.path) is unreadable — fix or delete it, then re-run --configure")
             return
@@ -127,7 +127,7 @@ final class ConfigTUI {
         }
 
         emit("\u{1B}[?25h\u{1B}[?1049l")   // show cursor + leave alternate screen
-        printExitHint()
+        if !embedded { printExitHint() }   // the command center shows its own next-step
     }
 
     // MARK: - Input handling
