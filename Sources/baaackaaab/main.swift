@@ -45,11 +45,22 @@ func printUsage() {
 
     Console.section("Sources")
     Console.info([
-        ("--drive-folder <dir>", "iCloud Drive folder to back up (repeatable)"),
-        ("--photo-album <name>", "iCloud Photos album to back up"),
+        ("--drive-folder <dir>", "iCloud Drive folder to back up (repeatable; overrides the set)"),
+        ("--photo-album <name>", "iCloud Photos album to back up (repeatable; overrides the set)"),
         ("--photo-batch-bytes <n>", "byte budget per photo batch (default 3000000000)"),
         ("--staging <dir>", "scratch dir for photo batches (default ./tmp/staging)"),
     ])
+
+    Console.section("Backup set", detail: "declarative source list — what a bare run backs up")
+    Console.info([
+        ("--list", "show the backup set and exit"),
+        ("--add-folder <dir>", "add a Drive folder to the set, then list (repeatable)"),
+        ("--remove-folder <dir>", "remove a Drive folder from the set (repeatable)"),
+        ("--add-album <name>", "add a Photos album to the set (repeatable)"),
+        ("--remove-album <name>", "remove a Photos album from the set (repeatable)"),
+        ("--config <path>", "backup-set file (default ~/.config/baaackaaab/backup-set.json)"),
+    ])
+    Console.note("A bare `baaackaaab` (no source flags) backs up the set; the launchd timer runs exactly that. Explicit --drive-folder/--photo-album override the set for ad-hoc runs.")
 
     Console.section("Restic target")
     Console.info([
@@ -157,6 +168,72 @@ func checkRemote() {
     }
 }
 
+/// Print the backup set as the aligned key/value overview. `existed` separates
+/// "no set yet" (first-run hint) from "set exists but is empty".
+func listBackupSet(_ set: BackupSet, path: URL, existed: Bool) {
+    Console.section("Backup set", detail: path.path)
+    if !existed {
+        Console.note("no backup set yet — add folders with --add-folder <dir>, albums with --add-album <name>")
+        return
+    }
+    if set.isEmpty {
+        Console.note("empty — add folders with --add-folder <dir>, albums with --add-album <name>")
+        return
+    }
+    var pairs: [(String, String)] = []
+    for f in set.driveFolders { pairs.append(("drive", f)) }
+    for a in set.photoAlbums { pairs.append(("photo", "album \"\(a)\"")) }
+    if let q = set.quotaBytes {
+        pairs.append(("quota", String(format: "%.2f GB", Double(q) / 1_000_000_000)))
+    }
+    Console.info(pairs)
+}
+
+/// Handle the backup-set management flags (--list / --add-* / --remove-*). Loads
+/// the set, applies every add/remove flag, saves only when something changed,
+/// and prints the resulting set. No network, no Keychain — pure file editing.
+func manageBackupSet(configPath: URL) {
+    Console.banner("baaackaaab", tagline: "backup set")
+    let existed = FileManager.default.fileExists(atPath: configPath.path)
+    var set: BackupSet
+    if existed {
+        do { set = try BackupSet.load(from: configPath) }
+        catch {
+            Console.error("backup set at \(configPath.path) is unreadable — fix or delete it: \(error)")
+            exit(1)
+        }
+    } else {
+        set = BackupSet()
+    }
+
+    var changed = false
+    for f in argValues("--add-folder") {
+        if set.addFolder(f) { changed = true; Console.success("added drive folder  \(f)") }
+        else { Console.note("drive folder already in set: \(f)") }
+    }
+    for f in argValues("--remove-folder") {
+        if set.removeFolder(f) { changed = true; Console.success("removed drive folder  \(f)") }
+        else { Console.note("drive folder not in set: \(f)") }
+    }
+    for a in argValues("--add-album") {
+        if set.addAlbum(a) { changed = true; Console.success("added photo album  \(a)") }
+        else { Console.note("photo album already in set: \(a)") }
+    }
+    for a in argValues("--remove-album") {
+        if set.removeAlbum(a) { changed = true; Console.success("removed photo album  \(a)") }
+        else { Console.note("photo album not in set: \(a)") }
+    }
+
+    if changed {
+        do { try set.save(to: configPath) }
+        catch {
+            Console.error("could not write backup set to \(configPath.path): \(error)")
+            exit(1)
+        }
+    }
+    listBackupSet(set, path: configPath, existed: existed || changed)
+}
+
 // Line-buffer stdout so our logs interleave in the right order with restic's
 // child-process output. Without this, our print() output buffers and surfaces
 // only after the subprocess has already written (and a file redirect would be
@@ -205,16 +282,45 @@ if CommandLine.arguments.contains("--check") {
     exit(0)
 }
 
-let driveFolders = argValues("--drive-folder")
-let photoAlbum = argValue("--photo-album")
+// Resolve the backup-set config path (override with --config, e.g. for tests).
+let configPath: URL = argValue("--config").map {
+    URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath)
+} ?? BackupSet.defaultPath()
+
+// Backup-set management (--list / --add-* / --remove-*): edit the set and exit.
+if ["--list", "--add-folder", "--remove-folder", "--add-album", "--remove-album"]
+    .contains(where: CommandLine.arguments.contains) {
+    manageBackupSet(configPath: configPath)
+    exit(0)
+}
+
+// Sources: explicit --drive-folder/--photo-album flags take precedence (ad-hoc /
+// test runs). With NO source flag at all, fall back to the declarative backup
+// set — so the launchd timer runs `baaackaaab` with no arguments.
+var driveFolders = argValues("--drive-folder")
+var photoAlbums = argValues("--photo-album")
+var configQuotaBytes: Int? = nil
+if driveFolders.isEmpty && photoAlbums.isEmpty
+    && FileManager.default.fileExists(atPath: configPath.path) {
+    do {
+        let set = try BackupSet.load(from: configPath)
+        driveFolders = set.driveFolders
+        photoAlbums = set.photoAlbums
+        configQuotaBytes = set.quotaBytes
+    } catch {
+        Console.error("backup set at \(configPath.path) is unreadable — fix or delete it: \(error)")
+        exit(1)
+    }
+}
+
 let stagingURL = URL(fileURLWithPath: argValue("--staging", default: "./tmp/staging")!, isDirectory: true)
 let photoBatchBytes = argValue("--photo-batch-bytes").flatMap { Int($0) } ?? 3_000_000_000
 let host = argValue("--host") ?? ProcessInfo.processInfo.hostName
 // Optional remote-quota pre-flight. The rest-server's `--max-size` is a hard
 // server-side stop; this is a soft client-side gauge that warns BEFORE a run
 // when the repo is filling up, so the cap can be raised in time. We can't query
-// the server's configured quota, so the operator passes it in here.
-let repoQuotaBytes = argValue("--repo-quota-bytes").flatMap { Int($0) }
+// the server's configured quota, so it comes from --repo-quota-bytes or the set.
+let repoQuotaBytes = argValue("--repo-quota-bytes").flatMap { Int($0) } ?? configQuotaBytes
 let quotaWarnFraction = argValue("--quota-warn-fraction").flatMap { Double($0) } ?? 0.85
 
 let repo = resolveRepoOrExit()
@@ -275,18 +381,30 @@ do {
 
     // 2) iCloud Photos — export in byte-budgeted batches; each batch is backed
     //    up and then deleted, so peak extra disk is ~one batch, not 27 GB.
-    if let photoAlbum {
-        Console.section("iCloud Photos", detail: "album '\(photoAlbum)' (batch budget \(photoBatchBytes) bytes)")
-        try PhotosAcquirer().acquireBatched(
-            albumTitle: photoAlbum,
-            byteBudget: photoBatchBytes,
-            into: staging
-        ) { batchDir, idx in
-            try restic.backup(paths: [batchDir], tags: [runTag, "photos", "batch-\(idx)"], host: host)
-        }
-    } else {
+    if photoAlbums.isEmpty {
         Console.section("iCloud Photos")
-        Console.note("no --photo-album given, skipping Photos")
+        Console.note("no photo album configured, skipping Photos")
+    } else {
+        // Batch indices run globally across albums so each photo snapshot in a
+        // run gets a distinct batch-N tag, even with more than one album.
+        var photoBatchBase = 0
+        for album in photoAlbums {
+            Console.section("iCloud Photos", detail: "album '\(album)' (batch budget \(photoBatchBytes) bytes)")
+            var lastIdx = 0
+            try PhotosAcquirer().acquireBatched(
+                albumTitle: album,
+                byteBudget: photoBatchBytes,
+                into: staging
+            ) { batchDir, idx in
+                lastIdx = idx
+                try restic.backup(
+                    paths: [batchDir],
+                    tags: [runTag, "photos", "batch-\(photoBatchBase + idx)"],
+                    host: host
+                )
+            }
+            photoBatchBase += lastIdx + 1
+        }
     }
 
     try staging.writeManifest()
