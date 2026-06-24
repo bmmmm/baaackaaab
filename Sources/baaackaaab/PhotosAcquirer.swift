@@ -1,6 +1,12 @@
 import Foundation
 import Photos
 
+/// One user album, as shown in the configure picker.
+struct PhotoAlbumInfo {
+    let title: String
+    let count: Int
+}
+
 enum PhotosError: Error, CustomStringConvertible {
     case notAuthorized(String)
     case albumNotFound(String)
@@ -143,6 +149,24 @@ final class PhotosAcquirer {
             Console.detail("resource type=\(resource.type.rawValue) '\(resource.originalFilename)' -> \(size) bytes verified=\(ok)\(errSuffix)")
         }
         return bytes
+    }
+
+    /// List the user's albums (title + asset count) for the configure picker.
+    /// Triggers the Photos authorization prompt on first use — listing needs the
+    /// same read grant the backup does (PhotoKit has no read-only access level).
+    func listAlbums() throws -> [PhotoAlbumInfo] {
+        let status = requestAuthorization()
+        guard status == .authorized || status == .limited else {
+            throw PhotosError.notAuthorized(describe(status))
+        }
+        var out: [PhotoAlbumInfo] = []
+        let albums = PHAssetCollection.fetchAssetCollections(with: .album, subtype: .any, options: nil)
+        albums.enumerateObjects { collection, _, _ in
+            guard let title = collection.localizedTitle, !title.isEmpty else { return }
+            let count = PHAsset.fetchAssets(in: collection, options: nil).count
+            out.append(PhotoAlbumInfo(title: title, count: count))
+        }
+        return out.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
     }
 
     private func requestAuthorization() -> PHAuthorizationStatus {

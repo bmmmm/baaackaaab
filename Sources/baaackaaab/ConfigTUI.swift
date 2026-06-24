@@ -12,7 +12,9 @@ import Darwin
 // Pure Foundation + termios — no curses, no dependency. One screen:
 //   browse  — walk the directory tree, toggle folders in/out of the set
 //   review  — a panel that toggles in (v) directly under the folder list,
-//             showing everything selected; remove entries, add an album
+//             showing everything selected; remove entries
+//   albums  — a Photos album picker (a) that lists your iCloud albums with
+//             counts so you toggle them like folders, instead of typing names
 //
 // Needs a real TTY (main.swift guards that). Off a terminal it refuses to run.
 
@@ -69,10 +71,15 @@ final class ConfigTUI {
     // The review list is a panel that toggles in under the folder browser
     // (v). When shown it takes input focus; the folder list stays visible above.
     private var showReview = false
+    // The album picker (a) takes over the content area with the user's Photos
+    // albums. It's loaded lazily on first open (triggers the Photos prompt).
+    private var pickAlbums = false
+    private var albumChoices: [PhotoAlbumInfo] = []
     private var cwd: URL
 
     private var browseCursor = 0, browseTop = 0
     private var reviewCursor = 0, reviewTop = 0
+    private var albumCursor = 0, albumTop = 0
     private var showHidden = false
     private var dirty = false
     private var statusMsg = ""
@@ -110,7 +117,10 @@ final class ConfigTUI {
             render()
             let key = readKey()
             statusMsg = ""
-            let keepGoing = showReview ? handleReview(key) : handleBrowse(key)
+            let keepGoing: Bool
+            if pickAlbums { keepGoing = handleAlbumPicker(key) }
+            else if showReview { keepGoing = handleReview(key) }
+            else { keepGoing = handleBrowse(key) }
             if !keepGoing { break loop }
         }
 
@@ -137,9 +147,11 @@ final class ConfigTUI {
         case .space:
             if browseCursor < rows.count, case .dir(let url) = rows[browseCursor] { toggle(url) }
         case .char("c"): toggle(cwd)
+        case .char("a"): openAlbumPicker()
         case .char("v"), .tab: showReview = true; reviewCursor = 0; reviewTop = 0
         case .char("."): showHidden.toggle(); invalidate(); browseCursor = 0; browseTop = 0
         case .char("g"): jumpICloud()
+        case .char("~"): jumpHome()
         case .char("s"): save()
         case .char("q"), .esc, .ctrlC: if confirmQuit() { return false }
         case .eof: return false
@@ -161,11 +173,7 @@ final class ConfigTUI {
                 }
                 reviewCursor = max(0, min(reviewCursor, setRows().count - 1))
             }
-        case .char("a"):
-            if let name = promptLine("add album: ") {
-                if set.addAlbum(name) { dirty = true; statusMsg = "added album \(name)" }
-                else { statusMsg = "album already in set" }
-            }
+        case .char("a"): openAlbumPicker()
         // v/esc/left close the panel and hand focus back to the folder browser;
         // the whole editor only quits on q / Ctrl-C.
         case .char("v"), .tab, .esc, .left, .char("h"): showReview = false
@@ -175,6 +183,48 @@ final class ConfigTUI {
         default: break
         }
         return true
+    }
+
+    private func handleAlbumPicker(_ key: Key) -> Bool {
+        switch key {
+        case .up, .char("k"): albumCursor = max(0, albumCursor - 1)
+        case .down, .char("j"): albumCursor = min(max(0, albumChoices.count - 1), albumCursor + 1)
+        case .space, .enter, .right:
+            if albumCursor < albumChoices.count {
+                let title = albumChoices[albumCursor].title
+                if set.photoAlbums.contains(title) {
+                    set.photoAlbums.removeAll { $0 == title }; dirty = true; statusMsg = "removed album \(title)"
+                } else {
+                    _ = set.addAlbum(title); dirty = true; statusMsg = "added album \(title)"
+                }
+            }
+        // a/esc/left hand focus back to the folder browser; q / Ctrl-C still quits.
+        case .char("a"), .tab, .esc, .left, .char("h"): pickAlbums = false
+        case .char("s"): save()
+        case .char("q"), .ctrlC: if confirmQuit() { return false }
+        case .eof: return false
+        default: break
+        }
+        return true
+    }
+
+    /// Load the user's Photos albums and switch to the picker. The PhotoKit
+    /// fetch blocks (and may trigger the authorization prompt), so we paint a
+    /// "loading" frame first and report a denied grant as an actionable status.
+    private func openAlbumPicker() {
+        statusMsg = "loading Photos albums\u{2026}"
+        render()
+        do {
+            albumChoices = try PhotosAcquirer().listAlbums()
+        } catch {
+            statusMsg = "\(error)"
+            return
+        }
+        guard !albumChoices.isEmpty else {
+            statusMsg = "no Photos albums found — create one in Photos.app"
+            return
+        }
+        pickAlbums = true; albumCursor = 0; albumTop = 0; statusMsg = ""
     }
 
     // MARK: - Navigation
@@ -196,6 +246,10 @@ final class ConfigTUI {
         } else {
             statusMsg = "iCloud Drive folder not found"
         }
+    }
+
+    private func jumpHome() {
+        cwd = home; invalidate(); browseCursor = 0; browseTop = 0
     }
 
     // MARK: - Selection
@@ -320,26 +374,74 @@ final class ConfigTUI {
         let (rows, cols) = terminalSize()
         var lines: [String] = []
         lines.append(bold(fit("baaackaaab — configure backup set", cols)))
-        lines.append(cyan(fit("dir: " + tildePath(of: cwd), cols)))
+        let location = pickAlbums ? "source: iCloud Photos" : "dir: " + tildePath(of: cwd)
+        lines.append(cyan(fit(location, cols)))
         lines.append("")
 
-        if showReview {
-            let contentH = rows - 7   // folder + divider(1) + review, between header(3)/footer(3)
+        // The footer wraps the shortcut line across as many rows as it needs, so
+        // no key is hidden behind an ellipsis. Content fills whatever is left.
+        let helpLines = wrapHelp(helpLine(), cols)
+        let footerH = 2 + helpLines.count        // blank + status + help(N)
+        let contentH = max(1, rows - 3 - footerH)  // minus header(3)
+
+        if pickAlbums {
+            appendAlbumRows(&lines, height: contentH, cols: cols)
+        } else if showReview {
             let setCount = setRows().count
             var reviewH = min(max(setCount, 3), max(1, contentH / 3))
-            reviewH = max(1, min(reviewH, contentH - 1))
-            let folderH = max(1, contentH - reviewH)
+            reviewH = max(1, min(reviewH, max(1, contentH - 2)))   // leave folder + divider
+            let folderH = max(1, contentH - reviewH - 1)           // -1 for the divider
             appendFolderRows(&lines, height: folderH, cols: cols, focused: false)
-            lines.append(divider("selected — v/esc back \u{2022} space remove \u{2022} a add album ", cols))
+            lines.append(divider("selected — space remove \u{2022} v/esc back ", cols))
             appendReviewRows(&lines, height: reviewH, cols: cols, focused: true)
         } else {
-            appendFolderRows(&lines, height: max(1, rows - 6), cols: cols, focused: true)
+            appendFolderRows(&lines, height: contentH, cols: cols, focused: true)
         }
 
         lines.append("")
         lines.append(dim(fit(statusLine(), cols)))
-        lines.append(dim(fit(helpLine(), cols)))
+        for hl in helpLines { lines.append(dim(fit(hl, cols))) }
         draw(lines)
+    }
+
+    private func appendAlbumRows(_ lines: inout [String], height: Int, cols: Int) {
+        clamp(&albumCursor, albumChoices.count)
+        let listH = max(1, height - 1)
+        adjustTop(&albumTop, cursor: albumCursor, height: listH, count: albumChoices.count)
+        lines.append(dim(fit("iCloud Photos albums — space toggle \u{2022} a/esc back", cols)))
+        for r in 0..<listH {
+            let idx = albumTop + r
+            if idx < albumChoices.count {
+                lines.append(renderAlbumRow(albumChoices[idx], cursor: idx == albumCursor, cols: cols))
+            } else {
+                lines.append("")
+            }
+        }
+    }
+
+    private func renderAlbumRow(_ a: PhotoAlbumInfo, cursor: Bool, cols: Int) -> String {
+        let box = set.photoAlbums.contains(a.title) ? "[x] " : "[ ] "
+        var plain = fit(box + a.title + "  (\(a.count))", cols)
+        if cursor {
+            plain = plain.padding(toLength: cols, withPad: " ", startingAt: 0)
+            return rev(plain)
+        }
+        return set.photoAlbums.contains(a.title) ? green(plain) : plain
+    }
+
+    /// Break the shortcut line on its " • " separators, packing as many groups
+    /// per row as fit `cols`. Groups stay intact — we never split mid-shortcut.
+    private func wrapHelp(_ s: String, _ cols: Int) -> [String] {
+        let sep = " \u{2022} "
+        var lines: [String] = []
+        var cur = ""
+        for part in s.components(separatedBy: sep) {
+            if cur.isEmpty { cur = part }
+            else if (cur + sep + part).count <= cols { cur += sep + part }
+            else { lines.append(cur); cur = part }
+        }
+        if !cur.isEmpty { lines.append(cur) }
+        return lines.isEmpty ? [""] : lines
     }
 
     private func appendFolderRows(_ lines: inout [String], height: Int, cols: Int, focused: Bool) {
@@ -426,10 +528,13 @@ final class ConfigTUI {
     }
 
     private func helpLine() -> String {
-        if showReview {
-            return "up/dn move \u{2022} space remove \u{2022} a add album \u{2022} v/esc back \u{2022} s save \u{2022} q quit"
+        if pickAlbums {
+            return "up/dn move \u{2022} space toggle \u{2022} a/esc back \u{2022} s save \u{2022} q quit"
         }
-        return "up/dn move \u{2022} right open \u{2022} left up \u{2022} space pick \u{2022} c pick-dir \u{2022} v review \u{2022} . hidden \u{2022} g iCloud \u{2022} s save \u{2022} q quit"
+        if showReview {
+            return "up/dn move \u{2022} space remove \u{2022} a albums \u{2022} v/esc back \u{2022} s save \u{2022} q quit"
+        }
+        return "up/dn move \u{2022} right open \u{2022} left/\u{232B} back \u{2022} space pick \u{2022} c pick-dir \u{2022} a albums \u{2022} v review \u{2022} . hidden \u{2022} g iCloud \u{2022} ~ home \u{2022} s save \u{2022} q quit"
     }
 
     // MARK: - Terminal primitives
@@ -454,20 +559,6 @@ final class ConfigTUI {
         let head = "\u{2500}\u{2500} " + label
         if head.count >= cols { return dim(String(head.prefix(cols))) }
         return dim(head + String(repeating: "\u{2500}", count: cols - head.count))
-    }
-
-    /// Drop to cooked mode for a single line of input (e.g. an album name),
-    /// then restore raw mode. readLine echoes naturally while cooked.
-    private func promptLine(_ label: String) -> String? {
-        let (rows, cols) = terminalSize()
-        term.restore()
-        emit("\u{1B}[?25h\u{1B}[\(rows);1H\u{1B}[2K" + fit(label, cols))
-        let line = readLine(strippingNewline: true)
-        term.enable()
-        emit("\u{1B}[?25l")
-        guard let line = line else { return nil }
-        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
     }
 
     // Pending input bytes. read(2) can hand back a whole burst (a held key, a

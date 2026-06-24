@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      Embedded into the executable's __TEXT,__info_plist section via a linker
+      -sectcreate flag (see Package.swift). A command-line tool that touches a
+      TCC-protected resource (Photos) without a usage description is terminated
+      by the OS, so this string is mandatory for both the configure album picker
+      and the real photo backup. macOS shows it in the access prompt.
+    -->
+    <key>CFBundleIdentifier</key>
+    <string>io.baaackaaab.cli</string>
+    <key>CFBundleName</key>
+    <string>baaackaaab</string>
+    <key>NSPhotoLibraryUsageDescription</key>
+    <string>baaackaaab reads the iCloud Photos albums you select so it can back up their originals (read-only) to your restic repository.</string>
+</dict>
+</plist>
