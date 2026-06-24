@@ -1,0 +1,73 @@
+import Foundation
+
+enum ResticError: Error, CustomStringConvertible {
+    case notFound
+    case failed(command: String, code: Int32)
+
+    var description: String {
+        switch self {
+        case .notFound:
+            return "restic executable not found in PATH — install it (`brew install restic`) and re-run"
+        case .failed(let cmd, let code):
+            return "restic \(cmd) exited with code \(code) — see restic output above"
+        }
+    }
+}
+
+/// Thin wrapper around the `restic` CLI.
+///
+/// The Mac stays strictly write-only towards the store: this only ever runs
+/// `init`/`backup`/`cat config`, never `forget`/`prune` (those run server-side
+/// on the append-only host). The repo password is read from the environment
+/// (`RESTIC_PASSWORD`) and is NEVER passed as an argument — arguments are
+/// visible to other processes via `ps`. The repository location is not secret
+/// and is passed with `-r`.
+final class ResticBackend {
+    let repository: String
+    private let executable: String
+
+    init(repository: String, executable: String = "restic") {
+        self.repository = repository
+        self.executable = executable
+    }
+
+    /// Initialize the repo if it does not exist yet. Uses repository format v2
+    /// so zstd compression is available (helps text/PDF; photos won't shrink).
+    func ensureInitialized() throws {
+        if try run(["-r", repository, "cat", "config"], quiet: true) == 0 { return }
+        print("[restic] initializing repository (format v2) at \(repository)")
+        let code = try run(["-r", repository, "init", "--repository-version", "2"])
+        if code != 0 { throw ResticError.failed(command: "init", code: code) }
+    }
+
+    /// Back up the given paths into a single snapshot. restic output streams
+    /// live to the terminal so progress is visible.
+    func backup(paths: [URL], tags: [String], host: String?) throws {
+        var args = ["-r", repository, "backup", "--compression", "auto"]
+        if let host { args += ["--host", host] }
+        for tag in tags { args += ["--tag", tag] }
+        args += paths.map { $0.path }
+
+        let names = paths.map { $0.lastPathComponent }.joined(separator: ", ")
+        print("[restic] backup [\(names)] tags=\(tags.joined(separator: ","))")
+        let code = try run(args)
+        if code != 0 { throw ResticError.failed(command: "backup", code: code) }
+    }
+
+    /// Run restic and return its exit code. With `quiet`, output is discarded
+    /// (used for the existence probe); otherwise it is inherited so the user
+    /// sees live progress. The child inherits our environment, so
+    /// `RESTIC_PASSWORD` flows through without ever touching argv.
+    private func run(_ args: [String], quiet: Bool = false) throws -> Int32 {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        proc.arguments = [executable] + args
+        if quiet {
+            proc.standardOutput = FileHandle.nullDevice
+            proc.standardError = FileHandle.nullDevice
+        }
+        do { try proc.run() } catch { throw ResticError.notFound }
+        proc.waitUntilExit()
+        return proc.terminationStatus
+    }
+}
