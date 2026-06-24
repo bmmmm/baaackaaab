@@ -122,8 +122,13 @@ git config --local --unset core.sshCommand 2>/dev/null || true
 
 NEW_URL="https://${FORGEJO_HOST}/${OWNER}/${REPO_FROM_URL}.git"
 if [[ "$CURRENT_URL" != "$NEW_URL" ]]; then
-  git remote set-url origin "$NEW_URL"
-  echo "  remote: $CURRENT_URL"
+  # `set-url` requires an existing remote; a freshly `git init`ed repo has none.
+  if git remote get-url origin >/dev/null 2>&1; then
+    git remote set-url origin "$NEW_URL"
+  else
+    git remote add origin "$NEW_URL"
+  fi
+  echo "  remote: ${CURRENT_URL:-<none>}"
   echo "       → $NEW_URL"
 fi
 
