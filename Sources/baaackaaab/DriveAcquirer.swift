@@ -107,7 +107,7 @@ final class DriveAcquirer {
             guard isFile else { continue }
 
             let rel = relativePath(of: fileURL, base: folder)
-            print("[drive] \(rel) — \(downloadStatusDescription(fileURL)) dataless=\(isDataless(fileURL))")
+            Console.step("\(rel) — \(downloadStatusDescription(fileURL)) dataless=\(isDataless(fileURL))")
 
             try ensureMaterialized(fileURL, timeout: 120)
             if isDataless(fileURL) {
@@ -132,7 +132,7 @@ final class DriveAcquirer {
                 verified: ok,
                 note: ok ? nil : "size mismatch src=\(srcSize) dst=\(dstSize)"
             ))
-            print("[drive]   -> staged \(dstSize) bytes verified=\(ok)")
+            Console.detail("staged \(dstSize) bytes verified=\(ok)")
             if !ok { throw DriveError.verifyFailed(rel) }
         }
     }
@@ -173,7 +173,7 @@ final class DriveAcquirer {
             ))
             count += 1
         }
-        print("[drive] materialized + verified \(count) file(s) under \(folder.lastPathComponent) — restic reads in place")
+        Console.success("materialized + verified \(count) file(s) under \(folder.lastPathComponent) — restic reads in place")
     }
 
     private func isUbiquitous(_ url: URL) -> Bool {
@@ -184,10 +184,10 @@ final class DriveAcquirer {
     /// `brctl evict <file>`), prove we can turn it back into real, readable bytes.
     /// This is the #1 data-loss guard: never back up a 0-byte placeholder.
     func materializeTest(_ url: URL) throws {
-        print("[materialize-test] target: \(url.path)")
-        print("[materialize-test] start: \(downloadStatusDescription(url)) dataless=\(isDataless(url))")
+        Console.section("materialize-test", detail: url.path)
+        Console.step("start: \(downloadStatusDescription(url)) dataless=\(isDataless(url))")
         guard isDataless(url) else {
-            print("[materialize-test] SKIP: not a dataless stub right now. Create one first (`brctl evict <file>`), then re-run.")
+            Console.note("SKIP: not a dataless stub right now. Create one first (`brctl evict <file>`), then re-run.")
             return
         }
 
@@ -202,10 +202,12 @@ final class DriveAcquirer {
             firstBytesReadable = !fh.readData(ofLength: 16).isEmpty
             try? fh.close()
         }
-        print("[materialize-test] after: dataless=\(nowDataless) size=\(size) firstBytesReadable=\(firstBytesReadable) (\(String(format: "%.1f", secs))s)")
-        print(!nowDataless && size > 0 && firstBytesReadable
-            ? "[materialize-test] PASS: dataless stub -> materialized -> real bytes readable"
-            : "[materialize-test] FAIL: stub did not fully materialize into readable bytes")
+        Console.detail("after: dataless=\(nowDataless) size=\(size) firstBytesReadable=\(firstBytesReadable) (\(String(format: "%.1f", secs))s)")
+        if !nowDataless && size > 0 && firstBytesReadable {
+            Console.success("PASS: dataless stub -> materialized -> real bytes readable")
+        } else {
+            Console.failure("FAIL: stub did not fully materialize into readable bytes")
+        }
     }
 
     /// Proves the full round-trip on a SINGLE file using only public APIs:
@@ -213,15 +215,15 @@ final class DriveAcquirer {
     /// dataless stub -> re-materialize -> verify. This exercises op #3 (evict)
     /// and the stub-detection that protects us from backing up 0-byte placeholders.
     func evictRoundTripTest(_ url: URL) throws {
-        print("[evict-test] target: \(url.path)")
-        print("[evict-test] isUbiquitousItem=\(isUbiquitous(url)) \(downloadStatusDescription(url)) dataless=\(isDataless(url))")
+        Console.section("evict-test", detail: url.path)
+        Console.step("isUbiquitousItem=\(isUbiquitous(url)) \(downloadStatusDescription(url)) dataless=\(isDataless(url))")
 
         // Best-effort materialize first, so there is something to evict.
         do {
             try ensureMaterialized(url, timeout: 120)
-            print("[evict-test] ensured materialized")
+            Console.detail("ensured materialized")
         } catch {
-            print("[evict-test] materialize note: \(error)")
+            Console.detail("materialize note: \(error)")
         }
 
         // Try the public evict API. Modern iCloud Drive is FileProvider-backed,
@@ -229,25 +231,27 @@ final class DriveAcquirer {
         // is cloud-managed — that outcome is itself the signal we want.
         do {
             try fm.evictUbiquitousItem(at: url)
-            print("[evict-test] evictUbiquitousItem: OK")
+            Console.detail("evictUbiquitousItem: OK")
         } catch {
-            print("[evict-test] evictUbiquitousItem THREW: \(error)")
+            Console.detail("evictUbiquitousItem THREW: \(error)")
         }
 
         let deadline = Date().addingTimeInterval(30)
         while !isDataless(url) && Date() < deadline { Thread.sleep(forTimeInterval: 0.5) }
         let becameDataless = isDataless(url)
-        print("[evict-test] after evict attempt: dataless=\(becameDataless) \(downloadStatusDescription(url))")
+        Console.detail("after evict attempt: dataless=\(becameDataless) \(downloadStatusDescription(url))")
 
         if becameDataless {
-            do { try ensureMaterialized(url, timeout: 120) } catch { print("[evict-test] re-materialize note: \(error)") }
+            do { try ensureMaterialized(url, timeout: 120) } catch { Console.detail("re-materialize note: \(error)") }
             let stillDataless = isDataless(url)
-            print("[evict-test] after re-download: dataless=\(stillDataless)")
-            print(stillDataless
-                ? "[evict-test] FAIL: still dataless after re-download attempt"
-                : "[evict-test] PASS: evict -> dataless detected -> re-materialized")
+            Console.detail("after re-download: dataless=\(stillDataless)")
+            if stillDataless {
+                Console.failure("FAIL: still dataless after re-download attempt")
+            } else {
+                Console.success("PASS: evict -> dataless detected -> re-materialized")
+            }
         } else {
-            print("[evict-test] INCONCLUSIVE: file never became a dataless stub (evict is a no-op under FileProvider, or 'Optimize Mac Storage' is off so iCloud keeps it pinned). This means we likely need NSFileProviderManager, not the legacy ubiquity API.")
+            Console.warn("INCONCLUSIVE: file never became a dataless stub (evict is a no-op under FileProvider, or 'Optimize Mac Storage' is off so iCloud keeps it pinned). This means we likely need NSFileProviderManager, not the legacy ubiquity API.")
         }
     }
 

@@ -35,7 +35,7 @@ final class ResticBackend {
     /// so zstd compression is available (helps text/PDF; photos won't shrink).
     func ensureInitialized() throws {
         if try run(["-r", repository, "cat", "config"], quiet: true) == 0 { return }
-        print("[restic] initializing repository (format v2) at \(repository)")
+        Console.step("restic: initializing repository (format v2) at \(repository)")
         let code = try run(["-r", repository, "init", "--repository-version", "2"])
         if code != 0 { throw ResticError.failed(command: "init", code: code) }
     }
@@ -49,7 +49,7 @@ final class ResticBackend {
         args += paths.map { $0.path }
 
         let names = paths.map { $0.lastPathComponent }.joined(separator: ", ")
-        print("[restic] backup [\(names)] tags=\(tags.joined(separator: ","))")
+        Console.step("restic: backup [\(names)] tags=\(tags.joined(separator: ","))")
         let code = try run(args)
         if code != 0 { throw ResticError.failed(command: "backup", code: code) }
     }

@@ -38,7 +38,7 @@ final class PhotosAcquirer {
         onBatchReady: (URL, Int) throws -> Void
     ) throws {
         let status = requestAuthorization()
-        print("[photos] authorization = \(describe(status))")
+        Console.step("authorization = \(describe(status))")
         guard status == .authorized || status == .limited else {
             throw PhotosError.notAuthorized(describe(status))
         }
@@ -48,7 +48,7 @@ final class PhotosAcquirer {
         }
 
         let assets = PHAsset.fetchAssets(in: album, options: nil)
-        print("[photos] album '\(albumTitle)' contains \(assets.count) asset(s)")
+        Console.step("album '\(albumTitle)' contains \(assets.count) asset(s)")
         guard assets.count > 0 else { throw PhotosError.albumEmpty(albumTitle) }
 
         let photosRoot = try staging.subdir("photos")
@@ -67,10 +67,10 @@ final class PhotosAcquirer {
         func flush() throws {
             guard assetsInBatch > 0 else { return }
             let dir = try batchDir()
-            print("[photos] batch \(batchIndex): \(assetsInBatch) asset(s), \(batchBytes) bytes -> backup")
+            Console.step("batch \(batchIndex): \(assetsInBatch) asset(s), \(batchBytes) bytes -> backup")
             try onBatchReady(dir, batchIndex)
             try? FileManager.default.removeItem(at: dir)   // reclaim disk immediately
-            print("[photos] batch \(batchIndex) backed up + removed — staging holds at most one batch")
+            Console.detail("batch \(batchIndex) backed up + removed — staging holds at most one batch")
             batchIndex += 1
             batchBytes = 0
             assetsInBatch = 0
@@ -102,7 +102,7 @@ final class PhotosAcquirer {
         into assetDir: URL, manager: PHAssetResourceManager, staging: Staging
     ) -> Int {
         let resources = PHAssetResource.assetResources(for: asset)
-        print("[photos] asset \(index)/\(count) id=\(asset.localIdentifier) resources=\(resources.count)")
+        Console.step("asset \(index)/\(count) id=\(asset.localIdentifier) resources=\(resources.count)")
         var bytes = 0
 
         for resource in resources {
@@ -140,7 +140,7 @@ final class PhotosAcquirer {
                 note: writeError.map { "\($0)" }
             ))
             let errSuffix = writeError.map { " error=\($0)" } ?? ""
-            print("[photos]   resource type=\(resource.type.rawValue) '\(resource.originalFilename)' -> \(size) bytes verified=\(ok)\(errSuffix)")
+            Console.detail("resource type=\(resource.type.rawValue) '\(resource.originalFilename)' -> \(size) bytes verified=\(ok)\(errSuffix)")
         }
         return bytes
     }
