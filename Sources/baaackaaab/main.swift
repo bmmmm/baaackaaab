@@ -54,6 +54,7 @@ func printUsage() {
     Console.section("Backup set", detail: "declarative source list — what a bare run backs up")
     Console.info([
         ("--list", "show the backup set and exit"),
+        ("--configure", "interactive TUI: browse folders + edit the set"),
         ("--add-folder <dir>", "add a Drive folder to the set, then list (repeatable)"),
         ("--remove-folder <dir>", "remove a Drive folder from the set (repeatable)"),
         ("--add-album <name>", "add a Photos album to the set (repeatable)"),
@@ -286,6 +287,17 @@ if CommandLine.arguments.contains("--check") {
 let configPath: URL = argValue("--config").map {
     URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath)
 } ?? BackupSet.defaultPath()
+
+// Interactive editor for the backup set. Needs a real terminal (the raw-mode
+// TUI can't run in a pipe or a launchd log); guard before touching termios.
+if CommandLine.arguments.contains("--configure") {
+    guard isatty(STDIN_FILENO) != 0, isatty(STDOUT_FILENO) != 0 else {
+        Console.error("--configure needs an interactive terminal — run it directly in Terminal.app")
+        exit(1)
+    }
+    ConfigTUI(configPath: configPath).run()
+    exit(0)
+}
 
 // Backup-set management (--list / --add-* / --remove-*): edit the set and exit.
 if ["--list", "--add-folder", "--remove-folder", "--add-album", "--remove-album"]
