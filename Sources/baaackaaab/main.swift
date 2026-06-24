@@ -30,6 +30,16 @@ func argValues(_ name: String) -> [String] {
     return out
 }
 
+/// Parse an `--at HH:MM` value into (hour, minute), defaulting to 12:00 when
+/// absent or malformed. Used by the launchd timer install.
+func parseAtTime(_ s: String?) -> (hour: Int, minute: Int) {
+    guard let s = s, let colon = s.firstIndex(of: ":"),
+          let h = Int(s[s.startIndex..<colon]),
+          let m = Int(s[s.index(after: colon)...]),
+          (0...23).contains(h), (0...59).contains(m) else { return (12, 0) }
+    return (h, m)
+}
+
 /// Usage / help screen. Printed on `--help`/`-h` and when invoked with no
 /// arguments at all. Styled through Console so it matches the run output.
 func printUsage() {
@@ -71,6 +81,15 @@ func printUsage() {
         ("--run-tag <tag>", "tag for this run (default: run-<timestamp>)"),
     ])
     Console.note("Password comes from RESTIC_PASSWORD or the Keychain, never an argument.")
+
+    Console.section("Schedule (launchd timer)")
+    Console.info([
+        ("--install-timer", "install a daily LaunchAgent that backs up the set, then exit"),
+        ("--at <HH:MM>", "time of day for the timer (default 12:00)"),
+        ("--uninstall-timer", "remove the LaunchAgent, then exit"),
+        ("--timer-status", "show whether the timer is installed + loaded, then exit"),
+    ])
+    Console.note("The timer runs `baaackaaab --run-tag scheduled` (backs up the set). After a rebuild, prime the Keychain (`--check`) and Photos (one manual backup) so the unattended run isn't blocked on a permission prompt.")
 
     Console.section("Quota (soft pre-flight gauge)")
     Console.info([
@@ -293,6 +312,23 @@ if CommandLine.arguments.contains("--check") {
 let configPath: URL = argValue("--config").map {
     URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath)
 } ?? BackupSet.defaultPath()
+
+// Scheduled-backup launchd timer. Installs/removes a per-user LaunchAgent that
+// runs `baaackaaab --run-tag scheduled` (non-bare, so it backs up the set under
+// launchd without a TTY). These touch the user's launchd, not the repo.
+if CommandLine.arguments.contains("--install-timer") {
+    let at = parseAtTime(argValue("--at"))
+    do { try LaunchdTimer.install(hour: at.hour, minute: at.minute, configPath: configPath); exit(0) }
+    catch { Console.error("\(error)"); exit(1) }
+}
+if CommandLine.arguments.contains("--uninstall-timer") {
+    do { try LaunchdTimer.uninstall(); exit(0) }
+    catch { Console.error("\(error)"); exit(1) }
+}
+if CommandLine.arguments.contains("--timer-status") {
+    LaunchdTimer.status()
+    exit(0)
+}
 
 // Bare `baaackaaab` on a real terminal → the interactive command center: the
 // full-screen TUI opens on its home dashboard (backup set + remote status) and
