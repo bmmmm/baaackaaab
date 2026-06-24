@@ -70,6 +70,7 @@ final class PhotosAcquirer {
             print("[photos] batch \(batchIndex): \(assetsInBatch) asset(s), \(batchBytes) bytes -> backup")
             try onBatchReady(dir, batchIndex)
             try? FileManager.default.removeItem(at: dir)   // reclaim disk immediately
+            print("[photos] batch \(batchIndex) backed up + removed — staging holds at most one batch")
             batchIndex += 1
             batchBytes = 0
             assetsInBatch = 0

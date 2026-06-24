@@ -30,6 +30,12 @@ func argValues(_ name: String) -> [String] {
     return out
 }
 
+// Line-buffer stdout so our logs interleave in the right order with restic's
+// child-process output. Without this, our print() output buffers and surfaces
+// only after the subprocess has already written (and a file redirect would be
+// block-buffered, scrambling the order entirely).
+setvbuf(stdout, nil, _IOLBF, 0)
+
 // Standalone diagnostic: prove the evict/dataless round-trip on one file.
 // Runs in isolation and exits — never touches staging or the normal flow.
 if let evictTarget = argValue("--evict-test") {

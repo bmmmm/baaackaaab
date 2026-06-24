@@ -25,6 +25,10 @@ PHOTO_ALBUM="${PHOTO_ALBUM:-baaackaaab-test}"
 STAGING="${STAGING:-$REPO_ROOT/tmp/staging}"
 # Small batch budget for the test so the batching actually triggers (50 MB).
 PHOTO_BATCH_BYTES="${PHOTO_BATCH_BYTES:-50000000}"
+# Pin the restic host: ProcessInfo.hostName drifts (mDNS name flaps between
+# "macbook" and "macb-xxxx.local"), which breaks parent-snapshot detection and
+# `--host` filtering. A stable host is part of the backup client's identity.
+BACKUP_HOST="${BACKUP_HOST:-macbook}"
 
 # restic reads the repo location + password from the environment.
 export RESTIC_REPOSITORY="${RESTIC_REPOSITORY:-$REPO_ROOT/tmp/restic-repo}"
@@ -43,7 +47,8 @@ for f in "${DRIVE_FOLDERS[@]}"; do drive_args+=(--drive-folder "$f"); done
   "${drive_args[@]}" \
   --photo-album "$PHOTO_ALBUM" \
   --staging "$STAGING" \
-  --photo-batch-bytes "$PHOTO_BATCH_BYTES"
+  --photo-batch-bytes "$PHOTO_BATCH_BYTES" \
+  --host "$BACKUP_HOST"
 
 echo "== restic snapshots =="
 restic snapshots
