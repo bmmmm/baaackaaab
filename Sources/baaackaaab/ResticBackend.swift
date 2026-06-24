@@ -35,7 +35,7 @@ final class ResticBackend {
     /// so zstd compression is available (helps text/PDF; photos won't shrink).
     func ensureInitialized() throws {
         if try run(["-r", repository, "cat", "config"], quiet: true) == 0 { return }
-        Console.step("restic: initializing repository (format v2) at \(repository)")
+        Console.step("restic: initializing repository (format v2) at \(Credentials.redact(repository))")
         let code = try run(["-r", repository, "init", "--repository-version", "2"])
         if code != 0 { throw ResticError.failed(command: "init", code: code) }
     }
@@ -89,6 +89,7 @@ final class ResticBackend {
         let pipe = Pipe()
         proc.standardOutput = pipe
         proc.standardError = FileHandle.nullDevice
+        proc.standardInput = FileHandle.nullDevice   // never block on a password prompt
         do { try proc.run() } catch { throw ResticError.notFound }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         proc.waitUntilExit()
@@ -106,6 +107,9 @@ final class ResticBackend {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         proc.arguments = [executable] + args
+        // Feed /dev/null so a missing RESTIC_PASSWORD fails fast and visibly
+        // instead of hanging on an interactive prompt we'd never see.
+        proc.standardInput = FileHandle.nullDevice
         if quiet {
             proc.standardOutput = FileHandle.nullDevice
             proc.standardError = FileHandle.nullDevice

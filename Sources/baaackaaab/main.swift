@@ -99,10 +99,10 @@ func initCredentials() throws {
 
     let line = try Credentials.htpasswdLine(user: Credentials.endpointUser, password: endpointPW)
     Console.section("Server", detail: "create the endpoint user on garage")
-    Console.note("One-way bcrypt hash (safe to paste); the cleartext password is not shown. Run once — it creates /data/.htpasswd with user '\(Credentials.endpointUser)':")
+    Console.note("One-way bcrypt hash (safe to paste); the cleartext password is not shown. It sets /data/.htpasswd to exactly user '\(Credentials.endpointUser)' — re-running rotates the password (overwrite, so this single-user tool stays at one endpoint user):")
     print("")
     print("    printf '%s\\n' '\(line)' \\")
-    print("      | ssh bmadmin@10.0.10.2 'docker exec -i restic-rest-server sh -c \"cat >> /data/.htpasswd\"'")
+    print("      | ssh bmadmin@10.0.10.2 'docker exec -i restic-rest-server sh -c \"cat > /data/.htpasswd\"'")
     print("")
     Console.section("Verify")
     Console.step("then run:  baaackaaab --check")
@@ -131,12 +131,23 @@ func resolveRepoOrExit() -> String {
     return repo
 }
 
+/// Whether a non-empty RESTIC_PASSWORD is in our environment (set directly or
+/// loaded from the Keychain). Read via getenv so it reflects a prior setenv.
+func resticPasswordAvailable() -> Bool {
+    guard let v = getenv("RESTIC_PASSWORD") else { return false }
+    return strlen(v) > 0
+}
+
 /// Reach the server with the stored credentials and ensure the repo exists.
 /// A fast end-to-end check of DNS + Traefik + htpasswd auth + restic init.
 func checkRemote() {
     Console.banner("baaackaaab", tagline: "remote check")
     let repo = resolveRepoOrExit()
     Console.info([("repo", Credentials.redact(repo))])
+    guard resticPasswordAvailable() else {
+        Console.error("no encryption password — the Keychain item 'restic-password' is missing or unreadable; run `baaackaaab --init-credentials` first")
+        exit(1)
+    }
     do {
         try ResticBackend(repository: repo).ensureInitialized()
         Console.success("server reachable, authentication OK, repository ready")
