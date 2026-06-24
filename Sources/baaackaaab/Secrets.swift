@@ -111,6 +111,49 @@ enum Credentials {
         "rest:https://\(endpointUser):\(password)@\(endpointHost)/\(endpointUser)/"
     }
 
+    /// Resolve the repository and make both secrets available to a restic child,
+    /// exporting EXACTLY ONE repository source and ONE password source — restic
+    /// treats `RESTIC_REPOSITORY` and `RESTIC_REPOSITORY_FILE` as mutually
+    /// exclusive (likewise the password pair) and aborts if both are set.
+    /// Resolution order, preferring the store that needs no Keychain prompt:
+    ///   1. an explicit repo (--restic-repo or an inherited RESTIC_REPOSITORY[_FILE])
+    ///   2. the 0600 credential files → RESTIC_REPOSITORY_FILE / RESTIC_PASSWORD_FILE
+    ///   3. the legacy Keychain items → RESTIC_REPOSITORY / RESTIC_PASSWORD
+    /// Returns the repo URL for redacted display, or nil if nothing is configured.
+    /// A secret value never reaches argv; in file mode it never reaches our
+    /// environment either — only the file path does, and restic reads the file.
+    static func resolveAndExport(explicitRepo: String?) -> String? {
+        let env = ProcessInfo.processInfo.environment
+
+        // --- Repository: pick exactly one source ---
+        var displayURL: String?
+        if let explicit = explicitRepo ?? env["RESTIC_REPOSITORY"] {
+            setenv("RESTIC_REPOSITORY", explicit, 1)
+            unsetenv("RESTIC_REPOSITORY_FILE")   // avoid restic's mutually-exclusive error
+            displayURL = explicit
+        } else if let fileEnv = env["RESTIC_REPOSITORY_FILE"] {
+            displayURL = (try? String(contentsOfFile: fileEnv, encoding: .utf8))?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        } else if CredentialFiles.present {
+            setenv("RESTIC_REPOSITORY_FILE", CredentialFiles.repoURLFile.path, 1)
+            displayURL = (try? CredentialFiles.readURL()) ?? nil
+        } else if let stored = (try? Keychain.get(account: repoURLAccount)) ?? nil {
+            setenv("RESTIC_REPOSITORY", stored, 1)
+            displayURL = stored
+        }
+
+        // --- Password: pick exactly one source, leaving any caller-provided one ---
+        if env["RESTIC_PASSWORD"] == nil, env["RESTIC_PASSWORD_FILE"] == nil {
+            if CredentialFiles.present {
+                setenv("RESTIC_PASSWORD_FILE", CredentialFiles.repoPasswordFile.path, 1)
+            } else if let pw = (try? Keychain.get(account: repoPasswordAccount)) ?? nil {
+                setenv("RESTIC_PASSWORD", pw, 1)
+            }
+        }
+
+        return displayURL
+    }
+
     /// Mask the endpoint password in a `rest:https://user:PASS@host/…` URL so it
     /// can be logged. Returns the input unchanged if it has no userinfo.
     static func redact(_ repoURL: String) -> String {
@@ -143,5 +186,69 @@ enum Credentials {
               !line.isEmpty
         else { throw CredentialError.htpasswdFailed(proc.terminationStatus) }
         return line
+    }
+}
+
+/// File-based credential store: two `0600` files under Application Support that
+/// hold the repo URL and the encryption password. This is the preferred store
+/// for an unattended job. restic reads the files directly via
+/// `RESTIC_REPOSITORY_FILE` / `RESTIC_PASSWORD_FILE`, so the secrets never enter
+/// baaackaaab's argv or environment — and there is no Keychain prompt at all.
+/// The Keychain's trusted-application ACL does not reliably persist "Always
+/// Allow" for a plain (unentitled) CLI, and it would also tie the launchd run to
+/// a live GUI session; a file under FileVault + `0600` avoids both. The Keychain
+/// wrapper remains only as a legacy read path for `--migrate-credentials`.
+enum CredentialFiles {
+    enum CredentialFileError: Error, CustomStringConvertible {
+        case writeFailed(String)
+        var description: String {
+            switch self {
+            case .writeFailed(let path): return "could not write credential file at \(path)"
+            }
+        }
+    }
+
+    /// ~/Library/Application Support/baaackaaab
+    static var dir: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/baaackaaab", isDirectory: true)
+    }
+    static var repoURLFile: URL { dir.appendingPathComponent("repo-url") }
+    static var repoPasswordFile: URL { dir.appendingPathComponent("repo-password") }
+
+    /// Both files present AND non-empty — the gate for using the file store at
+    /// all. Requiring non-empty means a truncated/empty file (a botched manual
+    /// edit, or a partial write where the first file landed and the second
+    /// threw) falls back to the Keychain / the actionable "no repository" error
+    /// instead of exporting a `*_FILE` pointer at broken content and letting
+    /// restic fail with its own less-helpful message.
+    static var present: Bool {
+        nonEmptyFile(repoURLFile) && nonEmptyFile(repoPasswordFile)
+    }
+
+    private static func nonEmptyFile(_ url: URL) -> Bool {
+        guard let data = FileManager.default.contents(atPath: url.path) else { return false }
+        return !data.isEmpty
+    }
+
+    /// Write `value` to `file` created with `0600` from the start (no
+    /// world-readable window), the directory `0700`. No trailing newline —
+    /// restic strips one anyway, but an exact byte image is cleaner.
+    static func write(_ value: String, to file: URL) throws {
+        let fm = FileManager.default
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true,
+                               attributes: [.posixPermissions: 0o700])
+        if fm.fileExists(atPath: file.path) { try fm.removeItem(at: file) }
+        guard fm.createFile(atPath: file.path, contents: Data(value.utf8),
+                            attributes: [.posixPermissions: 0o600]) else {
+            throw CredentialFileError.writeFailed(file.path)
+        }
+    }
+
+    /// The stored repo URL (trimmed), for redacted display. nil if absent.
+    static func readURL() throws -> String? {
+        guard let data = FileManager.default.contents(atPath: repoURLFile.path) else { return nil }
+        return String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

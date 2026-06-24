@@ -19,12 +19,14 @@ enum TimerError: Error, CustomStringConvertible {
 /// launchd (no TTY) it goes straight to the backup of the declarative set
 /// instead of opening the TUI or printing usage.
 ///
-/// The job runs in the user's GUI (aqua) session, so it can read the Keychain
-/// and (with a granted TCC entitlement) Photos — same identity as an interactive
-/// run. The catch: code identity. Build with a stable self-signed signing
-/// identity (`make release` re-signs after each build), otherwise an ad-hoc
-/// binary's identity churns on every rebuild and resets the TCC grant + Keychain
-/// ACL. With a stable identity, grant Photos + Keychain once and they persist.
+/// The job runs in the user's GUI (aqua) session, so it can reach Photos (with a
+/// granted TCC entitlement) — same identity as an interactive run. The restic
+/// secrets come from the 0600 credential files (read directly by restic), so the
+/// run needs no Keychain and no live login session for the secrets. The one
+/// thing still keyed on code identity is the Photos TCC grant: build with a
+/// stable signing identity (`make release` re-signs after each build), otherwise
+/// an ad-hoc binary's identity churns on every rebuild and resets that grant.
+/// With a stable identity, grant Photos once and it persists.
 enum LaunchdTimer {
     static let label = "io.baaackaaab.backup"
 
@@ -77,7 +79,7 @@ enum LaunchdTimer {
         }
 
         Console.success("timer installed and loaded")
-        Console.warn("Build with `make release` so the binary carries a stable code-signing identity — then its Photos (TCC) and Keychain grants survive rebuilds. Grant them once after install: run `baaackaaab --check` (Keychain) and one manual backup of a Photos album (TCC), so the unattended run isn't blocked on a prompt it can't answer. If you ever rebuild with bare `swift build`, re-run `make sign` to restore the identity.")
+        Console.warn("Build with `make release` so the binary carries a stable code-signing identity — then its Photos (TCC) grant survives rebuilds. restic reads the credential files directly, so no Keychain grant is needed; the only one-time grant is Photos: run one manual backup of a Photos album so the unattended run isn't blocked on a prompt it can't answer. Verify the path end-to-end with `baaackaaab --check`. If you ever rebuild with bare `swift build`, re-run `make sign` to restore the identity.")
         Console.note("verify:  launchctl print \(domain)/\(label)\nlogs:    tail -f \(logURL.path)\nremove:  baaackaaab --uninstall-timer")
     }
 

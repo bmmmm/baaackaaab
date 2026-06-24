@@ -19,10 +19,15 @@ enum ResticError: Error, CustomStringConvertible {
 /// The Mac stays strictly write-only towards the store: this only ever runs
 /// `init`/`backup`/`cat config`, never `forget`/`prune` (those run server-side
 /// on the append-only host). Both secrets reach restic through the environment,
-/// never argv (argv is world-readable via `ps`): the encryption password as
-/// `RESTIC_PASSWORD`, and the repository URL as `RESTIC_REPOSITORY`. The URL
-/// embeds the rest-server endpoint password, so it is just as sensitive as the
-/// password — hence we never pass `-r` on the command line.
+/// never argv (argv is world-readable via `ps`): the encryption password via
+/// `RESTIC_PASSWORD[_FILE]`, the repository URL via `RESTIC_REPOSITORY[_FILE]`.
+/// The URL embeds the rest-server endpoint password, so it is just as sensitive
+/// as the password — hence we never pass `-r` on the command line.
+///
+/// `Credentials.resolveAndExport` is the single place that decides which env
+/// vars carry the secrets (file store vs. Keychain); every caller runs it before
+/// constructing this. So `repository` here is only the URL string we keep for
+/// the redacted log line — restic itself reads the already-exported environment.
 final class ResticBackend {
     let repository: String
     private let executable: String
@@ -30,10 +35,6 @@ final class ResticBackend {
     init(repository: String, executable: String = "restic") {
         self.repository = repository
         self.executable = executable
-        // Export the repo URL so restic reads it from the environment instead of
-        // an `-r` argument — the URL embeds the endpoint password and argv is
-        // world-readable via `ps`. Idempotent; mirrors how RESTIC_PASSWORD flows.
-        setenv("RESTIC_REPOSITORY", repository, 1)
     }
 
     /// Initialize the repo if it does not exist yet. Uses repository format v2

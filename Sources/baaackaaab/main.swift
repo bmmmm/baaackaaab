@@ -50,7 +50,8 @@ func printUsage() {
 
     Console.section("Setup (first run)")
     Console.info([
-        ("--init-credentials", "generate + store both secrets in the Keychain, print the server hash"),
+        ("--init-credentials", "generate + store both secrets in 0600 files, print the server hash"),
+        ("--migrate-credentials", "move existing Keychain secrets into 0600 files (one last Keychain prompt)"),
         ("--check", "verify the server is reachable, init the repo, then exit"),
     ])
 
@@ -76,11 +77,11 @@ func printUsage() {
 
     Console.section("Restic target")
     Console.info([
-        ("--restic-repo <repo>", "restic repo (else RESTIC_REPOSITORY, else the Keychain)"),
+        ("--restic-repo <repo>", "restic repo (else RESTIC_REPOSITORY, else the credential files / Keychain)"),
         ("--host <name>", "host tag for snapshots (default: this machine)"),
         ("--run-tag <tag>", "tag for this run (default: run-<timestamp>)"),
     ])
-    Console.note("Password comes from RESTIC_PASSWORD or the Keychain, never an argument.")
+    Console.note("Password comes from RESTIC_PASSWORD / RESTIC_PASSWORD_FILE or the credential files, never an argument.")
 
     Console.section("Schedule (launchd timer)")
     Console.info([
@@ -89,7 +90,7 @@ func printUsage() {
         ("--uninstall-timer", "remove the LaunchAgent, then exit"),
         ("--timer-status", "show whether the timer is installed + loaded, then exit"),
     ])
-    Console.note("The timer runs `baaackaaab --run-tag scheduled` (backs up the set). Build with `make release` so the binary keeps a stable signing identity — then grant the Keychain (`--check`) and Photos (one manual backup) once and the unattended run is never blocked on a prompt.")
+    Console.note("The timer runs `baaackaaab --run-tag scheduled` (backs up the set). restic reads the credential files directly, so the unattended run needs no Keychain prompt — only a one-time Photos grant (`make release` + one manual backup, so a stable signature keeps the TCC grant across rebuilds).")
 
     Console.section("Quota (soft pre-flight gauge)")
     Console.info([
@@ -110,10 +111,11 @@ func printUsage() {
     print("")
 }
 
-/// First-run credential setup. Generates both secrets, stores them in the
-/// Keychain, and prints the one-way bcrypt line plus the command to create the
-/// endpoint user on the server. The cleartext endpoint password never leaves the
-/// Keychain; only its hash is printed.
+/// First-run credential setup. Generates both secrets, stores them in two
+/// `0600` files, and prints the one-way bcrypt line plus the command to create
+/// the endpoint user on the server. The cleartext endpoint password never leaves
+/// the file store; only its hash is printed. restic reads the files directly, so
+/// neither secret ever reaches argv, our environment, or a Keychain prompt.
 func initCredentials() throws {
     Console.banner("baaackaaab", tagline: "credential setup")
 
@@ -121,13 +123,13 @@ func initCredentials() throws {
     let repoPW = Credentials.randomURLSafe(byteCount: 32)       // ~256 bits, encryption key
     let repoURL = Credentials.repoURL(password: endpointPW)
 
-    try Keychain.set(account: Credentials.repoURLAccount, value: repoURL)
-    try Keychain.set(account: Credentials.repoPasswordAccount, value: repoPW)
+    try CredentialFiles.write(repoURL, to: CredentialFiles.repoURLFile)
+    try CredentialFiles.write(repoPW, to: CredentialFiles.repoPasswordFile)
 
-    Console.section("Keychain")
-    Console.success("stored endpoint URL + encryption password (service '\(Keychain.service)')")
+    Console.section("Credential files")
+    Console.success("stored endpoint URL + encryption password (0600, \(CredentialFiles.dir.path))")
     Console.info([("repo", Credentials.redact(repoURL))])
-    Console.warn("The encryption password lives ONLY in this Keychain — the server never has it. Lose it and the backups are unrecoverable.")
+    Console.warn("The encryption password lives ONLY in this 0600 file — the server never has it. Lose it and the backups are unrecoverable. It is protected by FileVault at rest; back it up to your password manager.")
 
     let line = try Credentials.htpasswdLine(user: Credentials.endpointUser, password: endpointPW)
     Console.section("Server", detail: "create the endpoint user on garage")
@@ -142,35 +144,69 @@ func initCredentials() throws {
     Console.note("If --check returns 401, the server cached the old .htpasswd — run `ssh bmadmin@10.0.10.2 docker restart restic-rest-server`, then retry.")
 }
 
-/// Resolve the restic repo URL from --restic-repo, then RESTIC_REPOSITORY, then
-/// the Keychain — and load the encryption password from the Keychain into our
-/// environment (the restic child inherits RESTIC_PASSWORD) when it is not
-/// already set. Exits with an actionable message if no repo can be found.
-func resolveRepoOrExit() -> String {
-    let repo: String
-    if let r = argValue("--restic-repo") ?? ProcessInfo.processInfo.environment["RESTIC_REPOSITORY"] {
-        repo = r
-    } else if let stored = (try? Keychain.get(account: Credentials.repoURLAccount)) ?? nil {
-        repo = stored
-    } else {
-        Console.error("no repository — pass --restic-repo, set RESTIC_REPOSITORY, or run `baaackaaab --init-credentials` first")
+/// One-time migration of an existing setup from the Keychain to the `0600` file
+/// store. Reads both items from the Keychain once (the last Keychain prompt this
+/// tool ever triggers) and writes them verbatim to the files — the encryption
+/// password is NOT regenerated, so the existing repository stays intact. Prints
+/// the commands to drop the now-unused Keychain items (kept, not auto-deleted,
+/// so the user decides when to remove the fallback).
+func migrateCredentials() throws {
+    Console.banner("baaackaaab", tagline: "migrate credentials → files")
+
+    if CredentialFiles.present {
+        Console.warn("credential files already exist at \(CredentialFiles.dir.path) — they will be overwritten with the current Keychain values")
+    }
+    guard let url = (try? Keychain.get(account: Credentials.repoURLAccount)) ?? nil else {
+        Console.error("no repo URL in the Keychain (item '\(Credentials.repoURLAccount)') — nothing to migrate; run `baaackaaab --init-credentials` to set up the file store directly")
         exit(1)
     }
-    // Export the URL so restic reads it from RESTIC_REPOSITORY rather than an
-    // `-r` argument — it embeds the endpoint password and argv is `ps`-visible.
-    setenv("RESTIC_REPOSITORY", repo, 1)
-    if ProcessInfo.processInfo.environment["RESTIC_PASSWORD"] == nil,
-       let pw = (try? Keychain.get(account: Credentials.repoPasswordAccount)) ?? nil {
-        setenv("RESTIC_PASSWORD", pw, 1)
+    guard let pw = (try? Keychain.get(account: Credentials.repoPasswordAccount)) ?? nil else {
+        Console.error("no encryption password in the Keychain (item '\(Credentials.repoPasswordAccount)') — nothing to migrate")
+        exit(1)
     }
-    return repo
+
+    try CredentialFiles.write(url, to: CredentialFiles.repoURLFile)
+    try CredentialFiles.write(pw, to: CredentialFiles.repoPasswordFile)
+
+    Console.section("Credential files")
+    Console.success("wrote repo URL + encryption password to 0600 files (password unchanged — repo intact)")
+    Console.info([
+        ("dir", CredentialFiles.dir.path),
+        ("repo", Credentials.redact(url)),
+    ])
+    Console.note("restic now reads these via RESTIC_REPOSITORY_FILE / RESTIC_PASSWORD_FILE — no Keychain prompt, interactive or under launchd.")
+
+    Console.section("Cleanup", detail: "optional — drop the now-unused Keychain items")
+    Console.note("the file store is authoritative from here; remove the Keychain items when ready:")
+    print("")
+    print("    security delete-generic-password -s \(Keychain.service) -a \(Credentials.repoURLAccount)")
+    print("    security delete-generic-password -s \(Keychain.service) -a \(Credentials.repoPasswordAccount)")
+    print("")
+    Console.step("verify:  baaackaaab --check")
 }
 
-/// Whether a non-empty RESTIC_PASSWORD is in our environment (set directly or
-/// loaded from the Keychain). Read via getenv so it reflects a prior setenv.
+/// Resolve the restic repo URL and export both secrets into our environment so
+/// the restic child inherits exactly one repo source and one password source
+/// (file store preferred, then the legacy Keychain). Exits with an actionable
+/// message if no repo can be found. See `Credentials.resolveAndExport`.
+func resolveRepoOrExit() -> String {
+    if let repo = Credentials.resolveAndExport(explicitRepo: argValue("--restic-repo")) {
+        return repo
+    }
+    Console.error("no repository — pass --restic-repo, set RESTIC_REPOSITORY, run `baaackaaab --migrate-credentials` (Keychain→files), or `--init-credentials` first")
+    exit(1)
+}
+
+/// Whether the encryption password is available to the restic child — either a
+/// non-empty RESTIC_PASSWORD or a RESTIC_PASSWORD_FILE pointing at a non-empty
+/// file. Read via getenv so it reflects a prior resolveAndExport.
 func resticPasswordAvailable() -> Bool {
-    guard let v = getenv("RESTIC_PASSWORD") else { return false }
-    return strlen(v) > 0
+    if let v = getenv("RESTIC_PASSWORD"), strlen(v) > 0 { return true }
+    if let f = getenv("RESTIC_PASSWORD_FILE") {
+        let path = String(cString: f)
+        if let data = FileManager.default.contents(atPath: path), !data.isEmpty { return true }
+    }
+    return false
 }
 
 /// Reach the server with the stored credentials and ensure the repo exists.
@@ -180,7 +216,7 @@ func checkRemote() {
     let repo = resolveRepoOrExit()
     Console.info([("repo", Credentials.redact(repo))])
     guard resticPasswordAvailable() else {
-        Console.error("no encryption password — the Keychain item 'restic-password' is missing or unreadable; run `baaackaaab --init-credentials` first")
+        Console.error("no encryption password — run `baaackaaab --migrate-credentials` (Keychain→files) or `--init-credentials`; the credential files / Keychain item are missing or unreadable")
         exit(1)
     }
     do {
@@ -302,6 +338,12 @@ if let matTarget = argValue("--materialize-test") {
 // First-run setup: generate + store both secrets, print the server hash.
 if CommandLine.arguments.contains("--init-credentials") {
     do { try initCredentials(); exit(0) }
+    catch { Console.error("\(error)"); exit(1) }
+}
+
+// One-time migration: move existing Keychain secrets into the 0600 file store.
+if CommandLine.arguments.contains("--migrate-credentials") {
+    do { try migrateCredentials(); exit(0) }
     catch { Console.error("\(error)"); exit(1) }
 }
 

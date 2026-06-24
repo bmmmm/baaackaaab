@@ -91,7 +91,7 @@ final class ConfigTUI {
     private var hasHome = false
 
     // Remote dashboard state, resolved lazily on first `r` so an edit-only
-    // session never triggers a Keychain prompt.
+    // session never touches the credential store.
     private var repo: String?
     private var repoResolved = false
     private var remote: ResticBackend.RemoteStatus?
@@ -462,8 +462,8 @@ final class ConfigTUI {
         guard !set.isEmpty else { statusMsg = "backup set is empty \u{2014} press e to add folders / albums"; return }
         if dirty { save() }   // back up exactly what's on screen
         // Resolve + export credentials in this process so the re-exec'd child
-        // inherits RESTIC_REPOSITORY + RESTIC_PASSWORD and never touches the
-        // Keychain itself — fewer authorizations per sync.
+        // inherits the repo + password source from the environment. In file mode
+        // only the *_FILE paths are inherited — no secret value, no Keychain.
         ensureRepoResolved()
         emit("\u{1B}[?25h\u{1B}[?1049l")   // show cursor, leave the alternate screen
         term.restore()                      // cooked, so the child's output behaves
@@ -494,8 +494,8 @@ final class ConfigTUI {
     /// Keychain password) lazily on first use, queries snapshots + size, redraws.
     private func refreshRemote() {
         ensureRepoResolved()
-        guard let repo = repo else { statusMsg = "no repository \u{2014} run baaackaaab --init-credentials first"; return }
-        guard resticPasswordAvailable() else { statusMsg = "no encryption password in the Keychain \u{2014} run --init-credentials"; return }
+        guard let repo = repo else { statusMsg = "no repository \u{2014} run baaackaaab --init-credentials (or --migrate-credentials) first"; return }
+        guard resticPasswordAvailable() else { statusMsg = "no encryption password \u{2014} run baaackaaab --migrate-credentials or --init-credentials"; return }
         statusMsg = "querying remote\u{2026}"; renderHome()
         remote = ResticBackend(repository: repo).remoteStatus()
         remoteQueried = true
@@ -503,22 +503,14 @@ final class ConfigTUI {
         statusMsg = ""
     }
 
-    /// Repo from --restic-repo, then RESTIC_REPOSITORY, then the Keychain. Loads
-    /// the encryption password into our environment as a side effect (so the
-    /// in-process restic query inherits it). Resolved at most once.
+    /// Resolve the repo and export both secrets (file store preferred, then the
+    /// legacy Keychain) so the in-process restic query AND a re-exec'd sync child
+    /// inherit them. Resolved at most once. With the file store this is silent —
+    /// no Keychain prompt at all. See `Credentials.resolveAndExport`.
     private func ensureRepoResolved() {
         if repoResolved { return }
         repoResolved = true
-        let env = ProcessInfo.processInfo.environment
-        repo = argValue("--restic-repo") ?? env["RESTIC_REPOSITORY"]
-            ?? ((try? Keychain.get(account: Credentials.repoURLAccount)) ?? nil)
-        // Export both secrets so a re-exec'd sync child inherits them from the
-        // environment and never reads the Keychain a second time.
-        if let repo = repo { setenv("RESTIC_REPOSITORY", repo, 1) }
-        if getenv("RESTIC_PASSWORD") == nil,
-           let pw = (try? Keychain.get(account: Credentials.repoPasswordAccount)) ?? nil {
-            setenv("RESTIC_PASSWORD", pw, 1)
-        }
+        repo = Credentials.resolveAndExport(explicitRepo: argValue("--restic-repo"))
     }
 
     private func syncArgs() -> [String] {
