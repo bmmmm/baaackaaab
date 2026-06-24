@@ -56,13 +56,23 @@ CNF
     -keyout "$tmp/key.pem" -out "$tmp/cert.pem" \
     -days 3650 -config "$tmp/req.cnf" >/dev/null 2>&1
 
-  openssl pkcs12 -export \
+  # macOS `security import` cannot verify the MAC of a PKCS#12 protected with an
+  # EMPTY password (it reports "wrong password?"), so use a random throwaway
+  # transport password — it only guards the temp bundle for the duration of the
+  # import. OpenSSL 3.x also defaults to PBE algorithms the Security framework
+  # rejects, so force the legacy provider there; LibreSSL (the macOS default)
+  # already emits compatible SHA1/3DES and has no `-legacy` flag.
+  local p12pw legacy=""
+  p12pw="$(openssl rand -hex 16)"
+  if openssl version | grep -q '^OpenSSL 3'; then legacy="-legacy"; fi
+
+  openssl pkcs12 -export $legacy \
     -inkey "$tmp/key.pem" -in "$tmp/cert.pem" \
-    -name "$IDENTITY" -out "$tmp/bundle.p12" -passout pass: >/dev/null 2>&1
+    -name "$IDENTITY" -out "$tmp/bundle.p12" -passout "pass:$p12pw"
 
   # Import the cert + key into the login keychain and grant /usr/bin/codesign
   # access to the private key, so signing does not prompt on every run.
-  security import "$tmp/bundle.p12" -k "$LOGIN_KEYCHAIN" -P "" -T /usr/bin/codesign
+  security import "$tmp/bundle.p12" -k "$LOGIN_KEYCHAIN" -P "$p12pw" -T /usr/bin/codesign
 
   if have_identity; then
     echo "done. The first sign may ask once to allow codesign to use the key — click Always Allow."
