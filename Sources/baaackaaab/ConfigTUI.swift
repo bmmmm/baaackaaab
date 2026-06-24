@@ -9,13 +9,12 @@ import Darwin
 // edit, but you browse the real filesystem and toggle folders instead of typing
 // paths. It writes the identical BackupSet JSON, so the two are interchangeable.
 //
-// Pure Foundation + termios — no curses, no dependency. Two screens:
+// Pure Foundation + termios — no curses, no dependency. One screen:
 //   browse  — walk the directory tree, toggle folders in/out of the set
-//   review  — flat list of everything selected; remove entries, add an album
+//   review  — a panel that toggles in (v) directly under the folder list,
+//             showing everything selected; remove entries, add an album
 //
 // Needs a real TTY (main.swift guards that). Off a terminal it refuses to run.
-
-private enum Screen { case browse, review }
 
 private enum BrowseRow {
     case parent
@@ -26,6 +25,12 @@ private enum SetRow {
     case folder(String)
     case album(String)
 }
+
+// A directory's relation to the backup set, for the browse marker:
+//   selected — this exact folder is in the set            → [x]
+//   partial  — a descendant is in the set, this one isn't → [~]
+//   none     — neither                                    → [ ]
+private enum DirState { case selected, partial, none }
 
 private enum Key: Equatable {
     case up, down, left, right
@@ -61,7 +66,9 @@ final class ConfigTUI {
     private var existed = false
     private var loadFailed = false
 
-    private var screen: Screen = .browse
+    // The review list is a panel that toggles in under the folder browser
+    // (v). When shown it takes input focus; the folder list stays visible above.
+    private var showReview = false
     private var cwd: URL
 
     private var browseCursor = 0, browseTop = 0
@@ -97,20 +104,18 @@ final class ConfigTUI {
         }
         self.term = term
         emit("\u{1B}[?1049h\u{1B}[?25l")   // alternate screen + hide cursor
-        defer {
-            emit("\u{1B}[?25h\u{1B}[?1049l")
-            term.restore()
-        }
+        defer { term.restore() }           // always hand the terminal back cooked
 
         loop: while true {
             render()
             let key = readKey()
             statusMsg = ""
-            switch screen {
-            case .browse: if !handleBrowse(key) { break loop }
-            case .review: if !handleReview(key) { break loop }
-            }
+            let keepGoing = showReview ? handleReview(key) : handleBrowse(key)
+            if !keepGoing { break loop }
         }
+
+        emit("\u{1B}[?25h\u{1B}[?1049l")   // show cursor + leave alternate screen
+        printExitHint()
     }
 
     // MARK: - Input handling
@@ -132,7 +137,7 @@ final class ConfigTUI {
         case .space:
             if browseCursor < rows.count, case .dir(let url) = rows[browseCursor] { toggle(url) }
         case .char("c"): toggle(cwd)
-        case .char("v"), .tab: screen = .review; reviewCursor = 0; reviewTop = 0
+        case .char("v"), .tab: showReview = true; reviewCursor = 0; reviewTop = 0
         case .char("."): showHidden.toggle(); invalidate(); browseCursor = 0; browseTop = 0
         case .char("g"): jumpICloud()
         case .char("s"): save()
@@ -161,9 +166,11 @@ final class ConfigTUI {
                 if set.addAlbum(name) { dirty = true; statusMsg = "added album \(name)" }
                 else { statusMsg = "album already in set" }
             }
-        case .char("v"), .tab: screen = .browse
+        // v/esc/left close the panel and hand focus back to the folder browser;
+        // the whole editor only quits on q / Ctrl-C.
+        case .char("v"), .tab, .esc, .left, .char("h"): showReview = false
         case .char("s"): save()
-        case .char("q"), .esc, .ctrlC: if confirmQuit() { return false }
+        case .char("q"), .ctrlC: if confirmQuit() { return false }
         case .eof: return false
         default: break
         }
@@ -202,9 +209,27 @@ final class ConfigTUI {
         return p
     }
 
+    /// Inverse of tildePath: expand a stored entry (tilde or absolute) to an
+    /// absolute filesystem path, so we can compare it against a browsed URL.
+    private func expandPath(_ folder: String) -> String {
+        if folder == "~" { return home.path }
+        if folder.hasPrefix("~/") { return home.path + folder.dropFirst(1) }
+        return folder
+    }
+
     private func isSelected(_ url: URL) -> Bool {
         let t = tildePath(of: url)
         return set.driveFolders.contains(t) || set.driveFolders.contains(url.path)
+    }
+
+    /// Where `url` stands relative to the set: itself selected, an ancestor of a
+    /// selected folder (partial), or neither. The partial state lets the marker
+    /// bubble up the tree so a selection deep in a branch is visible from above.
+    private func dirState(_ url: URL) -> DirState {
+        if isSelected(url) { return .selected }
+        let prefix = url.path + "/"
+        for f in set.driveFolders where expandPath(f).hasPrefix(prefix) { return .partial }
+        return .none
     }
 
     private func toggle(_ url: URL) {
@@ -238,6 +263,18 @@ final class ConfigTUI {
             default: break
             }
         }
+    }
+
+    /// After the editor closes, print the one command left to run — directly
+    /// answering "now what?". Reads the file back so it reflects exactly what a
+    /// bare run would back up (empty / discarded set → no hint).
+    private func printExitHint() {
+        let onDisk = (try? BackupSet.load(from: configPath)) ?? BackupSet()
+        guard !onDisk.isEmpty else { return }
+        let bin = CommandLine.arguments.first ?? "baaackaaab"
+        Console.section("Next")
+        Console.step("run a backup:  \(bin) --run-tag smoke-live")
+        Console.note("a bare run backs up this set; --run-tag just labels the snapshots. Run it in Terminal.app — it needs the Keychain + Photos access.")
     }
 
     // MARK: - Directory listing (cached per cwd)
@@ -274,84 +311,96 @@ final class ConfigTUI {
 
     // MARK: - Rendering
 
+    // Layout is built as exactly `rows` lines so the footer pins to the bottom.
+    //   header: title + dir + blank              (3)
+    //   folder list                              (folderH)
+    //   [panel only] divider + review list       (1 + reviewH)
+    //   footer: blank + status + help            (3)
     private func render() {
-        switch screen {
-        case .browse: renderBrowse()
-        case .review: renderReview()
-        }
-    }
-
-    private func renderBrowse() {
         let (rows, cols) = terminalSize()
-        let listH = max(1, rows - 6)
-        let items = currentBrowseRows()
-        clamp(&browseCursor, items.count)
-        adjustTop(&browseTop, cursor: browseCursor, height: listH, count: items.count)
-
         var lines: [String] = []
         lines.append(bold(fit("baaackaaab — configure backup set", cols)))
         lines.append(cyan(fit("dir: " + tildePath(of: cwd), cols)))
         lines.append("")
-        for r in 0..<listH {
+
+        if showReview {
+            let contentH = rows - 7   // folder + divider(1) + review, between header(3)/footer(3)
+            let setCount = setRows().count
+            var reviewH = min(max(setCount, 3), max(1, contentH / 3))
+            reviewH = max(1, min(reviewH, contentH - 1))
+            let folderH = max(1, contentH - reviewH)
+            appendFolderRows(&lines, height: folderH, cols: cols, focused: false)
+            lines.append(divider("selected — v/esc back \u{2022} space remove \u{2022} a add album ", cols))
+            appendReviewRows(&lines, height: reviewH, cols: cols, focused: true)
+        } else {
+            appendFolderRows(&lines, height: max(1, rows - 6), cols: cols, focused: true)
+        }
+
+        lines.append("")
+        lines.append(dim(fit(statusLine(), cols)))
+        lines.append(dim(fit(helpLine(), cols)))
+        draw(lines)
+    }
+
+    private func appendFolderRows(_ lines: inout [String], height: Int, cols: Int, focused: Bool) {
+        let items = currentBrowseRows()
+        clamp(&browseCursor, items.count)
+        adjustTop(&browseTop, cursor: browseCursor, height: height, count: items.count)
+        for r in 0..<height {
             let idx = browseTop + r
             if idx < items.count {
-                lines.append(renderBrowseRow(items[idx], cursor: idx == browseCursor, cols: cols))
+                lines.append(renderBrowseRow(items[idx], cursor: focused && idx == browseCursor, cols: cols))
             } else {
                 lines.append("")
             }
         }
-        lines.append("")
-        lines.append(dim(fit(statusLine(), cols)))
-        lines.append(dim(fit("up/dn move \u{2022} right open \u{2022} left up \u{2022} space pick \u{2022} c pick-dir \u{2022} v review \u{2022} . hidden \u{2022} s save \u{2022} q quit", cols)))
-        draw(lines)
     }
 
-    private func renderReview() {
-        let (rows, cols) = terminalSize()
-        let listH = max(1, rows - 6)
+    private func appendReviewRows(_ lines: inout [String], height: Int, cols: Int, focused: Bool) {
         let items = setRows()
         clamp(&reviewCursor, items.count)
-        adjustTop(&reviewTop, cursor: reviewCursor, height: listH, count: items.count)
-
-        var lines: [String] = []
-        lines.append(bold(fit("baaackaaab — selected sources", cols)))
-        lines.append(cyan(fit("file: " + tildePath(of: configPath), cols)))
-        lines.append("")
+        adjustTop(&reviewTop, cursor: reviewCursor, height: height, count: items.count)
         if items.isEmpty {
-            lines.append(dim(fit("  nothing selected yet — press v to browse folders, a to add an album", cols)))
-            for _ in 1..<listH { lines.append("") }
-        } else {
-            for r in 0..<listH {
-                let idx = reviewTop + r
-                if idx < items.count {
-                    lines.append(renderSetRow(items[idx], cursor: idx == reviewCursor, cols: cols))
-                } else {
-                    lines.append("")
-                }
+            lines.append(dim(fit("  nothing selected yet — space-pick folders above, a to add an album", cols)))
+            for _ in 1..<max(1, height) { lines.append("") }
+            return
+        }
+        for r in 0..<height {
+            let idx = reviewTop + r
+            if idx < items.count {
+                lines.append(renderSetRow(items[idx], cursor: focused && idx == reviewCursor, cols: cols))
+            } else {
+                lines.append("")
             }
         }
-        lines.append("")
-        lines.append(dim(fit(statusLine(), cols)))
-        lines.append(dim(fit("up/dn move \u{2022} space remove \u{2022} a add album \u{2022} v browse \u{2022} s save \u{2022} q quit", cols)))
-        draw(lines)
     }
 
     private func renderBrowseRow(_ row: BrowseRow, cursor: Bool, cols: Int) -> String {
         var text: String
-        var selected = false
+        var state: DirState = .none
         switch row {
         case .parent:
             text = "  ..  (up)"
         case .dir(let url):
-            selected = isSelected(url)
-            text = (selected ? "[x] " : "[ ] ") + url.lastPathComponent + "/"
+            state = dirState(url)
+            let box: String
+            switch state {
+            case .selected: box = "[x] "
+            case .partial:  box = "[~] "
+            case .none:     box = "[ ] "
+            }
+            text = box + url.lastPathComponent + "/"
         }
         var plain = fit(text, cols)
         if cursor {
             plain = plain.padding(toLength: cols, withPad: " ", startingAt: 0)
             return rev(plain)
         }
-        return selected ? green(plain) : plain
+        switch state {
+        case .selected: return green(plain)
+        case .partial:  return yellow(plain)
+        case .none:     return plain
+        }
     }
 
     private func renderSetRow(_ row: SetRow, cursor: Bool, cols: Int) -> String {
@@ -376,6 +425,13 @@ final class ConfigTUI {
         return parts.joined(separator: "  \u{2022}  ")
     }
 
+    private func helpLine() -> String {
+        if showReview {
+            return "up/dn move \u{2022} space remove \u{2022} a add album \u{2022} v/esc back \u{2022} s save \u{2022} q quit"
+        }
+        return "up/dn move \u{2022} right open \u{2022} left up \u{2022} space pick \u{2022} c pick-dir \u{2022} v review \u{2022} . hidden \u{2022} g iCloud \u{2022} s save \u{2022} q quit"
+    }
+
     // MARK: - Terminal primitives
 
     private func draw(_ lines: [String]) {
@@ -390,6 +446,14 @@ final class ConfigTUI {
     private func drawPrompt(_ msg: String) {
         let (rows, cols) = terminalSize()
         emit("\u{1B}[\(rows);1H\u{1B}[2K" + rev(fit(msg, cols)))
+    }
+
+    /// A full-width horizontal rule with a leading label, padded to exactly
+    /// `cols` so it reads as a section break (no fit() ellipsis at the end).
+    private func divider(_ label: String, _ cols: Int) -> String {
+        let head = "\u{2500}\u{2500} " + label
+        if head.count >= cols { return dim(String(head.prefix(cols))) }
+        return dim(head + String(repeating: "\u{2500}", count: cols - head.count))
     }
 
     /// Drop to cooked mode for a single line of input (e.g. an album name),
@@ -486,5 +550,6 @@ final class ConfigTUI {
     private func dim(_ s: String) -> String { "\u{1B}[2m" + s + "\u{1B}[0m" }
     private func cyan(_ s: String) -> String { "\u{1B}[36m" + s + "\u{1B}[0m" }
     private func green(_ s: String) -> String { "\u{1B}[32m" + s + "\u{1B}[0m" }
+    private func yellow(_ s: String) -> String { "\u{1B}[33m" + s + "\u{1B}[0m" }
     private func rev(_ s: String) -> String { "\u{1B}[7m" + s + "\u{1B}[0m" }
 }
