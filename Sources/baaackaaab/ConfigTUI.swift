@@ -53,6 +53,29 @@ private enum Key: Equatable {
     case char(Character)
 }
 
+// Signal-safe terminal restore. A killed TUI (closing the terminal window sends
+// SIGHUP, `kill` sends SIGTERM) must not leave the terminal in raw mode with the
+// cursor hidden and the alternate screen still up — the next shell prompt would
+// be unusable. The normal-exit path restores via `defer`, but a signal bypasses
+// it, so we stash the cooked termios when raw mode is entered and install
+// async-signal-safe handlers (tcsetattr / write / signal / raise are all
+// async-signal-safe) that restore it and then re-raise with the default
+// disposition so the exit status still reflects the signal.
+private var cookedTermForSignal = termios()
+private var cookedTermValid = false
+private let ttyRestoreBytes: [UInt8] = Array("\u{1B}[?25h\u{1B}[?1049l".utf8)   // show cursor + leave alt screen
+
+private func ttyRestoreSignalHandler(_ signo: Int32) {
+    if cookedTermValid {
+        tcsetattr(STDIN_FILENO, TCSAFLUSH, &cookedTermForSignal)
+    }
+    ttyRestoreBytes.withUnsafeBytes { raw in
+        _ = write(STDOUT_FILENO, raw.baseAddress, raw.count)
+    }
+    signal(signo, SIG_DFL)
+    raise(signo)
+}
+
 /// RAII wrapper around the terminal's raw mode. cfmakeraw() turns off echo,
 /// canonical line buffering, signal generation (so Ctrl-C arrives as a byte we
 /// handle) and output post-processing — we position the cursor absolutely, so
@@ -66,6 +89,9 @@ private final class RawTerminal {
         guard tcgetattr(STDIN_FILENO, &original) == 0 else { return nil }
         raw = original
         cfmakeraw(&raw)
+        // Make the cooked state reachable from the async signal handlers.
+        cookedTermForSignal = original
+        cookedTermValid = true
         enable()
     }
 
@@ -145,7 +171,17 @@ final class ConfigTUI {
         self.hasHome = home
         self.screen = home ? .home : .editor
         emit("\u{1B}[?1049h\u{1B}[?25l")   // alternate screen + hide cursor
-        defer { term.restore() }           // always hand the terminal back cooked
+        // Restore the terminal on SIGHUP/SIGTERM/SIGINT too, not just normal exit.
+        signal(SIGHUP, ttyRestoreSignalHandler)
+        signal(SIGTERM, ttyRestoreSignalHandler)
+        signal(SIGINT, ttyRestoreSignalHandler)
+        defer {
+            term.restore()                 // always hand the terminal back cooked
+            cookedTermValid = false
+            signal(SIGHUP, SIG_DFL)
+            signal(SIGTERM, SIG_DFL)
+            signal(SIGINT, SIG_DFL)
+        }
 
         loop: while true {
             if screen == .home { renderHome() } else { render() }
