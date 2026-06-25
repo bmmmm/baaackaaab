@@ -16,11 +16,17 @@ struct BackupSet: Codable, Equatable {
     var photoAlbums: [String]
     /// Optional configured server quota in bytes, for the soft pre-flight gauge.
     var quotaBytes: Int?
+    /// Optional upload throttle in KiB/s, passed to `restic backup --limit-upload`.
+    /// Persisted here so the unattended timer (which runs a bare `baaackaaab`) is
+    /// throttled too — an overnight backup can be capped without touching the timer.
+    var limitUploadKiBps: Int?
 
-    init(driveFolders: [String] = [], photoAlbums: [String] = [], quotaBytes: Int? = nil) {
+    init(driveFolders: [String] = [], photoAlbums: [String] = [],
+         quotaBytes: Int? = nil, limitUploadKiBps: Int? = nil) {
         self.driveFolders = driveFolders
         self.photoAlbums = photoAlbums
         self.quotaBytes = quotaBytes
+        self.limitUploadKiBps = limitUploadKiBps
     }
 
     // Stable snake_case keys, written explicitly so the on-disk file stays
@@ -29,16 +35,18 @@ struct BackupSet: Codable, Equatable {
         case driveFolders = "drive_folders"
         case photoAlbums = "photo_albums"
         case quotaBytes = "quota_bytes"
+        case limitUploadKiBps = "limit_upload_kibps"
     }
 
     // Tolerant decode: a hand-edited file may omit an array entirely (e.g. only
     // photo_albums set). Treat any missing list as empty instead of failing the
-    // whole load. Encode stays synthesized (omits nil quota, keeps both lists).
+    // whole load. Encode stays synthesized (omits nil knobs, keeps both lists).
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         driveFolders = try c.decodeIfPresent([String].self, forKey: .driveFolders) ?? []
         photoAlbums = try c.decodeIfPresent([String].self, forKey: .photoAlbums) ?? []
         quotaBytes = try c.decodeIfPresent(Int.self, forKey: .quotaBytes)
+        limitUploadKiBps = try c.decodeIfPresent(Int.self, forKey: .limitUploadKiBps)
     }
 
     // A set with no sources contributes nothing to a run.

@@ -126,17 +126,36 @@ final class ResticBackend {
     }
 
     /// Back up the given paths into a single snapshot. restic output streams
-    /// live to the terminal so progress is visible.
-    func backup(paths: [URL], tags: [String], host: String?) throws {
+    /// live to the terminal so progress is visible. `dryRun` passes
+    /// `--dry-run --verbose` so restic reports what WOULD be backed up (new /
+    /// changed bytes) and uploads nothing — a true preview that touches the repo
+    /// read-only. `limitUploadKiBps`, when > 0, throttles the upload via
+    /// `--limit-upload` (KiB/s); it is irrelevant on a dry run (nothing uploads).
+    func backup(paths: [URL], tags: [String], host: String?,
+                dryRun: Bool = false, limitUploadKiBps: Int? = nil) throws {
         var args = ["backup", "--compression", "auto"]
+        if let limitUploadKiBps, limitUploadKiBps > 0, !dryRun {
+            args += ["--limit-upload", String(limitUploadKiBps)]
+        }
+        if dryRun { args += ["--dry-run", "--verbose"] }
         if let host { args += ["--host", host] }
         for tag in tags { args += ["--tag", tag] }
         args += paths.map { $0.path }
 
         let names = paths.map { $0.lastPathComponent }.joined(separator: ", ")
-        Console.step("restic: backup [\(names)] tags=\(tags.joined(separator: ","))")
+        let mode = dryRun ? " (dry run — nothing uploaded)" : ""
+        Console.step("restic: backup [\(names)] tags=\(tags.joined(separator: ","))\(mode)")
         let code = try run(args)
         if code != 0 { throw ResticError.failed(command: "backup", code: code) }
+    }
+
+    /// Read-only existence probe: true when the repository is present and
+    /// reachable (`cat config` exits 0), WITHOUT ever initializing it. The dry-run
+    /// preview uses this in place of `ensureInitialized` so a preview never writes
+    /// (creates) a repository. Bounded like the init probe so a dead destination
+    /// is skipped quickly rather than stalling on restic's backend retries.
+    func exists() -> Bool {
+        ((try? run(["cat", "config"], quiet: true, timeout: Self.probeTimeout)) ?? 1) == 0
     }
 
     /// Restore a snapshot into `target`. `dryRun` previews (writes nothing);

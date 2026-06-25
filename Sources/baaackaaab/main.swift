@@ -74,9 +74,11 @@ func printUsage() {
         ("--remove-folder <dir>", "remove a Drive folder from the set (repeatable)"),
         ("--add-album <name>", "add a Photos album to the set (repeatable)"),
         ("--remove-album <name>", "remove a Photos album from the set (repeatable)"),
+        ("--limit-upload <n>", "persist an upload throttle of n KiB/s (applies to the timer too)"),
+        ("--clear-limit-upload", "remove the upload throttle"),
         ("--config <path>", "backup-set file (default ~/.config/baaackaaab/backup-set.json)"),
     ])
-    Console.note("A bare `baaackaaab` (no source flags) backs up the set; the launchd timer runs exactly that. Explicit --drive-folder/--photo-album override the set for ad-hoc runs.")
+    Console.note("A bare `baaackaaab` (no source flags) backs up the set; the launchd timer runs exactly that. Explicit --drive-folder/--photo-album override the set for ad-hoc runs. Add --dry-run to preview a backup (reports what would upload, writes nothing; Photos are skipped in a dry run).")
 
     Console.section("Restic target")
     Console.info([
@@ -661,6 +663,9 @@ func listBackupSet(_ set: BackupSet, path: URL, existed: Bool) {
     if let q = set.quotaBytes {
         pairs.append(("quota", String(format: "%.2f GB", Double(q) / 1_000_000_000)))
     }
+    if let l = set.limitUploadKiBps {
+        pairs.append(("limit-upload", "\(l) KiB/s (\(String(format: "%.1f", Double(l) / 1024)) MiB/s)"))
+    }
     Console.info(pairs)
 }
 
@@ -697,6 +702,20 @@ func manageBackupSet(configPath: URL) {
     for a in argValues("--remove-album") {
         if set.removeAlbum(a) { changed = true; Console.success("removed photo album  \(a)") }
         else { Console.note("photo album not in set: \(a)") }
+    }
+    // Upload-throttle knob: persisted in the set so the unattended timer is
+    // throttled too. `--limit-upload <n>` sets KiB/s; `--clear-limit-upload` lifts it.
+    if let raw = argValue("--limit-upload") {
+        guard let n = Int(raw), n > 0 else {
+            Console.error("--limit-upload needs a positive integer (KiB/s), e.g. --limit-upload 2048 for ~2 MiB/s")
+            exit(1)
+        }
+        if set.limitUploadKiBps != n { set.limitUploadKiBps = n; changed = true; Console.success("upload limit set to \(n) KiB/s") }
+        else { Console.note("upload limit already \(n) KiB/s") }
+    }
+    if CommandLine.arguments.contains("--clear-limit-upload") {
+        if set.limitUploadKiBps != nil { set.limitUploadKiBps = nil; changed = true; Console.success("upload limit cleared (unthrottled)") }
+        else { Console.note("no upload limit was set") }
     }
 
     if changed {
@@ -856,8 +875,11 @@ if CommandLine.arguments.contains("--configure") {
     exit(0)
 }
 
-// Backup-set management (--list / --add-* / --remove-*): edit the set and exit.
-if ["--list", "--add-folder", "--remove-folder", "--add-album", "--remove-album"]
+// Backup-set management (--list / --add-* / --remove-* / --limit-upload): edit
+// the set and exit. --limit-upload is a PERSISTENT knob (like --add-folder), not
+// a per-run flag — a backup reads the throttle from the set, never from argv.
+if ["--list", "--add-folder", "--remove-folder", "--add-album", "--remove-album",
+    "--limit-upload", "--clear-limit-upload"]
     .contains(where: CommandLine.arguments.contains) {
     manageBackupSet(configPath: configPath)
     exit(0)
@@ -869,6 +891,7 @@ if ["--list", "--add-folder", "--remove-folder", "--add-album", "--remove-album"
 var driveFolders = argValues("--drive-folder")
 var photoAlbums = argValues("--photo-album")
 var configQuotaBytes: Int? = nil
+var configLimitUploadKiBps: Int? = nil
 if driveFolders.isEmpty && photoAlbums.isEmpty
     && FileManager.default.fileExists(atPath: configPath.path) {
     do {
@@ -876,11 +899,18 @@ if driveFolders.isEmpty && photoAlbums.isEmpty
         driveFolders = set.driveFolders
         photoAlbums = set.photoAlbums
         configQuotaBytes = set.quotaBytes
+        configLimitUploadKiBps = set.limitUploadKiBps
     } catch {
         Console.error("backup set at \(configPath.path) is unreadable — fix or delete it: \(error)")
         exit(1)
     }
 }
+
+// `--dry-run` on a backup → preview only: restic reports what would be uploaded
+// and writes nothing. Drive folders are previewed (materialize is a read-only
+// coordinated read); Photos are SKIPPED on a dry run (a real preview there would
+// have to export every original to staging, costing as much as a real backup).
+let backupDryRun = CommandLine.arguments.contains("--dry-run")
 
 // Scratch dir for photo batches + the manifest (Drive is backed up in place, so
 // it is not copied here). Default to an ABSOLUTE path under Caches: a relative
@@ -959,6 +989,10 @@ do {
         info.insert(("destinations",
                      destinations.map { "\($0.name) [\($0.link)]" }.joined(separator: ", ")), at: 0)
     }
+    if backupDryRun { info.append(("mode", "dry run — preview only, nothing uploaded")) }
+    if let lim = configLimitUploadKiBps, lim > 0, !backupDryRun {
+        info.append(("limit-upload", "\(lim) KiB/s"))
+    }
     Console.info(info)
 
     // Initialize every destination, best-effort. A destination that can't be
@@ -967,6 +1001,18 @@ do {
     // to clobber an existing repo, so this is safe to call every run.)
     Console.section("Destinations")
     for run in runs {
+        if backupDryRun {
+            // A dry run must write NOTHING, so probe for the repo instead of
+            // initializing it. A not-yet-created repo can't be previewed against —
+            // record that as this destination's skip reason, don't init it.
+            if run.backend.exists() {
+                Console.success("\(run.destination.name): reachable (dry run — not initialized)  \(Credentials.redact(run.backend.repository))")
+            } else {
+                run.initError = "repository does not exist yet — run a real backup or `--check` first to create it (a dry run never initializes)"
+                Console.failure("\(run.destination.name): \(run.initError!)")
+            }
+            continue
+        }
         do {
             try run.backend.ensureInitialized()
             Console.success("\(run.destination.name): ready  \(Credentials.redact(run.backend.repository))")
@@ -987,6 +1033,14 @@ do {
 
     let ready = runs.filter { $0.ready }
     if ready.isEmpty {
+        // A dry run with nothing previewable (no repo created yet) is not a backup
+        // failure — report it and exit non-zero, but don't record a run or fire the
+        // failure banner (it wrote nothing and isn't the unattended timer's job).
+        if backupDryRun {
+            Console.summary(headline: "dry run — no destination is previewable (no repository exists yet); nothing was written",
+                            state: .warn, details: [("run-tag", runTag)])
+            exit(1)
+        }
         Console.summary(headline: "no destination could be initialized — nothing was backed up",
                         state: .fail, details: [("run-tag", runTag)])
         recordRun(exitCode: 2, verified: 0, total: 0, sourceFailures: 0)
@@ -1004,7 +1058,8 @@ do {
         for run in ready {
             if BackupCancellation.shared.isCancelled { throw RunCancelled() }
             do {
-                try run.backend.backup(paths: paths, tags: tags, host: host)
+                try run.backend.backup(paths: paths, tags: tags, host: host,
+                                       dryRun: backupDryRun, limitUploadKiBps: configLimitUploadKiBps)
             } catch {
                 // A cancel interrupts restic into a non-zero (130) exit; treat that
                 // as cancellation, not as this destination's own backup failure.
@@ -1071,7 +1126,10 @@ do {
         // 2) iCloud Photos — export in byte-budgeted batches; each batch is backed
         //    up to EVERY destination and then deleted, so peak extra disk stays
         //    ~one batch (not 27 GB) regardless of how many destinations there are.
-        if photoAlbums.isEmpty {
+        if backupDryRun && !photoAlbums.isEmpty {
+            Console.section("iCloud Photos")
+            Console.note("dry run — skipping Photos: a real preview would have to export every original to staging (as costly as a real backup). Run without --dry-run to back them up.")
+        } else if photoAlbums.isEmpty {
             Console.section("iCloud Photos")
             Console.note("no photo album configured, skipping Photos")
         } else {
@@ -1111,6 +1169,24 @@ do {
         }
     } catch is RunCancelled {
         runCancelled = true
+    }
+
+    // A dry run is a preview: it stages nothing and uploads nothing, so finish
+    // here — skip the manifest, the run-history record, and the failure banner,
+    // and never fall through to the "nothing acquired" failure path (a dry run
+    // legitimately acquires nothing). Re-running without --dry-run does the work.
+    if backupDryRun {
+        var d: [(String, String)] = [("run-tag", runTag)]
+        let unavailable = runs.filter { $0.initError != nil }.count
+        if unavailable > 0 { d.append(("note", "\(unavailable) destination(s) not previewable (repo not created yet)")) }
+        if driveFailures > 0 { d.append(("drive", "\(driveFailures) folder(s) could not be materialized")) }
+        Console.summary(
+            headline: runCancelled
+                ? "dry run cancelled — nothing was written"
+                : "dry run complete — previewed against \(ready.count) destination(s); nothing was uploaded. Re-run without --dry-run to back up.",
+            state: runCancelled ? .warn : .ok,
+            details: d)
+        exit(runCancelled ? 130 : 0)
     }
 
     // The manifest is a local diagnostic, so writing it is best-effort: a failure
