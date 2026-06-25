@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#endif
 
 // The safe restore engine. Restore is the one operation where baaackaaab writes a
 // lot of data, so it is safe BY CONSTRUCTION:
@@ -44,21 +47,28 @@ enum RestoreEngine {
     /// near-root paths, the home directory itself, anything inside live iCloud
     /// Drive / Photos, and any existing non-empty directory. A non-existent path
     /// (the usual case for the fresh default) passes.
+    ///
+    /// The forbidden-root comparison is the safety-critical part. It must hold on a
+    /// CASE-INSENSITIVE volume (APFS default on macOS): a literal lowercase target
+    /// like `~/library/mobile documents/…` resolves on disk to the real iCloud
+    /// Drive, so a case-sensitive string prefix check would wave it through. We
+    /// therefore (1) canonicalize the target — realpath the longest existing
+    /// ancestor, which yields its true on-disk case and resolves symlinks, then
+    /// re-append the not-yet-existing tail — and (2) compare path COMPONENTS
+    /// case-insensitively, so neither case nor a component boundary can be gamed.
     static func validateTarget(_ target: URL) throws {
-        let resolved = target.resolvingSymlinksInPath().standardizedFileURL
+        let resolved = canonicalize(target)
         let path = resolved.path
-        let home = FileManager.default.homeDirectoryForCurrentUser
-            .resolvingSymlinksInPath().standardizedFileURL
+        let home = canonicalize(FileManager.default.homeDirectoryForCurrentUser)
 
-        if path == "/" || resolved.pathComponents.count < 3 {
+        if resolved.pathComponents.count < 3 {
             throw RestoreError.unsafeTarget(path: path, reason: "that is too close to the filesystem root")
         }
-        if path == home.path {
+        if samePath(resolved, home) {
             throw RestoreError.unsafeTarget(path: path, reason: "that is your home directory")
         }
         for root in forbiddenRoots() {
-            let r = root.resolvingSymlinksInPath().standardizedFileURL.path
-            if path == r || path.hasPrefix(r + "/") {
+            if isAtOrUnder(resolved, canonicalize(root)) {
                 throw RestoreError.unsafeTarget(
                     path: path,
                     reason: "that is inside live iCloud Drive / Photos — restoring there could overwrite your originals")
@@ -77,6 +87,51 @@ enum RestoreEngine {
                 throw RestoreError.targetNotEmpty(path)
             }
         }
+    }
+
+    /// Canonicalize a path for safe comparison on a case-insensitive volume:
+    /// realpath the LONGEST existing ancestor (which returns its true on-disk case
+    /// and fully resolves symlinks), then re-append the components that do not
+    /// exist yet (the fresh restore dir). Falls back to the standardized path when
+    /// nothing along it exists.
+    private static func canonicalize(_ url: URL) -> URL {
+        let components = url.standardizedFileURL.resolvingSymlinksInPath().pathComponents
+        let fm = FileManager.default
+        var existing = components.count
+        while existing > 0 {
+            let prefix = NSString.path(withComponents: Array(components[0..<existing]))
+            if fm.fileExists(atPath: prefix) {
+                guard let real = realpathString(prefix) else { break }
+                var result = URL(fileURLWithPath: real, isDirectory: true)
+                for c in components[existing...] { result.appendPathComponent(c) }
+                return result.standardizedFileURL
+            }
+            existing -= 1
+        }
+        return url.standardizedFileURL
+    }
+
+    /// realpath(3) wrapper: the canonical, symlink-free, true-case absolute path,
+    /// or nil if it cannot be resolved.
+    private static func realpathString(_ path: String) -> String? {
+        guard let c = realpath(path, nil) else { return nil }
+        defer { free(c) }
+        return String(cString: c)
+    }
+
+    /// True when `path` is `root` or a descendant of it, comparing path COMPONENTS
+    /// case-insensitively (so neither letter-case nor a component boundary —
+    /// e.g. `~/PicturesXYZ` vs `~/Pictures` — can sneak past).
+    private static func isAtOrUnder(_ path: URL, _ root: URL) -> Bool {
+        let p = path.pathComponents.map { $0.lowercased() }
+        let r = root.pathComponents.map { $0.lowercased() }
+        guard p.count >= r.count else { return false }
+        return Array(p.prefix(r.count)) == r
+    }
+
+    /// True when two paths are the same directory (case-insensitive, component-wise).
+    private static func samePath(_ a: URL, _ b: URL) -> Bool {
+        a.pathComponents.map { $0.lowercased() } == b.pathComponents.map { $0.lowercased() }
     }
 
     /// The default fresh target when --target is omitted:
