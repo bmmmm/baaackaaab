@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#endif
 
 // baaackaaab acquisition prototype.
 //
@@ -595,6 +598,16 @@ runFmt.dateFormat = "yyyyMMdd-HHmmss"
 let runTag = argValue("--run-tag") ?? "run-\(runFmt.string(from: Date()))"
 let runStart = Date()
 
+// Fire a macOS failure banner, but ONLY when our output is invisible (launchd or
+// piped): an interactive run already shows the summary on screen, so a banner
+// there would be noise. This is the unattended timer's one human-visible failure
+// signal — the scheduled log goes unread.
+func notifyOnFailure(_ headline: String) {
+    guard isatty(STDERR_FILENO) == 0 else { return }
+    Notifier.notify(title: "baaackaaab \u{2014} backup failed",
+                    message: headline, subtitle: "run \(runTag)")
+}
+
 do {
     let staging = try Staging(root: stagingURL)
     let runs = destinations.map { DestinationRun($0) }
@@ -645,6 +658,7 @@ do {
         Console.summary(headline: "no destination could be initialized — nothing was backed up",
                         state: .fail, details: [("run-tag", runTag)])
         recordRun(exitCode: 2, verified: 0, total: 0, sourceFailures: 0)
+        notifyOnFailure("no destination could be initialized — nothing was backed up")
         exit(2)
     }
 
@@ -775,6 +789,7 @@ do {
         let extra = sourceFailures > 0 ? " (\(sourceFailures) source(s) failed)" : ""
         Console.summary(headline: "nothing was acquired\(extra)", state: .fail, details: details)
         recordRun(exitCode: 2, verified: verified, total: total, sourceFailures: sourceFailures)
+        notifyOnFailure("nothing was acquired\(extra)")
         exit(2)
     }
     var problems: [String] = []
@@ -789,6 +804,7 @@ do {
             details: details
         )
         recordRun(exitCode: 2, verified: verified, total: total, sourceFailures: sourceFailures)
+        notifyOnFailure("\(verified)/\(total) verified — \(problems.joined(separator: "; "))")
         exit(2)
     }
     Console.summary(
@@ -805,5 +821,6 @@ do {
     try? RunHistory.append(RunRecord(runTag: runTag, start: runStart, end: Date(),
                                      exitCode: 1, verified: 0, total: 0,
                                      sourceFailures: 0, destinations: []))
+    notifyOnFailure("\(error)")
     exit(1)
 }
