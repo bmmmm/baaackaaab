@@ -30,15 +30,59 @@ enum ResticError: Error, CustomStringConvertible {
 /// the redacted log line — restic itself reads the already-exported environment.
 final class ResticBackend {
     let repository: String
-    private let executable: String
+    /// Absolute path to the restic binary, resolved once at init. nil when it
+    /// could not be found anywhere — every run then throws `ResticError.notFound`.
+    private let executablePath: String?
 
     init(repository: String, executable: String = "restic") {
         self.repository = repository
-        self.executable = executable
+        self.executablePath = Self.resolveExecutable(executable)
+    }
+
+    /// Resolve the restic binary to an absolute path.
+    ///
+    /// We must NOT rely on `/usr/bin/env restic` / a bare PATH lookup: under
+    /// launchd the inherited PATH is the minimal `/usr/bin:/bin:/usr/sbin:/sbin`,
+    /// which does not include Homebrew — so the lookup fails with exit 127 and the
+    /// scheduled backup would silently never run. Resolving an absolute path here,
+    /// independent of the inherited PATH, is what makes the timer actually work.
+    ///
+    /// Order: an explicit absolute path (trusted if executable) → the `RESTIC_BIN`
+    /// override → the common install locations (Homebrew arm64 + Intel, manual
+    /// /usr/local, system) → finally a PATH walk for bespoke installs.
+    private static func resolveExecutable(_ name: String) -> String? {
+        let fm = FileManager.default
+        if name.hasPrefix("/") {
+            return fm.isExecutableFile(atPath: name) ? name : nil
+        }
+        if let override = ProcessInfo.processInfo.environment["RESTIC_BIN"],
+           !override.isEmpty, fm.isExecutableFile(atPath: override) {
+            return override
+        }
+        let candidates = [
+            "/opt/homebrew/bin/\(name)",
+            "/usr/local/bin/\(name)",
+            "/usr/bin/\(name)",
+        ]
+        for path in candidates where fm.isExecutableFile(atPath: path) { return path }
+        if let pathEnv = ProcessInfo.processInfo.environment["PATH"] {
+            for dir in pathEnv.split(separator: ":") {
+                let full = String(dir) + "/" + name
+                if fm.isExecutableFile(atPath: full) { return full }
+            }
+        }
+        return nil
     }
 
     /// Initialize the repo if it does not exist yet. Uses repository format v2
     /// so zstd compression is available (helps text/PDF; photos won't shrink).
+    ///
+    /// The existence probe is `cat config`: exit 0 means the repo is present, any
+    /// other exit means "try to init". A missing restic binary no longer slips
+    /// through here as a false "repo absent" — `run` throws `notFound` (resolved
+    /// path nil), which propagates instead of triggering a bogus init. `init`
+    /// itself refuses to clobber an existing repo, so a misread transient failure
+    /// cannot destroy data — it just surfaces init's own error.
     func ensureInitialized() throws {
         if try run(["cat", "config"], quiet: true) == 0 { return }
         Console.step("restic: initializing repository (format v2) at \(Credentials.redact(repository))")
@@ -135,9 +179,10 @@ final class ResticBackend {
     /// not for streaming commands. Reads the pipe to EOF before waiting so a large
     /// payload can't deadlock on a full pipe buffer.
     private func runCapturing(_ args: [String], command: String) throws -> String {
+        guard let exe = executablePath else { throw ResticError.notFound }
         let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        proc.arguments = [executable] + args
+        proc.executableURL = URL(fileURLWithPath: exe)
+        proc.arguments = args
         let pipe = Pipe()
         proc.standardOutput = pipe
         proc.standardError = FileHandle.nullDevice
@@ -156,9 +201,10 @@ final class ResticBackend {
     /// sees live progress. The child inherits our environment, so
     /// `RESTIC_PASSWORD` flows through without ever touching argv.
     private func run(_ args: [String], quiet: Bool = false) throws -> Int32 {
+        guard let exe = executablePath else { throw ResticError.notFound }
         let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        proc.arguments = [executable] + args
+        proc.executableURL = URL(fileURLWithPath: exe)
+        proc.arguments = args
         // Feed /dev/null so a missing RESTIC_PASSWORD fails fast and visibly
         // instead of hanging on an interactive prompt we'd never see.
         proc.standardInput = FileHandle.nullDevice
