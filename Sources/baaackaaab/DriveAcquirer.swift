@@ -4,14 +4,12 @@ enum DriveError: Error, CustomStringConvertible {
     case cannotEnumerate(String)
     case downloadTimeout(String)
     case stillDataless(String)
-    case verifyFailed(String)
 
     var description: String {
         switch self {
         case .cannotEnumerate(let p): return "cannot enumerate \(p)"
         case .downloadTimeout(let p): return "iCloud download timed out for \(p)"
         case .stillDataless(let p): return "file is still a dataless stub after download attempt: \(p)"
-        case .verifyFailed(let p): return "byte verification failed for \(p)"
         }
     }
 }
@@ -92,51 +90,6 @@ final class DriveAcquirer {
         }
     }
 
-    func acquire(folder: URL, into staging: Staging) throws {
-        let driveDir = try staging.subdir("drive")
-        guard let enumerator = fm.enumerator(
-            at: folder,
-            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
-            options: [.skipsHiddenFiles]
-        ) else {
-            throw DriveError.cannotEnumerate(folder.path)
-        }
-
-        for case let fileURL as URL in enumerator {
-            let isFile = (try? fileURL.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile ?? false
-            guard isFile else { continue }
-
-            let rel = relativePath(of: fileURL, base: folder)
-            Console.step("\(rel) — \(downloadStatusDescription(fileURL)) dataless=\(isDataless(fileURL))")
-
-            try ensureMaterialized(fileURL, timeout: 120)
-            if isDataless(fileURL) {
-                throw DriveError.stillDataless(rel)
-            }
-
-            // Copy real bytes into staging, preserving the relative layout.
-            let dest = driveDir.appendingPathComponent(rel)
-            try fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
-            if fm.fileExists(atPath: dest.path) { try fm.removeItem(at: dest) }
-            try fm.copyItem(at: fileURL, to: dest)
-
-            // Verify: staged bytes present and size matches the source.
-            let srcSize = (try fileURL.resourceValues(forKeys: [.fileSizeKey])).fileSize ?? -1
-            let dstSize = (try dest.resourceValues(forKeys: [.fileSizeKey])).fileSize ?? -2
-            let ok = dstSize > 0 && srcSize == dstSize
-            staging.record(AcquiredItem(
-                source: fileURL.path,
-                kind: "drive",
-                stagedPath: dest.path,
-                byteCount: dstSize,
-                verified: ok,
-                note: ok ? nil : "size mismatch src=\(srcSize) dst=\(dstSize)"
-            ))
-            Console.detail("staged \(dstSize) bytes verified=\(ok)")
-            if !ok { throw DriveError.verifyFailed(rel) }
-        }
-    }
-
     /// Materialize every regular file under `folder` and prove it holds real
     /// bytes — WITHOUT copying. This lets restic read the live tree directly,
     /// so we avoid a full-size staging copy (the Drive set is ~11 GB and the
@@ -145,10 +98,16 @@ final class DriveAcquirer {
     /// stub that refuses to materialize. A legitimately empty file (0 bytes,
     /// not dataless) is fine — the dataless flag, not the size, is the signal.
     func materializeAndVerify(folder: URL, into staging: Staging) throws {
+        // NO .skipsHiddenFiles: restic backs up the whole live tree, INCLUDING
+        // hidden files and dotfiles, so materialization must cover exactly the
+        // same set. Skipping hidden entries here would let a hidden dataless stub
+        // (e.g. an evicted .something) reach restic as a 0-byte placeholder —
+        // precisely the failure this guard exists to prevent. The dataless flag,
+        // not the name, is the signal; we descend into hidden dirs too.
         guard let enumerator = fm.enumerator(
             at: folder,
             includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
-            options: [.skipsHiddenFiles]
+            options: []
         ) else {
             throw DriveError.cannotEnumerate(folder.path)
         }
@@ -162,18 +121,21 @@ final class DriveAcquirer {
             try ensureMaterialized(fileURL, timeout: 120)
             if isDataless(fileURL) { throw DriveError.stillDataless(rel) }
 
+            // We already proved it is not dataless; the only remaining failure is
+            // an unreadable size, which must NOT be recorded as verified.
             let size = (try? fileURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? -1
+            let ok = size >= 0
             staging.record(AcquiredItem(
                 source: fileURL.path,
                 kind: "drive",
                 stagedPath: fileURL.path,   // backed up in place — no copy
                 byteCount: size,
-                verified: true,
-                note: "in-place (restic reads source)"
+                verified: ok,
+                note: ok ? "in-place (restic reads source)" : "size read failed"
             ))
             count += 1
         }
-        Console.success("materialized + verified \(count) file(s) under \(folder.lastPathComponent) — restic reads in place")
+        Console.success("materialized \(count) file(s) under \(folder.lastPathComponent) — restic reads in place")
     }
 
     private func isUbiquitous(_ url: URL) -> Bool {

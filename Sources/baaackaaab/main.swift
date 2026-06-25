@@ -60,7 +60,7 @@ func printUsage() {
         ("--drive-folder <dir>", "iCloud Drive folder to back up (repeatable; overrides the set)"),
         ("--photo-album <name>", "iCloud Photos album to back up (repeatable; overrides the set)"),
         ("--photo-batch-bytes <n>", "byte budget per photo batch (default 3000000000)"),
-        ("--staging <dir>", "scratch dir for photo batches (default ./tmp/staging)"),
+        ("--staging <dir>", "scratch dir for photo batches (default ~/Library/Caches/baaackaaab/staging)"),
     ])
 
     Console.section("Backup set", detail: "declarative source list — what a bare run backs up")
@@ -443,7 +443,17 @@ if driveFolders.isEmpty && photoAlbums.isEmpty
     }
 }
 
-let stagingURL = URL(fileURLWithPath: argValue("--staging", default: "./tmp/staging")!, isDirectory: true)
+// Scratch dir for photo batches + the manifest (Drive is backed up in place, so
+// it is not copied here). Default to an ABSOLUTE path under Caches: a relative
+// `./tmp/staging` would resolve against the launchd run's CWD (/), writing to
+// /tmp/staging or failing — the scheduled backup must not depend on CWD.
+let stagingURL: URL = {
+    if let s = argValue("--staging") {
+        return URL(fileURLWithPath: (s as NSString).expandingTildeInPath, isDirectory: true)
+    }
+    return FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Caches/baaackaaab/staging", isDirectory: true)
+}()
 let photoBatchBytes = argValue("--photo-batch-bytes").flatMap { Int($0) } ?? 3_000_000_000
 let host = argValue("--host") ?? ProcessInfo.processInfo.hostName
 // Optional remote-quota pre-flight. The rest-server's `--max-size` is a hard
@@ -492,48 +502,65 @@ do {
         }
     }
 
-    // 1) iCloud Drive — materialize + verify in place, then restic reads the
-    //    source tree directly (no full-size staging copy). Strict: a stub that
-    //    refuses to materialize aborts the whole Drive backup before it runs.
+    // 1) iCloud Drive — for each folder: materialize + verify in place, then back
+    //    it up IMMEDIATELY. Backing up per folder (instead of materializing all
+    //    folders and issuing one backup at the very end) closes the TOCTOU window
+    //    where a folder materialized early could be re-evicted by the file
+    //    provider before restic gets to read it. Per-source best-effort: a folder
+    //    that fails to materialize is recorded and skipped — one bad folder must
+    //    not abort the remaining folders or the Photos phase.
+    var driveFailures = 0
     if driveFolders.isEmpty {
         Console.section("iCloud Drive")
         Console.note("no --drive-folder given, skipping Drive")
     } else {
-        var verifiedFolders: [URL] = []
         for folder in driveFolders {
             let url = URL(fileURLWithPath: (folder as NSString).expandingTildeInPath, isDirectory: true)
             Console.section("iCloud Drive", detail: url.path)
-            try DriveAcquirer().materializeAndVerify(folder: url, into: staging)
-            verifiedFolders.append(url)
+            do {
+                try DriveAcquirer().materializeAndVerify(folder: url, into: staging)
+                try restic.backup(paths: [url], tags: [runTag, "drive"], host: host)
+            } catch {
+                driveFailures += 1
+                Console.failure("drive folder skipped: \(url.path) — \(error)")
+            }
         }
-        try restic.backup(paths: verifiedFolders, tags: [runTag, "drive"], host: host)
     }
 
     // 2) iCloud Photos — export in byte-budgeted batches; each batch is backed
     //    up and then deleted, so peak extra disk is ~one batch, not 27 GB.
+    var photoFailures = 0
     if photoAlbums.isEmpty {
         Console.section("iCloud Photos")
         Console.note("no photo album configured, skipping Photos")
     } else {
         // Batch indices run globally across albums so each photo snapshot in a
-        // run gets a distinct batch-N tag, even with more than one album.
+        // run gets a distinct batch-N tag, even with more than one album. Indices
+        // advance by however many batches actually ran (lastIdx), so they stay
+        // monotonic even when an album fails partway. Per-source best-effort: a
+        // failing album is recorded and skipped, not fatal to the others.
         var photoBatchBase = 0
         for album in photoAlbums {
             Console.section("iCloud Photos", detail: "album '\(album)' (batch budget \(photoBatchBytes) bytes)")
-            var lastIdx = 0
-            try PhotosAcquirer().acquireBatched(
-                albumTitle: album,
-                byteBudget: photoBatchBytes,
-                into: staging
-            ) { batchDir, idx in
-                lastIdx = idx
-                try restic.backup(
-                    paths: [batchDir],
-                    tags: [runTag, "photos", "batch-\(photoBatchBase + idx)"],
-                    host: host
-                )
+            var lastIdx = -1
+            do {
+                try PhotosAcquirer().acquireBatched(
+                    albumTitle: album,
+                    byteBudget: photoBatchBytes,
+                    into: staging
+                ) { batchDir, idx in
+                    lastIdx = idx
+                    try restic.backup(
+                        paths: [batchDir],
+                        tags: [runTag, "photos", "batch-\(photoBatchBase + idx)"],
+                        host: host
+                    )
+                }
+            } catch {
+                photoFailures += 1
+                Console.failure("photo album skipped: '\(album)' — \(error)")
             }
-            photoBatchBase += lastIdx + 1
+            photoBatchBase += lastIdx + 1   // lastIdx = -1 (no batches ran) → no-op
         }
     }
 
@@ -541,6 +568,7 @@ do {
 
     let verified = staging.items.filter { $0.verified }.count
     let total = staging.items.count
+    let sourceFailures = driveFailures + photoFailures
     let manifestPath = stagingURL.appendingPathComponent("manifest.json").path
     let details = [
         ("run-tag", runTag),
@@ -548,16 +576,20 @@ do {
     ]
 
     if total == 0 {
+        let extra = sourceFailures > 0 ? " (\(sourceFailures) source(s) failed)" : ""
         Console.summary(
-            headline: "nothing was acquired",
+            headline: "nothing was acquired\(extra)",
             state: .fail,
             details: details
         )
         exit(2)
     }
-    if verified != total {
+    if verified != total || sourceFailures > 0 {
+        var problems: [String] = []
+        if verified != total { problems.append("\(total - verified) item(s) failed verification") }
+        if sourceFailures > 0 { problems.append("\(sourceFailures) source(s) skipped after errors") }
         Console.summary(
-            headline: "\(verified)/\(total) verified — \(total - verified) item(s) failed verification and were skipped; review the manifest",
+            headline: "\(verified)/\(total) verified — \(problems.joined(separator: "; ")); review the manifest",
             state: .warn,
             details: details
         )
