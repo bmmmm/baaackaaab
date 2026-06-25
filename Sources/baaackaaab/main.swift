@@ -102,16 +102,17 @@ func printUsage() {
     Console.section("Restore (read-only browse; restore writes only to a fresh dir)")
     Console.info([
         ("--snapshots", "list snapshots newest-first per destination, then exit"),
+        ("--find <pattern>", "locate a file in a snapshot (single-file restore discovery), then exit"),
         ("--restore", "restore a snapshot into a fresh directory (preview → confirm → verify)"),
         ("--destination <name>", "source destination (required when several are configured)"),
-        ("--snapshot <id>", "which snapshot to restore (short id from --snapshots; default 'latest')"),
+        ("--snapshot <id>", "which snapshot to find/restore (short id; default 'latest')"),
         ("--target <dir>", "restore into this dir (default: ~/baaackaaab-restore/<snap>-<stamp>)"),
-        ("--include <path>", "restore only this subpath of the snapshot"),
+        ("--include <path>", "restore only this subpath — a folder (subtree) or one file"),
         ("--dry-run", "preview what would be restored, write nothing"),
         ("--yes", "skip the confirm prompt (required for a non-interactive restore)"),
         ("--no-verify", "skip the post-restore re-read verification (on by default)"),
     ])
-    Console.note("Restore never writes back into iCloud Drive or Photos — it lands in a fresh directory you then move things back from. Pick a snapshot's short id from --snapshots.")
+    Console.note("Three restore modes: full (--restore), subtree (--restore --include <folder>), single-file (--find <name> to locate, then --restore --include <path>). Restore never writes back into iCloud Drive or Photos — it lands in a fresh directory you then move things back from.")
 
     Console.section("Schedule (launchd timer)")
     Console.info([
@@ -335,6 +336,53 @@ func listSnapshotsCommand() {
     }
     if failures > 0 {
         Console.error("\(failures)/\(dests.count) destination(s) could not be listed — see above")
+        exit(1)
+    }
+}
+
+/// Locate files inside a snapshot by name/glob (read-only) — the discovery step
+/// of a single-file restore. Lists each match's full snapshot path (exactly what
+/// `--restore --include` then takes) and size, per destination.
+func findCommand() {
+    Console.banner("baaackaaab", tagline: "find")
+    guard let pattern = argValue("--find"), !pattern.isEmpty else {
+        Console.error("--find needs a pattern, e.g. --find note.txt or --find '*.pdf'")
+        exit(1)
+    }
+    let snapshot = argValue("--snapshot") ?? "latest"
+    let dests = destinationsForCommand()
+    var failures = 0
+    var anyHits = false
+    for dest in dests {
+        Console.section("Destination", detail: "\(dest.name) [\(dest.link)]")
+        guard dest.passwordAvailable else {
+            Console.failure("no encryption password — the credential files are missing or unreadable")
+            failures += 1
+            continue
+        }
+        do {
+            let hits = try ResticBackend(destination: dest).find(pattern: pattern, snapshot: snapshot)
+            if hits.isEmpty {
+                Console.note("no match for '\(pattern)' in snapshot \(snapshot)")
+                continue
+            }
+            anyHits = true
+            for h in hits {
+                let size = h.size.map { " (" + ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .file) + ")" } ?? ""
+                let kind = h.type == "dir" ? "/" : ""
+                Console.step("\(h.path)\(kind)\(size)")
+            }
+        } catch {
+            Console.failure("\(error)")
+            failures += 1
+        }
+    }
+    if anyHits {
+        let destFlag = dests.count > 1 ? " --destination <name>" : ""
+        Console.note("restore one with:  baaackaaab --restore --include <path above>\(destFlag)")
+    }
+    if failures > 0 {
+        Console.error("\(failures)/\(dests.count) destination(s) could not be searched — see above")
         exit(1)
     }
 }
@@ -642,6 +690,12 @@ if CommandLine.arguments.contains("--check") {
 // Read-only snapshot browser (restore starts here: pick a snapshot's short id).
 if CommandLine.arguments.contains("--snapshots") {
     listSnapshotsCommand()
+    exit(0)
+}
+
+// Locate a file inside a snapshot by name/glob (single-file restore discovery).
+if argValue("--find") != nil {
+    findCommand()
     exit(0)
 }
 

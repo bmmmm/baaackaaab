@@ -254,6 +254,43 @@ final class ResticBackend {
         let paths: [String]
     }
 
+    /// One file found by `restic find`, for the single-file restore flow: its
+    /// full path inside the snapshot (which is exactly what `--include` then takes),
+    /// its type, size, and which snapshot it was found in.
+    struct Found {
+        let path: String
+        let type: String
+        let size: Int?
+        let snapshot: String
+    }
+
+    /// Search `snapshot` (default: all snapshots when nil) for files matching
+    /// `pattern` via `restic find --json`. Read-only. Returns one Found per match.
+    /// The returned `path` is the full snapshot path to hand back to `--include`.
+    func find(pattern: String, snapshot: String?) throws -> [Found] {
+        var args = ["find", "--json"]
+        if let snapshot, !snapshot.isEmpty { args += ["--snapshot", snapshot] }
+        args.append(pattern)
+        let out = try runCapturing(args, command: "find")
+        guard let start = out.firstIndex(of: "[") else { return [] }
+        guard let data = String(out[start...]).data(using: .utf8),
+              let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+        else { return [] }
+        var found: [Found] = []
+        for el in arr {
+            let snap = (el["snapshot"] as? String) ?? ""
+            for m in (el["matches"] as? [[String: Any]]) ?? [] {
+                found.append(Found(
+                    path: (m["path"] as? String) ?? "",
+                    type: (m["type"] as? String) ?? "",
+                    size: (m["size"] as? NSNumber)?.intValue,
+                    snapshot: snap
+                ))
+            }
+        }
+        return found
+    }
+
     /// The destination's snapshots, NEWEST FIRST (restic emits oldest→newest).
     /// Strictly read-only. Throws on a transport/auth failure so the caller can
     /// report it per destination rather than treating the repo as empty.
