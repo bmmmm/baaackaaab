@@ -593,10 +593,25 @@ let runFmt = DateFormatter()
 runFmt.locale = Locale(identifier: "en_US_POSIX")
 runFmt.dateFormat = "yyyyMMdd-HHmmss"
 let runTag = argValue("--run-tag") ?? "run-\(runFmt.string(from: Date()))"
+let runStart = Date()
 
 do {
     let staging = try Staging(root: stagingURL)
     let runs = destinations.map { DestinationRun($0) }
+
+    // Append one NDJSON history record, then exit. Built from the live `runs` so
+    // every terminal path (no-destination, nothing-acquired, partial, success)
+    // records the same shape. Best-effort: a failed write never blocks the exit.
+    func recordRun(exitCode: Int, verified: Int, total: Int, sourceFailures: Int) {
+        let dests = runs.map { r in
+            RunRecord.Dest(name: r.destination.name, ok: r.ok,
+                           error: r.initError ?? r.firstBackupError)
+        }
+        let record = RunRecord(runTag: runTag, start: runStart, end: Date(),
+                               exitCode: exitCode, verified: verified, total: total,
+                               sourceFailures: sourceFailures, destinations: dests)
+        try? RunHistory.append(record)
+    }
     Console.banner("baaackaaab", tagline: "one-way iCloud → restic backup")
     var info: [(String, String)] = [
         ("host", host),
@@ -629,6 +644,7 @@ do {
     if ready.isEmpty {
         Console.summary(headline: "no destination could be initialized — nothing was backed up",
                         state: .fail, details: [("run-tag", runTag)])
+        recordRun(exitCode: 2, verified: 0, total: 0, sourceFailures: 0)
         exit(2)
     }
 
@@ -758,6 +774,7 @@ do {
     if total == 0 {
         let extra = sourceFailures > 0 ? " (\(sourceFailures) source(s) failed)" : ""
         Console.summary(headline: "nothing was acquired\(extra)", state: .fail, details: details)
+        recordRun(exitCode: 2, verified: verified, total: total, sourceFailures: sourceFailures)
         exit(2)
     }
     var problems: [String] = []
@@ -771,6 +788,7 @@ do {
             state: .warn,
             details: details
         )
+        recordRun(exitCode: 2, verified: verified, total: total, sourceFailures: sourceFailures)
         exit(2)
     }
     Console.summary(
@@ -778,7 +796,14 @@ do {
         state: .ok,
         details: details
     )
+    recordRun(exitCode: 0, verified: verified, total: total, sourceFailures: sourceFailures)
 } catch {
     Console.error("\(error)")
+    // The throw happened before/around acquisition (e.g. staging init): `runs` is
+    // out of scope here, so record a minimal "crashed early" line — still visible
+    // in the dashboard so a wedged scheduled run doesn't vanish silently.
+    try? RunHistory.append(RunRecord(runTag: runTag, start: runStart, end: Date(),
+                                     exitCode: 1, verified: 0, total: 0,
+                                     sourceFailures: 0, destinations: []))
     exit(1)
 }

@@ -125,6 +125,20 @@ final class ConfigTUI {
     private var remotes: [ResticBackend.RemoteStatus] = []
     private var remoteQueried = false
 
+    // The tail of the run history (no credentials — just tags/times/counts), shown
+    // on the home dashboard. Loaded lazily and dropped after a sync so a fresh run
+    // shows up on return.
+    private var recentRuns: [RunRecord]?
+
+    // Local-time stamp for run rows: the record stores an absolute Date, shown in
+    // the operator's timezone (unlike the remote's already-formatted ISO string).
+    private let runStampFmt: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd HH:mm"
+        return f
+    }()
+
     // The selected-set panel is always visible under the folder browser once
     // anything is picked. Navigation stays on the folder browser by default;
     // `v` moves focus DOWN into the panel to prune entries, esc/v hands it back.
@@ -465,6 +479,15 @@ final class ConfigTUI {
             }
         }
 
+        body.append("")
+        body.append(divider("recent runs", cols))
+        let runs = loadRecentRuns()
+        if runs.isEmpty {
+            body.append(dim(fit("  no runs recorded yet \u{2014} press s to back up now", cols)))
+        } else {
+            for rec in runs { body.append(homeRunLine(rec, cols)) }
+        }
+
         if body.count < contentH { body += Array(repeating: "", count: contentH - body.count) }
         else if body.count > contentH { body = Array(body.prefix(contentH)) }
         lines += body
@@ -507,6 +530,30 @@ final class ConfigTUI {
         return parts.joined(separator: "  \u{2022}  ")
     }
 
+    /// The last few run-history records, newest first. Loaded once and cached;
+    /// dropped after a sync so the run just finished appears on return. No
+    /// credentials involved — the history file holds only tags/times/counts.
+    private func loadRecentRuns() -> [RunRecord] {
+        if let r = recentRuns { return r }
+        let r = RunHistory.recent(4)
+        recentRuns = r
+        return r
+    }
+
+    /// One run on the dashboard: outcome mark, end time, run tag, verified/total,
+    /// and the count of unhappy destinations if any. Green when clean, yellow not.
+    private func homeRunLine(_ r: RunRecord, _ cols: Int) -> String {
+        let mark = r.clean ? "\u{2713}" : "\u{2717}"
+        let when = runStampFmt.string(from: r.end)
+        var parts = ["\(r.verified)/\(r.total)"]
+        let bad = r.destinations.filter { !$0.ok }.count
+        if bad > 0 { parts.append("\(bad) dest failed") }
+        if r.sourceFailures > 0 { parts.append("\(r.sourceFailures) src failed") }
+        let line = "  \(mark) \(when)  \(r.runTag)  \(parts.joined(separator: "  \u{2022}  "))"
+        let plain = fit(line, cols)
+        return r.clean ? green(plain) : yellow(plain)
+    }
+
     private func homeHelpLine() -> String {
         "e edit set \u{2022} s sync now \u{2022} r remote \u{2022} q quit"
     }
@@ -536,6 +583,7 @@ final class ConfigTUI {
         reclaimForeground()
         emit("\u{1B}[?1049h\u{1B}[?25l")    // back into the alternate screen
         remotes = []; remoteQueried = false  // repos changed — drop the cached status
+        recentRuns = nil                     // the run we just did appended a record
         statusMsg = code == 0 ? "sync finished \u{2014} press r to refresh remote" : "sync failed (code \(code))"
     }
 
