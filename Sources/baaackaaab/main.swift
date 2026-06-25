@@ -114,6 +114,13 @@ func printUsage() {
     ])
     Console.note("Three restore modes: full (--restore), subtree (--restore --include <folder>), single-file (--find <name> to locate, then --restore --include <path>). Restore never writes back into iCloud Drive or Photos — it lands in a fresh directory you then move things back from.")
 
+    Console.section("Maintenance (repo health; read-only except --unlock)")
+    Console.info([
+        ("--verify-repo", "run `restic check` per destination (structure; read-only), then exit"),
+        ("--read-data-subset <s>", "with --verify-repo, also re-read this fraction of pack data (5%, 1/10, 10M)"),
+    ])
+    Console.note("--verify-repo only READS the repo. A damaged repo is repaired SERVER-side (the Mac has no delete/prune right).")
+
     Console.section("Schedule (launchd timer)")
     Console.info([
         ("--install-timer", "install a daily LaunchAgent that backs up the set, then exit"),
@@ -514,6 +521,48 @@ func restoreCommand() {
         ])
 }
 
+/// Verify repository integrity with `restic check`, per destination (all, or just
+/// `--destination <name>`). Structural by default; with `--read-data-subset <spec>`
+/// it also re-reads that fraction of the pack data to catch on-disk bit-rot.
+/// Strictly read-only — `check` never writes, prunes, or repairs. Exits non-zero
+/// if any destination reports problems.
+func verifyRepoCommand() {
+    Console.banner("baaackaaab", tagline: "verify repository")
+    let subset = argValue("--read-data-subset")
+    let dests = destinationsForCommand()
+    var failures = 0
+    for dest in dests {
+        Console.section("Destination", detail: "\(dest.name) [\(dest.link)]")
+        guard dest.passwordAvailable else {
+            Console.failure("no encryption password — the credential files are missing or unreadable")
+            failures += 1
+            continue
+        }
+        if let subset {
+            Console.step("checking structure + re-reading \(subset) of pack data — reads from the repo, can take a while")
+        } else {
+            Console.step("checking repository structure (add --read-data-subset <n%|n/t|nM> to also re-read pack data)")
+        }
+        let result = ResticBackend(destination: dest).checkRepo(readDataSubset: subset)
+        if result.clean {
+            Console.success("no errors found — repository is intact")
+        } else {
+            failures += 1
+            Console.failure("restic check reported problems:")
+            let lines = result.errorLines.isEmpty
+                ? result.output.split(separator: "\n").map(String.init).suffix(10).map { $0 }
+                : Array(result.errorLines.prefix(20))
+            for line in lines { Console.detail(line) }
+            Console.note("a damaged repo is fixed SERVER-side (restic prune/repair runs with a delete-capable key on the host that owns the repo) — never from this Mac, which has no delete right.")
+        }
+    }
+    if failures > 0 {
+        Console.error("\(failures)/\(dests.count) destination(s) failed the integrity check — see above")
+        exit(1)
+    }
+    Console.success("all \(dests.count) destination(s) passed the integrity check")
+}
+
 /// Print the configured destinations (read-only): name, link group, order,
 /// enabled flag, and the redacted repo URL. Never touches the network.
 func listDestinations() {
@@ -716,6 +765,13 @@ if CommandLine.arguments.contains("--migrate-credentials") {
 // Connectivity + auth + repo-init check, then exit.
 if CommandLine.arguments.contains("--check") {
     checkRemote()
+    exit(0)
+}
+
+// Repository integrity check (`restic check`), read-only. Optional
+// --read-data-subset re-reads a fraction of the pack data for bit-rot.
+if CommandLine.arguments.contains("--verify-repo") {
+    verifyRepoCommand()
     exit(0)
 }
 

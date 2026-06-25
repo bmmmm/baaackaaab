@@ -157,6 +157,37 @@ final class ResticBackend {
         if code != 0 { throw ResticError.failed(command: "restore", code: code) }
     }
 
+    /// The outcome of a `restic check` integrity pass.
+    struct CheckResult {
+        /// restic exited 0 — no integrity problems were reported.
+        let clean: Bool
+        /// The combined restic output (progress + final verdict).
+        let output: String
+        /// The subset of output lines that name a concrete problem (errors,
+        /// broken/damaged packs, missing blobs) — what to surface on a failure.
+        let errorLines: [String]
+    }
+
+    /// Verify repository integrity with `restic check`. Always checks the repo
+    /// STRUCTURE (index ↔ pack consistency); when `readDataSubset` is given
+    /// (e.g. "5%", "1/10", "10M") it additionally re-reads and re-hashes that
+    /// fraction of the actual pack data to catch on-disk bit-rot the structural
+    /// pass alone cannot see. Strictly READ-ONLY — `check` never writes to, prunes,
+    /// or repairs the repo, so it preserves the read + append-only invariant. The
+    /// verdict is keyed off restic's exit code (0 = no errors); the output is
+    /// captured so concrete problem lines can be shown.
+    func checkRepo(readDataSubset: String?) -> CheckResult {
+        var args = ["check"]
+        if let s = readDataSubset, !s.isEmpty { args.append("--read-data-subset=\(s)") }
+        let (code, out) = runCapturingResult(args)
+        let errorLines = out.split(separator: "\n").map(String.init).filter {
+            let l = $0.lowercased()
+            return l.contains("error") || l.contains("broken")
+                || l.contains("damaged") || l.contains("does not exist")
+        }
+        return CheckResult(clean: code == 0, output: out, errorLines: errorLines)
+    }
+
     /// Best-effort current repo data size in bytes, via
     /// `restic stats --mode raw-data --json`. This is the deduplicated blob
     /// size — a close, slightly low approximation of what the server's
@@ -345,6 +376,30 @@ final class ResticBackend {
             throw ResticError.failed(command: command, code: proc.terminationStatus)
         }
         return String(data: data, encoding: .utf8) ?? ""
+    }
+
+    /// Run restic capturing stdout AND stderr together, returning the exit code and
+    /// the combined output WITHOUT throwing on a non-zero exit. Used by the commands
+    /// where a non-zero exit is itself the signal to report (check, unlock) rather
+    /// than an error to propagate. Reads the pipe to EOF before waiting so a large
+    /// payload can't deadlock on a full pipe buffer. Never used for a streaming or
+    /// writing-to-user-data command — these are repo-side maintenance queries.
+    private func runCapturingResult(_ args: [String]) -> (code: Int32, output: String) {
+        guard let exe = executablePath else {
+            return (127, "restic executable not found — install it (`brew install restic`) and re-run")
+        }
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: exe)
+        proc.arguments = args
+        proc.environment = environment   // this destination's repo + password
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = pipe        // merge stderr so progress + verdict are one stream
+        proc.standardInput = FileHandle.nullDevice   // never block on a password prompt
+        do { try proc.run() } catch { return (127, "could not launch restic: \(error)") }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        proc.waitUntilExit()
+        return (proc.terminationStatus, String(data: data, encoding: .utf8) ?? "")
     }
 
     /// Wall-clock cap for the read-only existence probe (`cat config`). Long
