@@ -102,7 +102,14 @@ func printUsage() {
     Console.section("Restore (read-only browse; restore writes only to a fresh dir)")
     Console.info([
         ("--snapshots", "list snapshots newest-first per destination, then exit"),
-        ("--destination <name>", "limit --snapshots/restore to one destination (default: all)"),
+        ("--restore", "restore a snapshot into a fresh directory (preview → confirm → verify)"),
+        ("--destination <name>", "source destination (required when several are configured)"),
+        ("--snapshot <id>", "which snapshot to restore (short id from --snapshots; default 'latest')"),
+        ("--target <dir>", "restore into this dir (default: ~/baaackaaab-restore/<snap>-<stamp>)"),
+        ("--include <path>", "restore only this subpath of the snapshot"),
+        ("--dry-run", "preview what would be restored, write nothing"),
+        ("--yes", "skip the confirm prompt (required for a non-interactive restore)"),
+        ("--no-verify", "skip the post-restore re-read verification (on by default)"),
     ])
     Console.note("Restore never writes back into iCloud Drive or Photos — it lands in a fresh directory you then move things back from. Pick a snapshot's short id from --snapshots.")
 
@@ -332,6 +339,101 @@ func listSnapshotsCommand() {
     }
 }
 
+/// Restore a snapshot from ONE destination into a fresh directory. Safe by
+/// construction (see RestoreEngine): the target is validated (never live iCloud
+/// Drive / Photos, never an existing non-empty dir), the operation is previewed
+/// with --dry-run, confirmed, and the restored files are re-read with --verify.
+func restoreCommand() {
+    Console.banner("baaackaaab", tagline: "restore")
+
+    // Source = exactly one destination. With several configured we refuse to guess
+    // which copy to restore from and require --destination.
+    let all = resolveDestinationsOrExit()
+    let dest: Destination
+    if all.count == 1 && argValue("--destination") == nil {
+        dest = all[0]
+    } else {
+        let picked = destinationsForCommand()   // filtered by --destination, or all
+        guard picked.count == 1 else {
+            Console.error("several destinations configured — choose the source with --destination <name> (one of: \(all.map { $0.name }.joined(separator: ", ")))")
+            exit(1)
+        }
+        dest = picked[0]
+    }
+    guard dest.passwordAvailable else {
+        Console.error("no encryption password for '\(dest.name)' — the credential files are missing or unreadable")
+        exit(1)
+    }
+
+    let snapshot = argValue("--snapshot") ?? "latest"
+    let include = argValue("--include")
+    let dryRun = CommandLine.arguments.contains("--dry-run")
+    let verify = !CommandLine.arguments.contains("--no-verify")
+
+    // Target: an explicit --target, else a fresh timestamped dir. Validated hard.
+    let stampFmt = DateFormatter()
+    stampFmt.locale = Locale(identifier: "en_US_POSIX")
+    stampFmt.dateFormat = "yyyyMMdd-HHmmss"
+    let stamp = stampFmt.string(from: Date())
+    let target = argValue("--target").map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
+        ?? RestoreEngine.defaultTarget(snapshot: snapshot, stamp: stamp)
+    do { try RestoreEngine.validateTarget(target) }
+    catch { Console.error("\(error)"); exit(1) }
+
+    Console.info([
+        ("destination", dest.name),
+        ("snapshot", snapshot),
+        ("target", target.path),
+        ("mode", include.map { "subpath \($0)" } ?? "full snapshot"),
+        ("verify", verify ? "yes (re-reads restored files)" : "no"),
+    ])
+
+    let backend = ResticBackend(destination: dest)
+
+    // 1) Always preview with --dry-run first (shows exactly what would land). For a
+    //    real --dry-run invocation, the preview IS the whole operation.
+    Console.section(dryRun ? "Dry run (no files written)" : "Preview (dry run — nothing written yet)")
+    do { try backend.restore(snapshot: snapshot, target: target, include: include, dryRun: true, verify: false) }
+    catch { Console.error("restore preview failed: \(error)"); exit(1) }
+    if dryRun {
+        Console.success("dry run complete — nothing was written. Re-run without --dry-run to restore.")
+        return
+    }
+
+    // 2) Confirm before writing. On a TTY, prompt; non-interactively, demand --yes
+    //    so a scripted restore can't silently write gigabytes somewhere.
+    if !CommandLine.arguments.contains("--yes") {
+        guard isatty(STDIN_FILENO) != 0 else {
+            Console.error("refusing to write a restore non-interactively without --yes — re-run with --yes, or --dry-run to preview only")
+            exit(1)
+        }
+        FileHandle.standardOutput.write(Data("\nProceed with the restore into \(target.path)? [y/N] ".utf8))
+        let answer = (readLine() ?? "").trimmingCharacters(in: .whitespaces).lowercased()
+        guard answer == "y" || answer == "yes" else {
+            Console.note("restore cancelled — nothing was written")
+            exit(0)
+        }
+    }
+
+    // 3) Create the validated fresh dir, restore, verify.
+    do {
+        try RestoreEngine.ensureTargetDir(target)
+        Console.section("Restoring")
+        try backend.restore(snapshot: snapshot, target: target, include: include, dryRun: false, verify: verify)
+    } catch {
+        Console.error("restore failed: \(error)")
+        exit(1)
+    }
+
+    Console.summary(
+        headline: "restored \(snapshot) from \(dest.name) into a fresh directory\(verify ? " (verified)" : "")",
+        state: .ok,
+        details: [
+            ("target", target.path),
+            ("next", "this is a fresh copy — move what you need back into iCloud Drive / Photos yourself"),
+        ])
+}
+
 /// Print the configured destinations (read-only): name, link group, order,
 /// enabled flag, and the redacted repo URL. Never touches the network.
 func listDestinations() {
@@ -540,6 +642,13 @@ if CommandLine.arguments.contains("--check") {
 // Read-only snapshot browser (restore starts here: pick a snapshot's short id).
 if CommandLine.arguments.contains("--snapshots") {
     listSnapshotsCommand()
+    exit(0)
+}
+
+// Restore a snapshot into a fresh directory (safe by construction). Previews,
+// confirms, restores, verifies. Never writes into live iCloud Drive / Photos.
+if CommandLine.arguments.contains("--restore") {
+    restoreCommand()
     exit(0)
 }
 

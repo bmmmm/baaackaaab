@@ -139,6 +139,24 @@ final class ResticBackend {
         if code != 0 { throw ResticError.failed(command: "backup", code: code) }
     }
 
+    /// Restore a snapshot into `target`. `dryRun` previews (writes nothing);
+    /// `include` restores only that subpath; `verify` re-reads the restored files
+    /// against the repo afterward. Streams restic's output. This only READS the
+    /// repository — restore never modifies or deletes a snapshot, so it keeps the
+    /// read + append-only invariant. (`--verify` and `--dry-run` are mutually
+    /// exclusive in restic, so verify is dropped on a dry run.)
+    func restore(snapshot: String, target: URL, include: String?, dryRun: Bool, verify: Bool) throws {
+        var args = ["restore", snapshot, "--target", target.path]
+        if let include, !include.isEmpty { args += ["--include", include] }
+        if dryRun {
+            args += ["--dry-run", "--verbose"]
+        } else if verify {
+            args += ["--verify"]
+        }
+        let code = try run(args)
+        if code != 0 { throw ResticError.failed(command: "restore", code: code) }
+    }
+
     /// Best-effort current repo data size in bytes, via
     /// `restic stats --mode raw-data --json`. This is the deduplicated blob
     /// size — a close, slightly low approximation of what the server's
