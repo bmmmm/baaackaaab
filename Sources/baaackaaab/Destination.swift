@@ -220,6 +220,103 @@ enum DestinationStore {
     }
 }
 
+enum DestinationError: Error, CustomStringConvertible {
+    case invalidName(String)
+    case exists(String)
+    case notFound(String)
+    case writeFailed(String)
+
+    var description: String {
+        switch self {
+        case .invalidName(let n): return "invalid destination name '\(n)' — use letters, digits, '.', '_' or '-' (no slashes, no leading dot)"
+        case .exists(let n): return "destination '\(n)' already exists — remove it first or pick another name"
+        case .notFound(let n): return "no destination named '\(n)'"
+        case .writeFailed(let p): return "could not write \(p)"
+        }
+    }
+}
+
+extension DestinationStore {
+    /// A safe destinations/ subdir name: non-empty, no path separators, no
+    /// leading dot, restricted to a portable character set.
+    static func validName(_ name: String) -> Bool {
+        guard !name.isEmpty, name.first != "." else { return false }
+        let allowed = CharacterSet(charactersIn:
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+        return name.unicodeScalars.allSatisfy { allowed.contains($0) }
+    }
+
+    /// Write a value to a 0600 file, creating its parent (0700) first. Used for
+    /// the per-destination url / password / meta files.
+    private static func write0600(_ value: String, to file: URL) throws {
+        let fm = FileManager.default
+        try fm.createDirectory(at: file.deletingLastPathComponent(),
+                               withIntermediateDirectories: true,
+                               attributes: [.posixPermissions: 0o700])
+        if fm.fileExists(atPath: file.path) { try fm.removeItem(at: file) }
+        guard fm.createFile(atPath: file.path, contents: Data(value.utf8),
+                            attributes: [.posixPermissions: 0o600]) else {
+            throw DestinationError.writeFailed(file.path)
+        }
+    }
+
+    static func writeMeta(_ meta: DestinationMeta, to name: String) throws {
+        let data = try JSONEncoder().encode(meta)
+        try write0600(String(data: data, encoding: .utf8) ?? "{}", to: metaFile(name))
+    }
+
+    /// Move a legacy single repo (top-level repo-url/repo-password) into
+    /// destinations/default, so adding a SECOND destination doesn't silently drop
+    /// the first (once destinations/ is non-empty, `all()` reads only it). Writes
+    /// the new files first and only removes the legacy ones once both landed —
+    /// never leaving the store without a readable copy of the working repo.
+    /// Returns true if a migration happened.
+    @discardableResult
+    static func migrateLegacyIfNeeded() throws -> Bool {
+        guard names().isEmpty, CredentialFiles.present else { return false }
+        guard let url = (try? CredentialFiles.readURL()) ?? nil,
+              let pwData = FileManager.default.contents(atPath: CredentialFiles.repoPasswordFile.path),
+              let pw = String(data: pwData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        else { return false }
+        try write0600(url, to: urlFile("default"))
+        try write0600(pw, to: passwordFile("default"))
+        try writeMeta(DestinationMeta(link: "default", order: 0, enabled: true), to: "default")
+        // Both new files verified by write0600 (it throws on failure); now the
+        // legacy copies are redundant, so remove them to keep one copy of the key.
+        try? FileManager.default.removeItem(at: CredentialFiles.repoURLFile)
+        try? FileManager.default.removeItem(at: CredentialFiles.repoPasswordFile)
+        return true
+    }
+
+    /// Create a new destination. `password` is the repository encryption key —
+    /// for a brand-new repo the caller passes a freshly generated one; to
+    /// re-attach an EXISTING repo it must be that repo's existing key (a fresh
+    /// one cannot decrypt it). Migrates a legacy single repo first so the
+    /// existing backup is preserved as destinations/default.
+    static func add(name: String, repoURL: String, password: String,
+                    link: String, order: Int?, enabled: Bool) throws {
+        guard validName(name) else { throw DestinationError.invalidName(name) }
+        try migrateLegacyIfNeeded()
+        guard load(name) == nil else { throw DestinationError.exists(name) }
+        let resolvedOrder = order ?? ((all().map { $0.order }.max() ?? -1) + 1)
+        try write0600(repoURL, to: urlFile(name))
+        try write0600(password, to: passwordFile(name))
+        try writeMeta(DestinationMeta(link: link, order: resolvedOrder, enabled: enabled), to: name)
+    }
+
+    /// Remove a destination's LOCAL pointer only. This deletes the stored URL +
+    /// key + meta; it never touches the remote repository's data (the Mac has no
+    /// delete right anyway). Returns false if there was no such destination.
+    @discardableResult
+    static func remove(name: String) throws -> Bool {
+        guard validName(name) else { throw DestinationError.invalidName(name) }
+        let d = destDir(name)
+        guard FileManager.default.fileExists(atPath: d.path) else { return false }
+        try FileManager.default.removeItem(at: d)
+        return true
+    }
+}
+
 /// Per-destination state for one backup run: its backend plus whether init
 /// succeeded and how many backups failed. This is what makes a run best-effort
 /// ACROSS destinations — one unreachable repo records its failure here and is

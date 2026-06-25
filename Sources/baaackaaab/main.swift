@@ -83,6 +83,19 @@ func printUsage() {
     ])
     Console.note("Password comes from RESTIC_PASSWORD / RESTIC_PASSWORD_FILE or the credential files, never an argument.")
 
+    Console.section("Destinations", detail: "back up to several independent repos at once")
+    Console.info([
+        ("--list-destinations", "show every configured destination (redacted), then exit"),
+        ("--add-destination <name>", "add a destination; needs --repo-url, generates a new key"),
+        ("--repo-url <url>", "the new destination's repo (rest:https://…, a local path, sftp:…)"),
+        ("--repo-password-file <f>", "re-attach an EXISTING repo with its key from a file (no new key)"),
+        ("--link <label>", "concurrency group (same label = shared uplink; default 'default')"),
+        ("--order <n>", "primary-first ordering (lower runs earlier)"),
+        ("--disabled", "add the destination but skip it on runs until re-enabled"),
+        ("--remove-destination <name>", "drop a destination's LOCAL pointer (never touches remote data)"),
+    ])
+    Console.note("A run backs up to every enabled destination — each is a full, independent copy with its own key. The Mac stays read + append only toward all of them. The first --add-destination migrates a legacy single repo to destinations/default automatically.")
+
     Console.section("Schedule (launchd timer)")
     Console.info([
         ("--install-timer", "install a daily LaunchAgent that backs up the set, then exit"),
@@ -219,16 +232,106 @@ func resolveDestinationsOrExit() -> [Destination] {
 /// A fast end-to-end check of DNS + Traefik + htpasswd auth + restic init.
 func checkRemote() {
     Console.banner("baaackaaab", tagline: "remote check")
-    let dest = resolveDestinationsOrExit()[0]
-    let repo = dest.displayURL ?? dest.name
-    Console.info([("repo", Credentials.redact(repo))])
-    guard dest.passwordAvailable else {
-        Console.error("no encryption password — run `baaackaaab --migrate-credentials` (Keychain→files) or `--init-credentials`; the credential files / Keychain item are missing or unreadable")
+    let dests = resolveDestinationsOrExit()
+    var failures = 0
+    for dest in dests {
+        let repo = dest.displayURL ?? dest.name
+        Console.section("Destination", detail: "\(dest.name) [\(dest.link)]")
+        Console.info([("repo", Credentials.redact(repo))])
+        guard dest.passwordAvailable else {
+            Console.failure("no encryption password — the credential files are missing or unreadable")
+            failures += 1
+            continue
+        }
+        do {
+            try ResticBackend(destination: dest).ensureInitialized()
+            Console.success("reachable, authentication OK, repository ready")
+        } catch {
+            Console.failure("\(error)")
+            failures += 1
+        }
+    }
+    if failures > 0 {
+        Console.error("\(failures)/\(dests.count) destination(s) failed the check — see above")
         exit(1)
     }
+    Console.success("all \(dests.count) destination(s) reachable and ready")
+}
+
+/// Print the configured destinations (read-only): name, link group, order,
+/// enabled flag, and the redacted repo URL. Never touches the network.
+func listDestinations() {
+    Console.banner("baaackaaab", tagline: "destinations")
+    let dests = DestinationStore.all()
+    Console.section("Destinations", detail: DestinationStore.dir.path)
+    if dests.isEmpty {
+        Console.note("none configured — add one with `baaackaaab --add-destination <name> --repo-url <url>`, or run `--init-credentials` for the first repo")
+        return
+    }
+    for d in dests {
+        Console.step("\(d.name)  [\(d.link)]  order \(d.order)  \(d.enabled ? "enabled" : "disabled")")
+        Console.detail(d.displayURL.map { Credentials.redact($0) } ?? "(url unreadable)")
+    }
+}
+
+/// Add a new destination: a fresh independent repository with its own encryption
+/// key. The URL is taken as-is (rest:https://…, a local path, sftp:…); the key is
+/// generated locally (or imported from a file to re-attach an existing repo) and
+/// never reaches argv. A legacy single repo is migrated to destinations/default
+/// first so the existing backup is preserved.
+func addDestination(name: String) {
+    Console.banner("baaackaaab", tagline: "add destination")
+    guard let url = argValue("--repo-url"), !url.isEmpty else {
+        Console.error("--add-destination needs --repo-url <url> (a rest:https://… URL, a local path, sftp:…, etc.)")
+        exit(1)
+    }
+    let link = argValue("--link") ?? "default"
+    let order = argValue("--order").flatMap { Int($0) }
+    let enabled = !CommandLine.arguments.contains("--disabled")
+
+    let importing = argValue("--repo-password-file") != nil
+    let password: String
+    if let pwFile = argValue("--repo-password-file") {
+        guard let data = FileManager.default.contents(atPath: (pwFile as NSString).expandingTildeInPath),
+              let s = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !s.isEmpty else {
+            Console.error("--repo-password-file is empty or unreadable: \(pwFile)")
+            exit(1)
+        }
+        password = s   // re-attaching an existing repo: must be its existing key
+    } else {
+        password = Credentials.randomURLSafe(byteCount: 32)   // ~256-bit new key
+    }
+
     do {
-        try ResticBackend(destination: dest).ensureInitialized()
-        Console.success("server reachable, authentication OK, repository ready")
+        try DestinationStore.add(name: name, repoURL: url, password: password,
+                                 link: link, order: order, enabled: enabled)
+    } catch {
+        Console.error("\(error)")
+        exit(1)
+    }
+
+    Console.section("Added")
+    Console.success("destination '\(name)' stored (0600) at \(DestinationStore.destDir(name).path)")
+    Console.info([("repo", Credentials.redact(url)), ("link", link)])
+    if !importing {
+        Console.warn("A NEW encryption key was generated and lives ONLY in the 0600 file — the server never has it. Lose it and this destination's backups are unrecoverable. It is protected by FileVault at rest; back it up to your password manager.")
+    }
+    Console.step("verify:  baaackaaab --check   (initializes every destination's repo if new)")
+}
+
+/// Remove a destination's LOCAL pointer (URL + key + meta). Never touches the
+/// remote repository's data — the Mac has no delete right.
+func removeDestination(name: String) {
+    Console.banner("baaackaaab", tagline: "remove destination")
+    do {
+        if try DestinationStore.remove(name: name) {
+            Console.success("removed local pointer for destination '\(name)'")
+            Console.note("the remote repository's data was NOT touched — the Mac has no delete right. To reclaim that repo's space, prune it server-side with a separate key.")
+        } else {
+            Console.error("no destination named '\(name)' — see `baaackaaab --list-destinations`")
+            exit(1)
+        }
     } catch {
         Console.error("\(error)")
         exit(1)
@@ -357,6 +460,21 @@ if CommandLine.arguments.contains("--migrate-credentials") {
 // Connectivity + auth + repo-init check, then exit.
 if CommandLine.arguments.contains("--check") {
     checkRemote()
+    exit(0)
+}
+
+// Destination management (read-only list / add / remove), then exit. These edit
+// only the local store; remove never touches remote data.
+if CommandLine.arguments.contains("--list-destinations") {
+    listDestinations()
+    exit(0)
+}
+if let name = argValue("--add-destination") {
+    addDestination(name: name)
+    exit(0)
+}
+if let name = argValue("--remove-destination") {
+    removeDestination(name: name)
     exit(0)
 }
 
