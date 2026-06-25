@@ -209,6 +209,11 @@ final class ResticBackend {
         /// The subset of output lines that name a concrete problem (errors,
         /// broken/damaged packs, missing blobs) — what to surface on a failure.
         let errorLines: [String]
+        /// A non-zero exit caused by NOT being able to acquire the repository lock
+        /// (a backup/prune is in progress), as opposed to actual damage. The repo
+        /// is fine; the check just couldn't run — so it must NOT be reported as a
+        /// damage verdict.
+        let lockedOut: Bool
     }
 
     /// Verify repository integrity with `restic check`. Always checks the repo
@@ -223,12 +228,20 @@ final class ResticBackend {
         var args = ["check"]
         if let s = readDataSubset, !s.isEmpty { args.append("--read-data-subset=\(s)") }
         let (code, out) = runCapturingResult(args)
+        let clean = code == 0
+        let lower = out.lowercased()
+        // A non-zero exit because the repo is locked (a concurrent backup/prune
+        // holds it) is NOT damage — distinguish it so the operator isn't told to
+        // repair a healthy repo.
+        let lockedOut = !clean && (lower.contains("unable to create lock")
+            || lower.contains("already locked")
+            || lower.contains("unable to acquire"))
         let errorLines = out.split(separator: "\n").map(String.init).filter {
             let l = $0.lowercased()
             return l.contains("error") || l.contains("broken")
                 || l.contains("damaged") || l.contains("does not exist")
         }
-        return CheckResult(clean: code == 0, output: out, errorLines: errorLines)
+        return CheckResult(clean: clean, output: out, errorLines: errorLines, lockedOut: lockedOut)
     }
 
     /// One repository lock, read from `restic cat lock <id>`. Identifies who holds

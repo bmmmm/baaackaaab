@@ -551,6 +551,11 @@ func verifyRepoCommand() {
         let result = ResticBackend(destination: dest).checkRepo(readDataSubset: subset)
         if result.clean {
             Console.success("no errors found — repository is intact")
+        } else if result.lockedOut {
+            // Not a damage verdict — the repo is healthy but busy. Count it as a
+            // non-pass (exit non-zero) but say so accurately, not "repair it".
+            failures += 1
+            Console.warn("could not check '\(dest.name)' — the repository is locked (a backup or prune is in progress). This is NOT a damage verdict; retry when idle, or clear a stale lock with `--unlock --destination \(dest.name)`.")
         } else {
             failures += 1
             Console.failure("restic check reported problems:")
@@ -636,7 +641,7 @@ func unlockCommand() {
     let trimmed = out.trimmingCharacters(in: .whitespacesAndNewlines)
     if code == 0 {
         if !trimmed.isEmpty { Console.detail(trimmed) }
-        Console.success("unlock complete — stale lock(s) removed")
+        Console.success(removeAll ? "unlock complete — all locks removed" : "unlock complete — stale lock(s) removed")
     } else {
         for line in trimmed.split(separator: "\n").suffix(8) { Console.detail(String(line)) }
         Console.error("unlock failed (restic exit \(code)). A 403/forbidden means the server's append-only mode does not carve out the lock prefix — locks can then only be cleared with a delete-capable key on the host. Nothing was changed.")
@@ -998,6 +1003,13 @@ if CommandLine.arguments.contains("--check") {
     exit(0)
 }
 
+// --read-data-subset only has meaning with --verify-repo; on its own it would be
+// silently ignored and the run would fall through to a backup. Fail loudly.
+if argValue("--read-data-subset") != nil && !CommandLine.arguments.contains("--verify-repo") {
+    Console.error("--read-data-subset only applies to --verify-repo — re-run as `baaackaaab --verify-repo --read-data-subset <n%|n/t|nM>`")
+    exit(1)
+}
+
 // Repository integrity check (`restic check`), read-only. Optional
 // --read-data-subset re-reads a fraction of the pack data for bit-rot.
 if CommandLine.arguments.contains("--verify-repo") {
@@ -1232,7 +1244,11 @@ do {
             if run.backend.exists() {
                 Console.success("\(run.destination.name): reachable (dry run — not initialized)  \(Credentials.redact(run.backend.repository))")
             } else {
-                run.initError = "repository does not exist yet — run a real backup or `--check` first to create it (a dry run never initializes)"
+                // exists() is false for BOTH "repo absent" and "repo unreachable"
+                // (a probe timeout / auth blip), so don't assert one cause — point
+                // at --check, which both creates a missing repo and diagnoses a
+                // reachability problem. A dry run never initializes either way.
+                run.initError = "repository not reachable or not created yet — run `--check` (it verifies reachability and initializes a missing repo); a dry run never initializes"
                 Console.failure("\(run.destination.name): \(run.initError!)")
             }
             continue
@@ -1261,7 +1277,7 @@ do {
         // failure — report it and exit non-zero, but don't record a run or fire the
         // failure banner (it wrote nothing and isn't the unattended timer's job).
         if backupDryRun {
-            Console.summary(headline: "dry run — no destination is previewable (no repository exists yet); nothing was written",
+            Console.summary(headline: "dry run — no destination is previewable (not reachable or not created yet); nothing was written",
                             state: .warn, details: [("run-tag", runTag)])
             exit(1)
         }
