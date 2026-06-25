@@ -120,8 +120,10 @@ func printUsage() {
     Console.info([
         ("--verify-repo", "run `restic check` per destination (structure; read-only), then exit"),
         ("--read-data-subset <s>", "with --verify-repo, also re-read this fraction of pack data (5%, 1/10, 10M)"),
+        ("--unlock", "remove STALE locks for --destination — the only delete op (lock files only)"),
+        ("--remove-all", "with --unlock, remove ALL locks (only when no backup is running)"),
     ])
-    Console.note("--verify-repo only READS the repo. A damaged repo is repaired SERVER-side (the Mac has no delete/prune right).")
+    Console.note("--verify-repo only READS the repo. A damaged repo is repaired SERVER-side (the Mac has no delete/prune right). --unlock is the single exception: it deletes lock files only (never snapshots/data), removes stale locks by default, and needs --destination + a confirm (or --yes).")
 
     Console.section("Schedule (launchd timer)")
     Console.info([
@@ -565,6 +567,82 @@ func verifyRepoCommand() {
     Console.success("all \(dests.count) destination(s) passed the integrity check")
 }
 
+/// List and remove repository LOCKS for ONE destination — the single operation
+/// baaackaaab runs that deletes from a repo. restic's `unlock` only ever removes
+/// lock files (never a snapshot or pack), and by default only STALE locks (a dead
+/// or >30-min-old locker); `--remove-all` clears every lock. Shows the locks, then
+/// confirms before removing (or demands --yes non-interactively, since this writes).
+func unlockCommand() {
+    Console.banner("baaackaaab", tagline: "unlock — remove repository locks")
+    let picked = destinationsForCommand()
+    guard picked.count == 1 else {
+        Console.error("choose ONE destination with --destination <name> — unlock acts on a single repository at a time (configured: \(picked.map { $0.name }.joined(separator: ", ")))")
+        exit(1)
+    }
+    let dest = picked[0]
+    Console.section("Destination", detail: "\(dest.name) [\(dest.link)]")
+    guard dest.passwordAvailable else {
+        Console.error("no encryption password for '\(dest.name)' — the credential files are missing or unreadable")
+        exit(1)
+    }
+    let backend = ResticBackend(destination: dest)
+
+    let (listCode, ids) = backend.listLockIDs()
+    if listCode != 0 {
+        Console.error("could not list locks — the repository is unreachable or the credentials are wrong (restic exit \(listCode))")
+        exit(1)
+    }
+    if ids.isEmpty {
+        Console.success("no locks present — nothing to remove")
+        return
+    }
+    Console.step("\(ids.count) lock(s) present:")
+    for id in ids {
+        if let info = backend.lockInfo(id: id) {
+            let when = String(info.time.prefix(19)).replacingOccurrences(of: "T", with: " ")
+            let kind = info.exclusive ? "exclusive" : "shared"
+            let pid = info.pid.map { " pid \($0)" } ?? ""
+            Console.detail("\(id.prefix(8))  \(when)  \(info.username)@\(info.hostname)\(pid)  [\(kind)]")
+        } else {
+            Console.detail("\(id.prefix(8))  (lock metadata unreadable — it may have just been released)")
+        }
+    }
+
+    let removeAll = CommandLine.arguments.contains("--remove-all")
+    Console.section(removeAll ? "Remove ALL locks" : "Remove stale locks")
+    if removeAll {
+        Console.warn("--remove-all deletes EVERY lock, including one a backup that is genuinely running right now holds. Only do this when you are certain no backup or prune is in progress against this repo.")
+    } else {
+        Console.note("removes only STALE locks (a dead or >30-min-old locker); a lock a live backup holds is kept.")
+    }
+    Console.note("This is the ONLY operation that deletes from the repo, and it removes lock files only — never snapshots or data. On an append-only server the lock prefix must be carved out for this to succeed; if it is not, the server refuses (403) and nothing changes.")
+
+    // Confirm — unlock deletes (lock files) from the repo, so gate it like restore.
+    if !CommandLine.arguments.contains("--yes") {
+        guard isatty(STDIN_FILENO) != 0 else {
+            Console.error("refusing to remove locks non-interactively without --yes — re-run with --yes (or interactively to confirm)")
+            exit(1)
+        }
+        FileHandle.standardOutput.write(Data("\nRemove \(removeAll ? "ALL" : "stale") lock(s) from \(dest.name)? [y/N] ".utf8))
+        let answer = (readLine() ?? "").trimmingCharacters(in: .whitespaces).lowercased()
+        guard answer == "y" || answer == "yes" else {
+            Console.note("cancelled — no locks were removed")
+            exit(0)
+        }
+    }
+
+    let (code, out) = backend.unlock(removeAll: removeAll)
+    let trimmed = out.trimmingCharacters(in: .whitespacesAndNewlines)
+    if code == 0 {
+        if !trimmed.isEmpty { Console.detail(trimmed) }
+        Console.success("unlock complete — stale lock(s) removed")
+    } else {
+        for line in trimmed.split(separator: "\n").suffix(8) { Console.detail(String(line)) }
+        Console.error("unlock failed (restic exit \(code)). A 403/forbidden means the server's append-only mode does not carve out the lock prefix — locks can then only be cleared with a delete-capable key on the host. Nothing was changed.")
+        exit(1)
+    }
+}
+
 /// Print the configured destinations (read-only): name, link group, order,
 /// enabled flag, and the redacted repo URL. Never touches the network.
 func listDestinations() {
@@ -791,6 +869,13 @@ if CommandLine.arguments.contains("--check") {
 // --read-data-subset re-reads a fraction of the pack data for bit-rot.
 if CommandLine.arguments.contains("--verify-repo") {
     verifyRepoCommand()
+    exit(0)
+}
+
+// Remove repository locks (the only delete op). Lists locks, confirms, then runs
+// `restic unlock` (stale only, or --remove-all). Removes lock files only.
+if CommandLine.arguments.contains("--unlock") {
+    unlockCommand()
     exit(0)
 }
 

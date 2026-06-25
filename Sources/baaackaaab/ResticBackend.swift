@@ -207,6 +207,62 @@ final class ResticBackend {
         return CheckResult(clean: code == 0, output: out, errorLines: errorLines)
     }
 
+    /// One repository lock, read from `restic cat lock <id>`. Identifies who holds
+    /// the lock (host/user/pid), when it was taken, and whether it is exclusive —
+    /// enough for an operator to judge whether it is stale before removing it.
+    struct LockInfo {
+        let id: String
+        let time: String
+        let hostname: String
+        let username: String
+        let pid: Int?
+        let exclusive: Bool
+    }
+
+    /// List the repository's lock IDs (`restic list locks`), read-only. Returns the
+    /// exit code and the ids; a non-zero code means the repo was unreachable / the
+    /// credentials were wrong, which the caller reports rather than treating as
+    /// "no locks". Filters to hex-looking lines so a stray stderr warning can't
+    /// masquerade as a lock id.
+    func listLockIDs() -> (code: Int32, ids: [String]) {
+        let (code, out) = runCapturingResult(["list", "locks"])
+        let ids = out.split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && $0.count >= 8 && $0.allSatisfy(\.isHexDigit) }
+        return (code, ids)
+    }
+
+    /// Read one lock's metadata (`restic cat lock <id>`), read-only. nil if the
+    /// lock could not be read (it may have just been released).
+    func lockInfo(id: String) -> LockInfo? {
+        let (code, out) = runCapturingResult(["cat", "lock", id])
+        guard code == 0, let start = out.firstIndex(of: "{"),
+              let data = String(out[start...]).data(using: .utf8),
+              let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return LockInfo(
+            id: id,
+            time: (o["time"] as? String) ?? "",
+            hostname: (o["hostname"] as? String) ?? "",
+            username: (o["username"] as? String) ?? "",
+            pid: (o["pid"] as? NSNumber)?.intValue,
+            exclusive: (o["exclusive"] as? Bool) ?? false)
+    }
+
+    /// Remove repository locks: STALE locks only (`restic unlock`) or EVERY lock
+    /// (`--remove-all`). This is the ONE operation baaackaaab runs that deletes
+    /// from a repo — and restic's `unlock` only ever removes lock files (it is
+    /// hardcoded to the locks/ prefix), never a snapshot or a pack, so it cannot
+    /// destroy backup data. On an append-only rest-server the locks/ prefix must
+    /// be carved out of the append-only restriction for this to work; if it is
+    /// not, the server returns 403 and unlock simply fails — which is safe (it
+    /// changes nothing). Returns the exit code and combined output.
+    func unlock(removeAll: Bool) -> (code: Int32, output: String) {
+        var args = ["unlock"]
+        if removeAll { args.append("--remove-all") }
+        return runCapturingResult(args)
+    }
+
     /// Best-effort current repo data size in bytes, via
     /// `restic stats --mode raw-data --json`. This is the deduplicated blob
     /// size — a close, slightly low approximation of what the server's
