@@ -81,8 +81,27 @@ enum Credentials {
 
     /// The endpoint host and client username. The username doubles as the
     /// private-repos subpath, so `macbook` is confined to `/macbook/`.
-    static let endpointHost = "restic.example.com"
-    static let endpointUser = "macbook"
+    ///
+    /// Tracked source ships a placeholder host — the real rest-server host is
+    /// private infrastructure and must not live in version control. It is
+    /// supplied at setup time via `BAAACKAAAB_ENDPOINT_HOST` (e.g. from ~/.env);
+    /// `--init-credentials` refuses to run while the placeholder is still in
+    /// effect, so a bogus example.com URL can never be stored. After init the
+    /// real URL lives only in the 0600 credential file, so this is needed only
+    /// for the one-time setup, not for scheduled backups.
+    static let placeholderHost = "restic.example.com"
+    static var endpointHost: String {
+        ProcessInfo.processInfo.environment["BAAACKAAAB_ENDPOINT_HOST"] ?? placeholderHost
+    }
+    static var endpointUser: String {
+        ProcessInfo.processInfo.environment["BAAACKAAAB_ENDPOINT_USER"] ?? "macbook"
+    }
+
+    /// The admin SSH target used only in the printed "create the endpoint user"
+    /// instructions. Also placeholder-by-default, real value from the environment.
+    static var adminSSH: String {
+        ProcessInfo.processInfo.environment["BAAACKAAAB_ADMIN_SSH"] ?? "admin@server.example"
+    }
 
     enum CredentialError: Error, CustomStringConvertible {
         case htpasswdFailed(Int32)
@@ -136,32 +155,44 @@ enum Credentials {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
         } else if CredentialFiles.present {
             setenv("RESTIC_REPOSITORY_FILE", CredentialFiles.repoURLFile.path, 1)
+            unsetenv("RESTIC_REPOSITORY")   // exactly one repo source reaches restic
             displayURL = (try? CredentialFiles.readURL()) ?? nil
         } else if let stored = (try? Keychain.get(account: repoURLAccount)) ?? nil {
             setenv("RESTIC_REPOSITORY", stored, 1)
+            unsetenv("RESTIC_REPOSITORY_FILE")
             displayURL = stored
         }
 
-        // --- Password: pick exactly one source, leaving any caller-provided one ---
+        // --- Password: pick exactly one source, leaving any caller-provided one.
+        // Whichever we set, unset its counterpart so restic never sees both (it
+        // treats the pair as mutually exclusive and aborts if both are present). ---
         if env["RESTIC_PASSWORD"] == nil, env["RESTIC_PASSWORD_FILE"] == nil {
             if CredentialFiles.present {
                 setenv("RESTIC_PASSWORD_FILE", CredentialFiles.repoPasswordFile.path, 1)
+                unsetenv("RESTIC_PASSWORD")
             } else if let pw = (try? Keychain.get(account: repoPasswordAccount)) ?? nil {
                 setenv("RESTIC_PASSWORD", pw, 1)
+                unsetenv("RESTIC_PASSWORD_FILE")
             }
         }
 
         return displayURL
     }
 
-    /// Mask the endpoint password in a `rest:https://user:PASS@host/…` URL so it
-    /// can be logged. Returns the input unchanged if it has no userinfo.
+    /// Mask the secret in a `rest:https://user:PASS@host/…` URL so it can be
+    /// logged. Masks the password when there is a `user:pass` pair, and the WHOLE
+    /// userinfo when there is no colon (e.g. `rest:https://TOKEN@host`) — that
+    /// token-as-username form must not leak either. Returns the input unchanged
+    /// only when there is no `scheme://…@host` userinfo at all.
     static func redact(_ repoURL: String) -> String {
-        guard let at = repoURL.firstIndex(of: "@"),
-              let scheme = repoURL.range(of: "://"),
-              let colon = repoURL[scheme.upperBound..<at].firstIndex(of: ":")
+        guard let scheme = repoURL.range(of: "://"),
+              let at = repoURL.range(of: "@", range: scheme.upperBound..<repoURL.endIndex)
         else { return repoURL }
-        return String(repoURL[..<repoURL.index(after: colon)]) + "***" + String(repoURL[at...])
+        let userinfo = repoURL[scheme.upperBound..<at.lowerBound]
+        if let colon = userinfo.firstIndex(of: ":") {
+            return String(repoURL[..<repoURL.index(after: colon)]) + "***" + String(repoURL[at.lowerBound...])
+        }
+        return String(repoURL[..<scheme.upperBound]) + "***" + String(repoURL[at.lowerBound...])
     }
 
     /// Compute the bcrypt `user:$2y$…` htpasswd line for the server. The

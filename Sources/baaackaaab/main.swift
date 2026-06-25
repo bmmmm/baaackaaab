@@ -128,6 +128,14 @@ func initCredentials() throws {
         exit(1)
     }
 
+    // The real rest-server host is private and is NOT baked into the source. It
+    // must be supplied via BAAACKAAAB_ENDPOINT_HOST (e.g. in ~/.env); refuse
+    // rather than store a useless placeholder URL pointing at example.com.
+    guard Credentials.endpointHost != Credentials.placeholderHost else {
+        Console.error("endpoint host is unset — set BAAACKAAAB_ENDPOINT_HOST to your real rest-server host (e.g. add it to ~/.env), then re-run --init-credentials. Optionally set BAAACKAAAB_ENDPOINT_USER and BAAACKAAAB_ADMIN_SSH too.")
+        exit(1)
+    }
+
     let endpointPW = Credentials.randomURLSafe(byteCount: 24)   // ~192 bits, endpoint auth
     let repoPW = Credentials.randomURLSafe(byteCount: 32)       // ~256 bits, encryption key
     let repoURL = Credentials.repoURL(password: endpointPW)
@@ -145,12 +153,12 @@ func initCredentials() throws {
     Console.note("One-way bcrypt hash (safe to paste); the cleartext password is not shown. It sets /data/.htpasswd to exactly user '\(Credentials.endpointUser)' — re-running rotates the password (overwrite, so this single-user tool stays at one endpoint user):")
     print("")
     print("    printf '%s\\n' '\(line)' \\")
-    print("      | ssh bmadmin@10.0.10.2 'docker exec -i restic-rest-server sh -c \"cat > /data/.htpasswd\"'")
+    print("      | ssh \(Credentials.adminSSH) 'docker exec -i restic-rest-server sh -c \"cat > /data/.htpasswd\"'")
     print("")
     Console.section("Verify")
     Console.step("then run:  baaackaaab --check")
     Console.note("reaches the server with the stored credentials and initializes the repository.")
-    Console.note("If --check returns 401, the server cached the old .htpasswd — run `ssh bmadmin@10.0.10.2 docker restart restic-rest-server`, then retry.")
+    Console.note("If --check returns 401, the server cached the old .htpasswd — run `ssh \(Credentials.adminSSH) docker restart restic-rest-server`, then retry.")
 }
 
 /// One-time migration of an existing setup from the Keychain to the `0600` file
