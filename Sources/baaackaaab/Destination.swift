@@ -180,12 +180,19 @@ enum DestinationStore {
     /// actionable "no repository" error.
     static func resolve(explicitRepo: String?) -> [Destination] {
         let env = ProcessInfo.processInfo.environment
+        // Treat an empty value (`--restic-repo ''` or an exported but blank
+        // RESTIC_REPOSITORY=) as absent, not as an override: an empty URL would
+        // otherwise shadow the entire file store and hand restic a bogus repo.
+        func nonEmpty(_ s: String?) -> String? {
+            guard let s, !s.isEmpty else { return nil }
+            return s
+        }
 
-        if let explicit = explicitRepo ?? env["RESTIC_REPOSITORY"] {
+        if let explicit = nonEmpty(explicitRepo) ?? nonEmpty(env["RESTIC_REPOSITORY"]) {
             return [Destination(name: "explicit", link: "default", order: 0, enabled: true,
                                 repo: .value(explicit), password: adHocPassword(env))]
         }
-        if let urlFile = env["RESTIC_REPOSITORY_FILE"] {
+        if let urlFile = nonEmpty(env["RESTIC_REPOSITORY_FILE"]) {
             return [Destination(name: "env", link: "default", order: 0, enabled: true,
                                 repo: .file(URL(fileURLWithPath: urlFile)), password: adHocPassword(env))]
         }
@@ -210,8 +217,10 @@ enum DestinationStore {
     /// resolveAndExport order: an inherited RESTIC_PASSWORD[_FILE] wins, else the
     /// file store, else the legacy Keychain, else nothing (fail fast).
     private static func adHocPassword(_ env: [String: String]) -> PasswordRef {
-        if let v = env["RESTIC_PASSWORD"] { return .value(v) }
-        if let f = env["RESTIC_PASSWORD_FILE"] { return .file(URL(fileURLWithPath: f)) }
+        // Empty is absent here too (see resolve): a blank RESTIC_PASSWORD= must not
+        // win over the file store / Keychain and leave restic with no usable key.
+        if let v = env["RESTIC_PASSWORD"], !v.isEmpty { return .value(v) }
+        if let f = env["RESTIC_PASSWORD_FILE"], !f.isEmpty { return .file(URL(fileURLWithPath: f)) }
         if CredentialFiles.present { return .file(CredentialFiles.repoPasswordFile) }
         if let pw = (try? Keychain.get(account: Credentials.repoPasswordAccount)) ?? nil {
             return .value(pw)

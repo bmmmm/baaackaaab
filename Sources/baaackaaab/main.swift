@@ -798,7 +798,12 @@ do {
         runCancelled = true
     }
 
-    try staging.writeManifest()
+    // The manifest is a local diagnostic, so writing it is best-effort: a failure
+    // here must NOT unwind to the outer catch and overwrite the real outcome —
+    // that would misrecord a cancelled or fully-successful run as a crash. The
+    // counts below come from staging's in-memory state, not from re-reading it.
+    do { try staging.writeManifest() }
+    catch { Console.warn("could not write the run manifest: \(error) — the run still completed; counts below are from this run's in-memory state") }
 
     // Summary across BOTH sources (acquisition) and destinations (delivery).
     let verified = staging.items.filter { $0.verified }.count
