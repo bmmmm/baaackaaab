@@ -132,7 +132,7 @@ func initCredentials() throws {
     // must be supplied via BAAACKAAAB_ENDPOINT_HOST (e.g. in ~/.env); refuse
     // rather than store a useless placeholder URL pointing at example.com.
     guard Credentials.endpointHost != Credentials.placeholderHost else {
-        Console.error("endpoint host is unset — set BAAACKAAAB_ENDPOINT_HOST to your real rest-server host (e.g. add it to ~/.env), then re-run --init-credentials. Optionally set BAAACKAAAB_ENDPOINT_USER and BAAACKAAAB_ADMIN_SSH too.")
+        Console.error("endpoint host is unset — the real rest-server host is not baked into the binary. Export it in the shell that runs this (it must be live in the environment, not just written to ~/.env): `export BAAACKAAAB_ENDPOINT_HOST=<your rest-server host> && baaackaaab --init-credentials` (or add it to ~/.env and open a new shell). Optionally export BAAACKAAAB_ENDPOINT_USER and BAAACKAAAB_ADMIN_SSH too.")
         exit(1)
     }
 
