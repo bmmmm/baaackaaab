@@ -172,6 +172,34 @@ final class ResticBackend {
         var latestTags: [String] = []
         var sizeBytes: Int?
         var error: String?
+        /// Per-source breakdown (drive / photos), so the dashboard can show one
+        /// row per (source × destination). Empty until a successful query.
+        var sources: [SourceStatus] = []
+    }
+
+    /// The newest snapshot carrying a given source tag, plus how many snapshots
+    /// that source has on this destination. `latestTime` is nil when the source
+    /// has never been backed up here — the dashboard shows that as a gap.
+    struct SourceStatus {
+        let source: String
+        let count: Int
+        let latestTime: String?
+    }
+
+    /// The source tags the dashboard groups by — these mirror the tags the run
+    /// applies: drive folders get "drive", photo batches get "photos". A snapshot
+    /// can have neither (an ad-hoc restic backup) and then it counts only in the
+    /// total, not under a source.
+    private static let knownSources = ["drive", "photos"]
+
+    /// Group snapshots by source tag, newest-per-source. restic lists snapshots
+    /// oldest → newest, and filtering preserves that order, so `.last` is latest.
+    private static func sourceBreakdown(_ snaps: [[String: Any]]) -> [SourceStatus] {
+        knownSources.map { source in
+            let matching = snaps.filter { (($0["tags"] as? [String]) ?? []).contains(source) }
+            return SourceStatus(source: source, count: matching.count,
+                                latestTime: matching.last?["time"] as? String)
+        }
     }
 
     /// Query `restic snapshots --json` (+ a size stat) for the dashboard. This is
@@ -188,6 +216,7 @@ final class ResticBackend {
                 status.latestTime = latest["time"] as? String
                 status.latestTags = (latest["tags"] as? [String]) ?? []
             }
+            status.sources = Self.sourceBreakdown(snaps)
             status.sizeBytes = repoSizeBytes()
         } catch {
             status.error = "\(error)"

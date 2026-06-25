@@ -117,11 +117,12 @@ final class ConfigTUI {
     private var hasHome = false
 
     // Remote dashboard state, resolved lazily on first `r` so an edit-only
-    // session never touches the credential store.
-    private var repo: String?
-    private var primaryDest: Destination?
+    // session never touches the credential store. `destinations` is every enabled
+    // target; `remotes` is the per-destination status (parallel array) filled in
+    // by a remote query. The dashboard shows one block per destination.
+    private var destinations: [Destination] = []
     private var repoResolved = false
-    private var remote: ResticBackend.RemoteStatus?
+    private var remotes: [ResticBackend.RemoteStatus] = []
     private var remoteQueried = false
 
     // The selected-set panel is always visible under the folder browser once
@@ -452,14 +453,16 @@ final class ConfigTUI {
             }
         }
         body.append("")
-        body.append(divider("remote", cols))
-        if let repo = repo {
-            body.append(dim(fit("  repo  " + Credentials.redact(repo), cols)))
-            body.append(homeRemoteLine(cols))
-        } else if repoResolved {
+        body.append(divider("destinations", cols))
+        if !repoResolved {
+            body.append(dim(fit("  press r to query the remotes (snapshots + size)", cols)))
+        } else if destinations.isEmpty {
             body.append(yellow(fit("  no repository configured \u{2014} run baaackaaab --init-credentials", cols)))
         } else {
-            body.append(dim(fit("  press r to query the remote (snapshots + size)", cols)))
+            for (i, dest) in destinations.enumerated() {
+                let status = (remoteQueried && i < remotes.count) ? remotes[i] : nil
+                body += homeDestinationLines(dest, status: status, cols: cols)
+            }
         }
 
         if body.count < contentH { body += Array(repeating: "", count: contentH - body.count) }
@@ -472,17 +475,36 @@ final class ConfigTUI {
         draw(lines)
     }
 
-    private func homeRemoteLine(_ cols: Int) -> String {
-        guard remoteQueried else { return dim(fit("  press r to query snapshots + size", cols)) }
-        guard let r = remote else { return dim(fit("  (no data)", cols)) }
-        if let err = r.error { return yellow(fit("  unreachable: " + err, cols)) }
-        var parts = ["\(r.snapshotCount) snapshot(s)"]
-        if let t = r.latestTime {
-            let tags = r.latestTags.isEmpty ? "" : " [" + r.latestTags.joined(separator: ",") + "]"
-            parts.append("latest " + shortTime(t) + tags)
+    /// Two lines for one destination on the home dashboard: an identity line
+    /// (name + link label + redacted URL) and a status line (per-source latest +
+    /// size when reachable, the failure otherwise, the query hint before first
+    /// `r`). The name leads the identity line so it survives fit() truncation.
+    private func homeDestinationLines(_ dest: Destination, status: ResticBackend.RemoteStatus?, cols: Int) -> [String] {
+        let url = dest.displayURL.map { Credentials.redact($0) } ?? "(url unreadable)"
+        let linkTag = dest.link == "default" ? "" : " [" + dest.link + "]"
+        var out = [dim(fit("  " + dest.name + linkTag + "  " + url, cols))]
+        guard let status = status else {
+            out.append(dim(fit("    press r to query snapshots + size", cols)))
+            return out
         }
+        if let err = status.error {
+            out.append(yellow(fit("    \u{2717} " + err, cols)))
+        } else {
+            out.append(green(fit("    \u{2713} " + homeStatusSummary(status), cols)))
+        }
+        return out
+    }
+
+    /// The reachable-destination one-liner: total snapshots, repo size, and the
+    /// latest snapshot time per source (drive / photos), so the dashboard reads as
+    /// (source × destination). A source with no snapshots yet shows an em-dash.
+    private func homeStatusSummary(_ r: ResticBackend.RemoteStatus) -> String {
+        var parts = ["\(r.snapshotCount) snap(s)"]
         if let s = r.sizeBytes { parts.append(String(format: "%.2f GB", Double(s) / 1_000_000_000)) }
-        return green(fit("  \u{2713} " + parts.joined(separator: "  \u{2022}  "), cols))
+        for src in r.sources {
+            parts.append(src.source + " " + (src.latestTime.map(shortTime) ?? "\u{2014}"))
+        }
+        return parts.joined(separator: "  \u{2022}  ")
     }
 
     private func homeHelpLine() -> String {
@@ -513,7 +535,7 @@ final class ConfigTUI {
         _ = readKey()
         reclaimForeground()
         emit("\u{1B}[?1049h\u{1B}[?25l")    // back into the alternate screen
-        remote = nil; remoteQueried = false  // repo changed — drop the cached status
+        remotes = []; remoteQueried = false  // repos changed — drop the cached status
         statusMsg = code == 0 ? "sync finished \u{2014} press r to refresh remote" : "sync failed (code \(code))"
     }
 
@@ -529,29 +551,37 @@ final class ConfigTUI {
         return proc.terminationStatus
     }
 
-    /// Read-only refresh of the remote panel. Resolves the repo (+ loads the
-    /// Keychain password) lazily on first use, queries snapshots + size, redraws.
+    /// Read-only refresh of the remote panel: query EVERY enabled destination so
+    /// the dashboard shows one row per (source × destination). Resolves the
+    /// destinations lazily on first use. A destination missing its key is reported
+    /// inline (synthetic status) instead of silently skipped, so the gap is
+    /// visible. Each query is read-only — never forget/prune.
     private func refreshRemote() {
         ensureRepoResolved()
-        guard let dest = primaryDest else { statusMsg = "no repository \u{2014} run baaackaaab --init-credentials (or --migrate-credentials) first"; return }
-        guard dest.passwordAvailable else { statusMsg = "no encryption password \u{2014} run baaackaaab --migrate-credentials or --init-credentials"; return }
-        statusMsg = "querying remote\u{2026}"; renderHome()
-        remote = ResticBackend(destination: dest).remoteStatus()
+        guard !destinations.isEmpty else {
+            statusMsg = "no repository \u{2014} run baaackaaab --init-credentials (or --migrate-credentials) first"; return
+        }
+        statusMsg = "querying \(destinations.count) destination(s)\u{2026}"; renderHome()
+        remotes = destinations.map { dest in
+            guard dest.passwordAvailable else {
+                return ResticBackend.RemoteStatus(error: "no encryption password \u{2014} run --migrate-credentials or --init-credentials")
+            }
+            return ResticBackend(destination: dest).remoteStatus()
+        }
         remoteQueried = true
-        reclaimForeground()   // the restic child may have grabbed the tty foreground
+        reclaimForeground()   // a restic child may have grabbed the tty foreground
         statusMsg = ""
     }
 
-    /// Resolve the primary (first enabled) destination for the in-process remote
-    /// query and the dashboard. Resolved at most once. Reads no Keychain when the
-    /// file store is present, so this is silent — no prompt. The re-exec'd sync
-    /// child resolves its own destinations from the store (it reads the 0600 files
-    /// directly), so nothing is exported here.
+    /// Resolve every enabled destination for the in-process remote query and the
+    /// dashboard. Resolved at most once. Reads no Keychain when the file store is
+    /// present, so this is silent — no prompt. The re-exec'd sync child resolves
+    /// its own destinations from the store (it reads the 0600 files directly), so
+    /// nothing is exported here.
     private func ensureRepoResolved() {
         if repoResolved { return }
         repoResolved = true
-        primaryDest = DestinationStore.resolveEnabled(explicitRepo: argValue("--restic-repo")).first
-        repo = primaryDest.flatMap { $0.displayURL ?? $0.name }
+        destinations = DestinationStore.resolveEnabled(explicitRepo: argValue("--restic-repo"))
     }
 
     private func syncArgs() -> [String] {

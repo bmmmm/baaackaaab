@@ -244,8 +244,21 @@ func checkRemote() {
             continue
         }
         do {
-            try ResticBackend(destination: dest).ensureInitialized()
+            let backend = ResticBackend(destination: dest)
+            try backend.ensureInitialized()
             Console.success("reachable, authentication OK, repository ready")
+            // Read-only per-(source × destination) summary: total snapshots + size,
+            // then the newest snapshot per source (drive / photos). Same data the
+            // TUI dashboard shows; surfaced here so it is visible without a TTY.
+            let status = backend.remoteStatus()
+            if status.reachable {
+                let size = status.sizeBytes.map { String(format: ", %.2f GB", Double($0) / 1_000_000_000) } ?? ""
+                Console.detail("\(status.snapshotCount) snapshot(s)\(size)")
+                for src in status.sources {
+                    let when = src.latestTime.map { String($0.prefix(16)).replacingOccurrences(of: "T", with: " ") } ?? "never"
+                    Console.detail("  \(src.source): \(src.count) snapshot(s), latest \(when)")
+                }
+            }
         } catch {
             Console.failure("\(error)")
             failures += 1
