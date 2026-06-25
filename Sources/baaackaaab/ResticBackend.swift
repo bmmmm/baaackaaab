@@ -224,6 +224,37 @@ final class ResticBackend {
         return status
     }
 
+    /// One restic snapshot's metadata, for the restore browser. The short id is
+    /// enough to address the snapshot on a restore command line; `paths` is what
+    /// the snapshot covers, `tags` carries our run/source labels (drive/photos).
+    struct Snapshot {
+        let shortID: String
+        let id: String
+        let time: String
+        let hostname: String
+        let tags: [String]
+        let paths: [String]
+    }
+
+    /// The destination's snapshots, NEWEST FIRST (restic emits oldest→newest).
+    /// Strictly read-only. Throws on a transport/auth failure so the caller can
+    /// report it per destination rather than treating the repo as empty.
+    func listSnapshots() throws -> [Snapshot] {
+        let arr = try snapshotsJSON()
+        let snaps = arr.map { o -> Snapshot in
+            let id = (o["id"] as? String) ?? ""
+            return Snapshot(
+                shortID: (o["short_id"] as? String) ?? String(id.prefix(8)),
+                id: id,
+                time: (o["time"] as? String) ?? "",
+                hostname: (o["hostname"] as? String) ?? "",
+                tags: (o["tags"] as? [String]) ?? [],
+                paths: (o["paths"] as? [String]) ?? []
+            )
+        }
+        return snaps.reversed()
+    }
+
     /// Parse `restic snapshots --json` into an array of dictionaries. In --json
     /// mode restic emits a single JSON array; we still slice from the first '['
     /// in case a stray line precedes it.

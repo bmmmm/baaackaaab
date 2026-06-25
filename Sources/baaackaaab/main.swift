@@ -99,6 +99,13 @@ func printUsage() {
     ])
     Console.note("A run backs up to every enabled destination — each is a full, independent copy with its own key. The Mac stays read + append only toward all of them. The first --add-destination migrates a legacy single repo to destinations/default automatically.")
 
+    Console.section("Restore (read-only browse; restore writes only to a fresh dir)")
+    Console.info([
+        ("--snapshots", "list snapshots newest-first per destination, then exit"),
+        ("--destination <name>", "limit --snapshots/restore to one destination (default: all)"),
+    ])
+    Console.note("Restore never writes back into iCloud Drive or Photos — it lands in a fresh directory you then move things back from. Pick a snapshot's short id from --snapshots.")
+
     Console.section("Schedule (launchd timer)")
     Console.info([
         ("--install-timer", "install a daily LaunchAgent that backs up the set, then exit"),
@@ -272,6 +279,57 @@ func checkRemote() {
         exit(1)
     }
     Console.success("all \(dests.count) destination(s) reachable and ready")
+}
+
+/// Resolve the destinations a read/restore command should act on: every enabled
+/// one, or just the single `--destination <name>`. Exits with an actionable error
+/// if `--destination` names something that is not configured. The restore flow
+/// uses this to pick its source repository.
+func destinationsForCommand() -> [Destination] {
+    let all = resolveDestinationsOrExit()
+    guard let name = argValue("--destination") else { return all }
+    guard let match = all.first(where: { $0.name == name }) else {
+        Console.error("no enabled destination named '\(name)' — configured: \(all.map { $0.name }.joined(separator: ", "))")
+        exit(1)
+    }
+    return [match]
+}
+
+/// List snapshots (read-only restore browser, CLI form). For each destination —
+/// all, or just `--destination <name>` — its snapshots newest-first with the short
+/// id, time, host, tags, and covered paths. The short id is what `--restore` takes.
+func listSnapshotsCommand() {
+    Console.banner("baaackaaab", tagline: "snapshots")
+    let dests = destinationsForCommand()
+    var failures = 0
+    for dest in dests {
+        Console.section("Destination", detail: "\(dest.name) [\(dest.link)]")
+        guard dest.passwordAvailable else {
+            Console.failure("no encryption password — the credential files are missing or unreadable")
+            failures += 1
+            continue
+        }
+        do {
+            let snaps = try ResticBackend(destination: dest).listSnapshots()
+            if snaps.isEmpty {
+                Console.note("no snapshots yet")
+                continue
+            }
+            for s in snaps {
+                let when = String(s.time.prefix(16)).replacingOccurrences(of: "T", with: " ")
+                let tags = s.tags.isEmpty ? "" : "  [" + s.tags.joined(separator: ",") + "]"
+                Console.step("\(s.shortID)  \(when)  \(s.hostname)\(tags)")
+                Console.detail(s.paths.joined(separator: ", "))
+            }
+        } catch {
+            Console.failure("\(error)")
+            failures += 1
+        }
+    }
+    if failures > 0 {
+        Console.error("\(failures)/\(dests.count) destination(s) could not be listed — see above")
+        exit(1)
+    }
 }
 
 /// Print the configured destinations (read-only): name, link group, order,
@@ -476,6 +534,12 @@ if CommandLine.arguments.contains("--migrate-credentials") {
 // Connectivity + auth + repo-init check, then exit.
 if CommandLine.arguments.contains("--check") {
     checkRemote()
+    exit(0)
+}
+
+// Read-only snapshot browser (restore starts here: pick a snapshot's short id).
+if CommandLine.arguments.contains("--snapshots") {
+    listSnapshotsCommand()
     exit(0)
 }
 
