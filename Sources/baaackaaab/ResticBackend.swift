@@ -24,19 +24,46 @@ enum ResticError: Error, CustomStringConvertible {
 /// The URL embeds the rest-server endpoint password, so it is just as sensitive
 /// as the password — hence we never pass `-r` on the command line.
 ///
-/// `Credentials.resolveAndExport` is the single place that decides which env
-/// vars carry the secrets (file store vs. Keychain); every caller runs it before
-/// constructing this. So `repository` here is only the URL string we keep for
-/// the redacted log line — restic itself reads the already-exported environment.
+/// A `Destination` decides which env vars carry the secrets (file store vs.
+/// explicit vs. legacy Keychain); the backend builds a private per-instance
+/// environment from it and hands that to every restic child. So `repository`
+/// here is only the URL string we keep for the redacted log line — restic itself
+/// reads the repository + password from the environment of its own process.
 final class ResticBackend {
+    /// The repo URL for redacted display/logging (never used to reach restic —
+    /// restic reads the repository from the environment we hand the child).
     let repository: String
+    /// The destination this backend targets, for per-destination labelling.
+    let destinationName: String
     /// Absolute path to the restic binary, resolved once at init. nil when it
     /// could not be found anywhere — every run then throws `ResticError.notFound`.
     private let executablePath: String?
+    /// The exact environment handed to every restic child: the parent env with
+    /// all RESTIC_* repo/password vars stripped, plus this destination's overlay.
+    /// Carried per-instance (not via process-global setenv) so backing up to two
+    /// destinations in one run can never cross-contaminate their secrets.
+    private let environment: [String: String]
 
-    init(repository: String, executable: String = "restic") {
-        self.repository = repository
+    init(destination: Destination, executable: String = "restic") {
+        self.repository = destination.displayURL ?? destination.name
+        self.destinationName = destination.name
         self.executablePath = Self.resolveExecutable(executable)
+        self.environment = Self.childEnvironment(overlay: destination.envOverlay)
+    }
+
+    /// Build the environment for a restic child: the parent environment with ALL
+    /// four RESTIC_* repo/password vars stripped, then exactly this destination's
+    /// overlay applied. Stripping first guarantees restic never sees a stale
+    /// RESTIC_REPOSITORY next to a RESTIC_REPOSITORY_FILE (it aborts on the pair),
+    /// and that one destination's secret can never bleed into another's run.
+    private static func childEnvironment(overlay: [String: String]) -> [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        for key in ["RESTIC_REPOSITORY", "RESTIC_REPOSITORY_FILE",
+                    "RESTIC_PASSWORD", "RESTIC_PASSWORD_FILE"] {
+            env.removeValue(forKey: key)
+        }
+        env.merge(overlay) { _, new in new }
+        return env
     }
 
     /// Resolve the restic binary to an absolute path.
@@ -183,6 +210,7 @@ final class ResticBackend {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: exe)
         proc.arguments = args
+        proc.environment = environment   // this destination's repo + password
         let pipe = Pipe()
         proc.standardOutput = pipe
         proc.standardError = FileHandle.nullDevice
@@ -205,6 +233,7 @@ final class ResticBackend {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: exe)
         proc.arguments = args
+        proc.environment = environment   // this destination's repo + password
         // Feed /dev/null so a missing RESTIC_PASSWORD fails fast and visibly
         // instead of hanging on an interactive prompt we'd never see.
         proc.standardInput = FileHandle.nullDevice

@@ -119,6 +119,7 @@ final class ConfigTUI {
     // Remote dashboard state, resolved lazily on first `r` so an edit-only
     // session never touches the credential store.
     private var repo: String?
+    private var primaryDest: Destination?
     private var repoResolved = false
     private var remote: ResticBackend.RemoteStatus?
     private var remoteQueried = false
@@ -497,9 +498,11 @@ final class ConfigTUI {
     private func syncNow() {
         guard !set.isEmpty else { statusMsg = "backup set is empty \u{2014} press e to add folders / albums"; return }
         if dirty { save() }   // back up exactly what's on screen
-        // Resolve + export credentials in this process so the re-exec'd child
-        // inherits the repo + password source from the environment. In file mode
-        // only the *_FILE paths are inherited — no secret value, no Keychain.
+        // The re-exec'd child resolves its own destinations from the store (it
+        // reads the 0600 files directly), so we export nothing here — we only
+        // refresh our cached primary for the post-sync display. An explicit
+        // --restic-repo is forwarded via syncArgs so an ad-hoc target carries
+        // through to the child.
         ensureRepoResolved()
         emit("\u{1B}[?25h\u{1B}[?1049l")   // show cursor, leave the alternate screen
         term.restore()                      // cooked, so the child's output behaves
@@ -530,23 +533,25 @@ final class ConfigTUI {
     /// Keychain password) lazily on first use, queries snapshots + size, redraws.
     private func refreshRemote() {
         ensureRepoResolved()
-        guard let repo = repo else { statusMsg = "no repository \u{2014} run baaackaaab --init-credentials (or --migrate-credentials) first"; return }
-        guard resticPasswordAvailable() else { statusMsg = "no encryption password \u{2014} run baaackaaab --migrate-credentials or --init-credentials"; return }
+        guard let dest = primaryDest else { statusMsg = "no repository \u{2014} run baaackaaab --init-credentials (or --migrate-credentials) first"; return }
+        guard dest.passwordAvailable else { statusMsg = "no encryption password \u{2014} run baaackaaab --migrate-credentials or --init-credentials"; return }
         statusMsg = "querying remote\u{2026}"; renderHome()
-        remote = ResticBackend(repository: repo).remoteStatus()
+        remote = ResticBackend(destination: dest).remoteStatus()
         remoteQueried = true
         reclaimForeground()   // the restic child may have grabbed the tty foreground
         statusMsg = ""
     }
 
-    /// Resolve the repo and export both secrets (file store preferred, then the
-    /// legacy Keychain) so the in-process restic query AND a re-exec'd sync child
-    /// inherit them. Resolved at most once. With the file store this is silent —
-    /// no Keychain prompt at all. See `Credentials.resolveAndExport`.
+    /// Resolve the primary (first enabled) destination for the in-process remote
+    /// query and the dashboard. Resolved at most once. Reads no Keychain when the
+    /// file store is present, so this is silent — no prompt. The re-exec'd sync
+    /// child resolves its own destinations from the store (it reads the 0600 files
+    /// directly), so nothing is exported here.
     private func ensureRepoResolved() {
         if repoResolved { return }
         repoResolved = true
-        repo = Credentials.resolveAndExport(explicitRepo: argValue("--restic-repo"))
+        primaryDest = DestinationStore.resolveEnabled(explicitRepo: argValue("--restic-repo")).first
+        repo = primaryDest.flatMap { $0.displayURL ?? $0.name }
     }
 
     private func syncArgs() -> [String] {
@@ -556,6 +561,8 @@ final class ConfigTUI {
         var args = ["--run-tag", "tui-\(fmt.string(from: Date()))"]
         // Preserve a non-default config so the child backs up the same set.
         if configPath.path != BackupSet.defaultPath().path { args += ["--config", configPath.path] }
+        // Forward an explicit ad-hoc target so the child hits the same repo.
+        if let r = argValue("--restic-repo") { args += ["--restic-repo", r] }
         return args
     }
 

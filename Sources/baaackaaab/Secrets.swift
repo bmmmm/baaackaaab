@@ -130,55 +130,6 @@ enum Credentials {
         "rest:https://\(endpointUser):\(password)@\(endpointHost)/\(endpointUser)/"
     }
 
-    /// Resolve the repository and make both secrets available to a restic child,
-    /// exporting EXACTLY ONE repository source and ONE password source — restic
-    /// treats `RESTIC_REPOSITORY` and `RESTIC_REPOSITORY_FILE` as mutually
-    /// exclusive (likewise the password pair) and aborts if both are set.
-    /// Resolution order, preferring the store that needs no Keychain prompt:
-    ///   1. an explicit repo (--restic-repo or an inherited RESTIC_REPOSITORY[_FILE])
-    ///   2. the 0600 credential files → RESTIC_REPOSITORY_FILE / RESTIC_PASSWORD_FILE
-    ///   3. the legacy Keychain items → RESTIC_REPOSITORY / RESTIC_PASSWORD
-    /// Returns the repo URL for redacted display, or nil if nothing is configured.
-    /// A secret value never reaches argv; in file mode it never reaches our
-    /// environment either — only the file path does, and restic reads the file.
-    static func resolveAndExport(explicitRepo: String?) -> String? {
-        let env = ProcessInfo.processInfo.environment
-
-        // --- Repository: pick exactly one source ---
-        var displayURL: String?
-        if let explicit = explicitRepo ?? env["RESTIC_REPOSITORY"] {
-            setenv("RESTIC_REPOSITORY", explicit, 1)
-            unsetenv("RESTIC_REPOSITORY_FILE")   // avoid restic's mutually-exclusive error
-            displayURL = explicit
-        } else if let fileEnv = env["RESTIC_REPOSITORY_FILE"] {
-            displayURL = (try? String(contentsOfFile: fileEnv, encoding: .utf8))?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-        } else if CredentialFiles.present {
-            setenv("RESTIC_REPOSITORY_FILE", CredentialFiles.repoURLFile.path, 1)
-            unsetenv("RESTIC_REPOSITORY")   // exactly one repo source reaches restic
-            displayURL = (try? CredentialFiles.readURL()) ?? nil
-        } else if let stored = (try? Keychain.get(account: repoURLAccount)) ?? nil {
-            setenv("RESTIC_REPOSITORY", stored, 1)
-            unsetenv("RESTIC_REPOSITORY_FILE")
-            displayURL = stored
-        }
-
-        // --- Password: pick exactly one source, leaving any caller-provided one.
-        // Whichever we set, unset its counterpart so restic never sees both (it
-        // treats the pair as mutually exclusive and aborts if both are present). ---
-        if env["RESTIC_PASSWORD"] == nil, env["RESTIC_PASSWORD_FILE"] == nil {
-            if CredentialFiles.present {
-                setenv("RESTIC_PASSWORD_FILE", CredentialFiles.repoPasswordFile.path, 1)
-                unsetenv("RESTIC_PASSWORD")
-            } else if let pw = (try? Keychain.get(account: repoPasswordAccount)) ?? nil {
-                setenv("RESTIC_PASSWORD", pw, 1)
-                unsetenv("RESTIC_PASSWORD_FILE")
-            }
-        }
-
-        return displayURL
-    }
-
     /// Mask the secret in a `rest:https://user:PASS@host/…` URL so it can be
     /// logged. Masks the password when there is a `user:pass` pair, and the WHOLE
     /// userinfo when there is no colon (e.g. `rest:https://TOKEN@host`) — that

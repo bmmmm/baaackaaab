@@ -202,42 +202,32 @@ func migrateCredentials() throws {
     Console.step("verify:  baaackaaab --check")
 }
 
-/// Resolve the restic repo URL and export both secrets into our environment so
-/// the restic child inherits exactly one repo source and one password source
-/// (file store preferred, then the legacy Keychain). Exits with an actionable
-/// message if no repo can be found. See `Credentials.resolveAndExport`.
-func resolveRepoOrExit() -> String {
-    if let repo = Credentials.resolveAndExport(explicitRepo: argValue("--restic-repo")) {
-        return repo
-    }
+/// Resolve the destinations to back up to / query, honoring an explicit
+/// `--restic-repo` / RESTIC_REPOSITORY override, or exit with an actionable
+/// message when nothing is configured. Only ENABLED destinations are returned,
+/// already ordered primary-first. The credential secrets never reach our argv or
+/// environment — each `Destination` carries them as a per-restic-child env
+/// overlay (see `ResticBackend`).
+func resolveDestinationsOrExit() -> [Destination] {
+    let dests = DestinationStore.resolveEnabled(explicitRepo: argValue("--restic-repo"))
+    if !dests.isEmpty { return dests }
     Console.error("no repository — pass --restic-repo, set RESTIC_REPOSITORY, run `baaackaaab --migrate-credentials` (Keychain→files), or `--init-credentials` first")
     exit(1)
-}
-
-/// Whether the encryption password is available to the restic child — either a
-/// non-empty RESTIC_PASSWORD or a RESTIC_PASSWORD_FILE pointing at a non-empty
-/// file. Read via getenv so it reflects a prior resolveAndExport.
-func resticPasswordAvailable() -> Bool {
-    if let v = getenv("RESTIC_PASSWORD"), strlen(v) > 0 { return true }
-    if let f = getenv("RESTIC_PASSWORD_FILE") {
-        let path = String(cString: f)
-        if let data = FileManager.default.contents(atPath: path), !data.isEmpty { return true }
-    }
-    return false
 }
 
 /// Reach the server with the stored credentials and ensure the repo exists.
 /// A fast end-to-end check of DNS + Traefik + htpasswd auth + restic init.
 func checkRemote() {
     Console.banner("baaackaaab", tagline: "remote check")
-    let repo = resolveRepoOrExit()
+    let dest = resolveDestinationsOrExit()[0]
+    let repo = dest.displayURL ?? dest.name
     Console.info([("repo", Credentials.redact(repo))])
-    guard resticPasswordAvailable() else {
+    guard dest.passwordAvailable else {
         Console.error("no encryption password — run `baaackaaab --migrate-credentials` (Keychain→files) or `--init-credentials`; the credential files / Keychain item are missing or unreadable")
         exit(1)
     }
     do {
-        try ResticBackend(repository: repo).ensureInitialized()
+        try ResticBackend(destination: dest).ensureInitialized()
         Console.success("server reachable, authentication OK, repository ready")
     } catch {
         Console.error("\(error)")
@@ -463,7 +453,11 @@ let host = argValue("--host") ?? ProcessInfo.processInfo.hostName
 let repoQuotaBytes = argValue("--repo-quota-bytes").flatMap { Int($0) } ?? configQuotaBytes
 let quotaWarnFraction = argValue("--quota-warn-fraction").flatMap { Double($0) } ?? 0.85
 
-let repo = resolveRepoOrExit()
+// Slice 1a keeps the single-destination flow: resolve the set but act on the
+// primary (first enabled) destination. Slice 1b iterates the full set.
+let destinations = resolveDestinationsOrExit()
+let primaryDest = destinations[0]
+let repo = primaryDest.displayURL ?? primaryDest.name
 
 let runFmt = DateFormatter()
 runFmt.locale = Locale(identifier: "en_US_POSIX")
@@ -472,7 +466,7 @@ let runTag = argValue("--run-tag") ?? "run-\(runFmt.string(from: Date()))"
 
 do {
     let staging = try Staging(root: stagingURL)
-    let restic = ResticBackend(repository: repo)
+    let restic = ResticBackend(destination: primaryDest)
     Console.banner("baaackaaab", tagline: "one-way iCloud → restic backup")
     Console.info([
         ("repo", Credentials.redact(repo)),
