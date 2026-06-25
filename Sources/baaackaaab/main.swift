@@ -387,6 +387,29 @@ func findCommand() {
     }
 }
 
+/// The honest "what you actually got" note for a restored snapshot, keyed off its
+/// source tag. A Photos restore returns the ORIGINAL exported files, NOT a
+/// re-importable .photoslibrary; a Drive restore is a plain file tree to move
+/// back. Said plainly so nobody expects a one-click reinstate.
+func restoreSourceNote(_ tags: [String]) -> String {
+    if tags.contains("photos") {
+        return "these are your ORIGINAL photo/video files (JPEG/HEIC/MOV), not a .photoslibrary — open Photos.app and File > Import this folder to put them back"
+    }
+    if tags.contains("drive") {
+        return "this is a fresh copy of your iCloud Drive files — move what you need back into iCloud Drive yourself; never restore in place"
+    }
+    return "this is a fresh copy — move what you need back into iCloud Drive / Photos yourself"
+}
+
+/// Short source label for the info block (Photos / Drive / mixed / unknown).
+func restoreSourceLabel(_ tags: [String]) -> String {
+    let photos = tags.contains("photos"), drive = tags.contains("drive")
+    if photos && drive { return "mixed (iCloud Drive + Photos)" }
+    if photos { return "iCloud Photos (original files, not a .photoslibrary)" }
+    if drive { return "iCloud Drive (files)" }
+    return "unknown"
+}
+
 /// Restore a snapshot from ONE destination into a fresh directory. Safe by
 /// construction (see RestoreEngine): the target is validated (never live iCloud
 /// Drive / Photos, never an existing non-empty dir), the operation is previewed
@@ -428,15 +451,24 @@ func restoreCommand() {
     do { try RestoreEngine.validateTarget(target) }
     catch { Console.error("\(error)"); exit(1) }
 
+    let backend = ResticBackend(destination: dest)
+    // Resolve the chosen snapshot's tags (best-effort) to label the source and to
+    // tailor the honest "what you got" note. For "latest" take the newest; else
+    // match the short or full id.
+    let restoredTags: [String] = {
+        guard let snaps = try? backend.listSnapshots() else { return [] }
+        if snapshot == "latest" { return snaps.first?.tags ?? [] }
+        return snaps.first(where: { $0.shortID == snapshot || $0.id == snapshot || $0.id.hasPrefix(snapshot) })?.tags ?? []
+    }()
+
     Console.info([
         ("destination", dest.name),
         ("snapshot", snapshot),
+        ("source", restoreSourceLabel(restoredTags)),
         ("target", target.path),
         ("mode", include.map { "subpath \($0)" } ?? "full snapshot"),
         ("verify", verify ? "yes (re-reads restored files)" : "no"),
     ])
-
-    let backend = ResticBackend(destination: dest)
 
     // 1) Always preview with --dry-run first (shows exactly what would land). For a
     //    real --dry-run invocation, the preview IS the whole operation.
@@ -478,7 +510,7 @@ func restoreCommand() {
         state: .ok,
         details: [
             ("target", target.path),
-            ("next", "this is a fresh copy — move what you need back into iCloud Drive / Photos yourself"),
+            ("next", restoreSourceNote(restoredTags)),
         ])
 }
 
