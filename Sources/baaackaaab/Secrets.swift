@@ -190,9 +190,16 @@ enum CredentialFiles {
         }
     }
 
-    /// ~/Library/Application Support/baaackaaab
+    /// ~/Library/Application Support/baaackaaab — or a relocated store when
+    /// BAAACKAAAB_SUPPORT_DIR is set (advanced: move the credential + destination
+    /// store off the default path; also what the test harness uses to run against
+    /// a throwaway store instead of the user's real one).
     static var dir: URL {
-        FileManager.default.homeDirectoryForCurrentUser
+        if let override = ProcessInfo.processInfo.environment["BAAACKAAAB_SUPPORT_DIR"],
+           !override.isEmpty {
+            return URL(fileURLWithPath: (override as NSString).expandingTildeInPath, isDirectory: true)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/baaackaaab", isDirectory: true)
     }
     static var repoURLFile: URL { dir.appendingPathComponent("repo-url") }

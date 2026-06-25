@@ -453,11 +453,10 @@ let host = argValue("--host") ?? ProcessInfo.processInfo.hostName
 let repoQuotaBytes = argValue("--repo-quota-bytes").flatMap { Int($0) } ?? configQuotaBytes
 let quotaWarnFraction = argValue("--quota-warn-fraction").flatMap { Double($0) } ?? 0.85
 
-// Slice 1a keeps the single-destination flow: resolve the set but act on the
-// primary (first enabled) destination. Slice 1b iterates the full set.
+// Resolve the destination set (already enabled + primary-first). We back up to
+// every one of them: each is an independent repo, so this yields N full copies.
 let destinations = resolveDestinationsOrExit()
-let primaryDest = destinations[0]
-let repo = primaryDest.displayURL ?? primaryDest.name
+let primaryRepo = destinations[0].displayURL ?? destinations[0].name
 
 let runFmt = DateFormatter()
 runFmt.locale = Locale(identifier: "en_US_POSIX")
@@ -466,28 +465,70 @@ let runTag = argValue("--run-tag") ?? "run-\(runFmt.string(from: Date()))"
 
 do {
     let staging = try Staging(root: stagingURL)
-    let restic = ResticBackend(destination: primaryDest)
+    let runs = destinations.map { DestinationRun($0) }
     Console.banner("baaackaaab", tagline: "one-way iCloud → restic backup")
-    Console.info([
-        ("repo", Credentials.redact(repo)),
+    var info: [(String, String)] = [
         ("host", host),
         ("run-tag", runTag),
         ("staging", "\(stagingURL.path) (scratch for photo batches only)"),
-    ])
-    try restic.ensureInitialized()
+    ]
+    if destinations.count == 1 {
+        info.insert(("repo", Credentials.redact(primaryRepo)), at: 0)
+    } else {
+        info.insert(("destinations",
+                     destinations.map { "\($0.name) [\($0.link)]" }.joined(separator: ", ")), at: 0)
+    }
+    Console.info(info)
 
-    // 0) Remote-quota pre-flight (soft gauge). Reads the current repo size and,
-    //    if it is past the warn fraction of the operator-supplied quota, prints
-    //    an actionable warning. The server still hard-stops at 100%; this just
-    //    gives lead time to raise --max-size before a run gets rejected.
+    // Initialize every destination, best-effort. A destination that can't be
+    // reached / initialized is recorded and skipped for all backups; the others
+    // still run, so one dead repo never costs you the whole backup. (init refuses
+    // to clobber an existing repo, so this is safe to call every run.)
+    Console.section("Destinations")
+    for run in runs {
+        do {
+            try run.backend.ensureInitialized()
+            Console.success("\(run.destination.name): ready  \(Credentials.redact(run.backend.repository))")
+        } catch {
+            run.initError = "\(error)"
+            Console.failure("\(run.destination.name): unavailable — \(error)")
+        }
+    }
+    let ready = runs.filter { $0.ready }
+    if ready.isEmpty {
+        Console.summary(headline: "no destination could be initialized — nothing was backed up",
+                        state: .fail, details: [("run-tag", runTag)])
+        exit(2)
+    }
+
+    // Back up `paths` to every ready destination, sequential primary-first.
+    // Per-destination best-effort: a failure is recorded on that destination and
+    // reported, but never aborts the other destinations, the other sources, or
+    // the run. (Parallel-by-link is a later slice; this is the sequential base.)
+    func backupToAll(paths: [URL], tags: [String], label: String) {
+        for run in ready {
+            do {
+                try run.backend.backup(paths: paths, tags: tags, host: host)
+            } catch {
+                run.backupFailures += 1
+                if run.firstBackupError == nil { run.firstBackupError = "\(error)" }
+                Console.failure("\(run.destination.name): backup failed for \(label) — \(error)")
+            }
+        }
+    }
+
+    // 0) Remote-quota pre-flight (soft gauge) on the primary ready destination.
+    //    Reads the current repo size and, if it is past the warn fraction of the
+    //    operator-supplied quota, prints an actionable warning. The server still
+    //    hard-stops at 100%; this just gives lead time to raise --max-size.
     if let quota = repoQuotaBytes, quota > 0 {
         Console.section("Quota")
-        if let used = restic.repoSizeBytes() {
+        if let used = ready[0].backend.repoSizeBytes() {
             let frac = Double(used) / Double(quota)
             let pct = Int((frac * 100).rounded())
             let usedGB = String(format: "%.2f", Double(used) / 1_000_000_000)
             let quotaGB = String(format: "%.2f", Double(quota) / 1_000_000_000)
-            Console.step("repo \(usedGB) GB / \(quotaGB) GB (\(pct)%)")
+            Console.step("\(ready[0].destination.name): \(usedGB) GB / \(quotaGB) GB (\(pct)%)")
             if frac >= quotaWarnFraction {
                 Console.warn("repo is at \(pct)% of the configured quota. Raise --max-size on the rest-server (edit the stack's docker-compose.yml, redeploy — no data migration) before it fills; the server hard-stops new backups at 100%.")
             }
@@ -496,13 +537,13 @@ do {
         }
     }
 
-    // 1) iCloud Drive — for each folder: materialize + verify in place, then back
-    //    it up IMMEDIATELY. Backing up per folder (instead of materializing all
-    //    folders and issuing one backup at the very end) closes the TOCTOU window
-    //    where a folder materialized early could be re-evicted by the file
-    //    provider before restic gets to read it. Per-source best-effort: a folder
-    //    that fails to materialize is recorded and skipped — one bad folder must
-    //    not abort the remaining folders or the Photos phase.
+    // 1) iCloud Drive — for each folder: materialize + verify in place ONCE, then
+    //    back it up to every destination. Materializing per folder right before
+    //    its backup closes the TOCTOU window where a folder materialized early
+    //    could be re-evicted by the file provider before restic reads it.
+    //    Per-source best-effort: a folder that fails to materialize is recorded
+    //    and skipped (for all destinations) — one bad folder must not abort the
+    //    remaining folders or the Photos phase.
     var driveFailures = 0
     if driveFolders.isEmpty {
         Console.section("iCloud Drive")
@@ -513,16 +554,18 @@ do {
             Console.section("iCloud Drive", detail: url.path)
             do {
                 try DriveAcquirer().materializeAndVerify(folder: url, into: staging)
-                try restic.backup(paths: [url], tags: [runTag, "drive"], host: host)
             } catch {
                 driveFailures += 1
                 Console.failure("drive folder skipped: \(url.path) — \(error)")
+                continue
             }
+            backupToAll(paths: [url], tags: [runTag, "drive"], label: url.lastPathComponent)
         }
     }
 
-    // 2) iCloud Photos — export in byte-budgeted batches; each batch is backed
-    //    up and then deleted, so peak extra disk is ~one batch, not 27 GB.
+    // 2) iCloud Photos — export in byte-budgeted batches; each batch is backed up
+    //    to EVERY destination and then deleted, so peak extra disk stays ~one
+    //    batch (not 27 GB) regardless of how many destinations there are.
     var photoFailures = 0
     if photoAlbums.isEmpty {
         Console.section("iCloud Photos")
@@ -544,10 +587,13 @@ do {
                     into: staging
                 ) { batchDir, idx in
                     lastIdx = idx
-                    try restic.backup(
+                    // backupToAll is best-effort and never throws, so a single
+                    // destination's failure does not abort the album's remaining
+                    // batches — the batch is still deleted, peak disk holds.
+                    backupToAll(
                         paths: [batchDir],
                         tags: [runTag, "photos", "batch-\(photoBatchBase + idx)"],
-                        host: host
+                        label: "batch \(photoBatchBase + idx)"
                     )
                 }
             } catch {
@@ -560,28 +606,35 @@ do {
 
     try staging.writeManifest()
 
+    // Summary across BOTH sources (acquisition) and destinations (delivery).
     let verified = staging.items.filter { $0.verified }.count
     let total = staging.items.count
     let sourceFailures = driveFailures + photoFailures
+    let destInitFailures = runs.filter { $0.initError != nil }.count
+    let destBackupFailures = runs.filter { $0.backupFailures > 0 }.count
     let manifestPath = stagingURL.appendingPathComponent("manifest.json").path
-    let details = [
-        ("run-tag", runTag),
-        ("manifest", manifestPath),
-    ]
+    var details: [(String, String)] = [("run-tag", runTag), ("manifest", manifestPath)]
+    if destinations.count > 1 {
+        let perDest = runs.map { r -> String in
+            if r.initError != nil { return "\(r.destination.name): unavailable" }
+            return r.backupFailures > 0
+                ? "\(r.destination.name): \(r.backupFailures) failed"
+                : "\(r.destination.name): ok"
+        }.joined(separator: "; ")
+        details.append(("destinations", perDest))
+    }
 
     if total == 0 {
         let extra = sourceFailures > 0 ? " (\(sourceFailures) source(s) failed)" : ""
-        Console.summary(
-            headline: "nothing was acquired\(extra)",
-            state: .fail,
-            details: details
-        )
+        Console.summary(headline: "nothing was acquired\(extra)", state: .fail, details: details)
         exit(2)
     }
-    if verified != total || sourceFailures > 0 {
-        var problems: [String] = []
-        if verified != total { problems.append("\(total - verified) item(s) failed verification") }
-        if sourceFailures > 0 { problems.append("\(sourceFailures) source(s) skipped after errors") }
+    var problems: [String] = []
+    if verified != total { problems.append("\(total - verified) item(s) failed verification") }
+    if sourceFailures > 0 { problems.append("\(sourceFailures) source(s) skipped after errors") }
+    if destInitFailures > 0 { problems.append("\(destInitFailures) destination(s) unavailable") }
+    if destBackupFailures > 0 { problems.append("\(destBackupFailures) destination(s) had backup failures") }
+    if !problems.isEmpty {
         Console.summary(
             headline: "\(verified)/\(total) verified — \(problems.joined(separator: "; ")); review the manifest",
             state: .warn,
@@ -590,7 +643,7 @@ do {
         exit(2)
     }
     Console.summary(
-        headline: "\(verified)/\(total) verified — every acquired byte-stream backed up under tag \(runTag)",
+        headline: "\(verified)/\(total) verified to \(ready.count) destination(s) — every acquired byte-stream backed up under tag \(runTag)",
         state: .ok,
         details: details
     )

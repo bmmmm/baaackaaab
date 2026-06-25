@@ -219,3 +219,28 @@ enum DestinationStore {
         return .unset
     }
 }
+
+/// Per-destination state for one backup run: its backend plus whether init
+/// succeeded and how many backups failed. This is what makes a run best-effort
+/// ACROSS destinations — one unreachable repo records its failure here and is
+/// skipped for backups, but never aborts the others. Mirrors the per-source
+/// best-effort the run already does for Drive folders and Photo albums.
+final class DestinationRun {
+    let destination: Destination
+    let backend: ResticBackend
+    /// Set when the destination could not be initialized/reached; it is then
+    /// skipped for all backups in this run.
+    var initError: String?
+    var backupFailures = 0
+    var firstBackupError: String?
+
+    init(_ destination: Destination) {
+        self.destination = destination
+        self.backend = ResticBackend(destination: destination)
+    }
+
+    /// Initialized and therefore eligible to receive backups this run.
+    var ready: Bool { initError == nil }
+    /// Initialized AND every backup to it succeeded.
+    var ok: Bool { initError == nil && backupFailures == 0 }
+}

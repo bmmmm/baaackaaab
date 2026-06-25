@@ -3,6 +3,7 @@ import Foundation
 enum ResticError: Error, CustomStringConvertible {
     case notFound
     case failed(command: String, code: Int32)
+    case timedOut(command: String, seconds: Int)
 
     var description: String {
         switch self {
@@ -10,6 +11,8 @@ enum ResticError: Error, CustomStringConvertible {
             return "restic executable not found in PATH — install it (`brew install restic`) and re-run"
         case .failed(let cmd, let code):
             return "restic \(cmd) exited with code \(code) — see restic output above"
+        case .timedOut(let cmd, let secs):
+            return "restic \(cmd) did not respond within \(secs)s — the destination is unreachable or wedged. It is skipped this run; it is NOT treated as a missing repo, so nothing is re-initialized."
         }
     }
 }
@@ -111,7 +114,12 @@ final class ResticBackend {
     /// itself refuses to clobber an existing repo, so a misread transient failure
     /// cannot destroy data — it just surfaces init's own error.
     func ensureInitialized() throws {
-        if try run(["cat", "config"], quiet: true) == 0 { return }
+        // Bound the existence probe: on an unreachable/wedged destination restic
+        // retries the failing backend request ~10× with exponential backoff,
+        // which can stall for minutes. With several destinations that would make
+        // one dead repo hold up the whole run, so we cap the probe — a timeout
+        // throws `timedOut` (destination skipped), never a false "repo absent".
+        if try run(["cat", "config"], quiet: true, timeout: Self.probeTimeout) == 0 { return }
         Console.step("restic: initializing repository (format v2) at \(Credentials.redact(repository))")
         let code = try run(["init", "--repository-version", "2"])
         if code != 0 { throw ResticError.failed(command: "init", code: code) }
@@ -224,11 +232,19 @@ final class ResticBackend {
         return String(data: data, encoding: .utf8) ?? ""
     }
 
+    /// Wall-clock cap for the read-only existence probe (`cat config`). Long
+    /// enough that a briefly-slow but reachable server still answers; short
+    /// enough that a genuinely dead destination is skipped quickly instead of
+    /// stalling the whole multi-destination run on restic's backend retries.
+    private static let probeTimeout: TimeInterval = 60
+
     /// Run restic and return its exit code. With `quiet`, output is discarded
-    /// (used for the existence probe); otherwise it is inherited so the user
-    /// sees live progress. The child inherits our environment, so
-    /// `RESTIC_PASSWORD` flows through without ever touching argv.
-    private func run(_ args: [String], quiet: Bool = false) throws -> Int32 {
+    /// (used for the existence probe); otherwise it is inherited so the user sees
+    /// live progress. `timeout`, when set, bounds the wall clock: on expiry the
+    /// child is terminated (SIGTERM) and `timedOut` is thrown — only ever used
+    /// for the read-only probe, never for a writing command we must not kill
+    /// mid-flight. The child reads repo + password from `environment`, never argv.
+    private func run(_ args: [String], quiet: Bool = false, timeout: TimeInterval? = nil) throws -> Int32 {
         guard let exe = executablePath else { throw ResticError.notFound }
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: exe)
@@ -242,7 +258,20 @@ final class ResticBackend {
             proc.standardError = FileHandle.nullDevice
         }
         do { try proc.run() } catch { throw ResticError.notFound }
-        proc.waitUntilExit()
+
+        guard let timeout else {
+            proc.waitUntilExit()
+            return proc.terminationStatus
+        }
+        // Bounded wait: a background thread reaps the child and signals; if the
+        // deadline passes first we terminate the (read-only) probe and report it.
+        let sem = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .userInitiated).async { proc.waitUntilExit(); sem.signal() }
+        if sem.wait(timeout: .now() + timeout) == .timedOut {
+            proc.terminate()
+            _ = sem.wait(timeout: .now() + 5)   // let SIGTERM land before returning
+            throw ResticError.timedOut(command: args.first ?? "restic", seconds: Int(timeout))
+        }
         return proc.terminationStatus
     }
 }
