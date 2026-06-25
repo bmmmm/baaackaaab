@@ -287,6 +287,11 @@ final class ResticBackend {
             proc.standardError = FileHandle.nullDevice
         }
         do { try proc.run() } catch { throw ResticError.notFound }
+        // Track the child so a SIGINT/SIGTERM during a backup interrupts restic
+        // (it writes its partial snapshot, exits 130) instead of hard-killing us.
+        // No-op unless a run has armed BackupCancellation.
+        BackupCancellation.shared.setCurrent(proc)
+        defer { BackupCancellation.shared.clearCurrent(proc) }
 
         guard let timeout else {
             proc.waitUntilExit()

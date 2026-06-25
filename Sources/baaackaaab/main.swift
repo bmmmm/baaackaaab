@@ -625,6 +625,13 @@ do {
                                sourceFailures: sourceFailures, destinations: dests)
         try? RunHistory.append(record)
     }
+
+    // Arm cancellation BEFORE the first restic child (the init probe): a Ctrl-C /
+    // SIGTERM from here on interrupts the in-flight restic and unwinds to the
+    // cancelled summary instead of hard-killing us. Armed this early so a cancel
+    // during repository init is handled too, not just one during a backup.
+    BackupCancellation.shared.arm()
+
     Console.banner("baaackaaab", tagline: "one-way iCloud → restic backup")
     var info: [(String, String)] = [
         ("host", host),
@@ -653,6 +660,16 @@ do {
             Console.failure("\(run.destination.name): unavailable — \(error)")
         }
     }
+    // Cancelled during init (the interrupt makes a destination's init fail) — take
+    // that as cancellation, not as "no destination could be initialized", so we
+    // exit 130 and record a cancelled run rather than a spurious failure.
+    if BackupCancellation.shared.isCancelled {
+        Console.summary(headline: "cancelled during init — nothing was backed up yet",
+                        state: .warn, details: [("run-tag", runTag)])
+        recordRun(exitCode: 130, verified: 0, total: 0, sourceFailures: 0)
+        exit(130)
+    }
+
     let ready = runs.filter { $0.ready }
     if ready.isEmpty {
         Console.summary(headline: "no destination could be initialized — nothing was backed up",
@@ -666,11 +683,17 @@ do {
     // Per-destination best-effort: a failure is recorded on that destination and
     // reported, but never aborts the other destinations, the other sources, or
     // the run. (Parallel-by-link is a later slice; this is the sequential base.)
-    func backupToAll(paths: [URL], tags: [String], label: String) {
+    // The ONLY thing it throws is RunCancelled — a real restic failure is recorded
+    // and swallowed, but a cancel must propagate so the run stops launching work.
+    func backupToAll(paths: [URL], tags: [String], label: String) throws {
         for run in ready {
+            if BackupCancellation.shared.isCancelled { throw RunCancelled() }
             do {
                 try run.backend.backup(paths: paths, tags: tags, host: host)
             } catch {
+                // A cancel interrupts restic into a non-zero (130) exit; treat that
+                // as cancellation, not as this destination's own backup failure.
+                if BackupCancellation.shared.isCancelled { throw RunCancelled() }
                 run.backupFailures += 1
                 if run.firstBackupError == nil { run.firstBackupError = "\(error)" }
                 Console.failure("\(run.destination.name): backup failed for \(label) — \(error)")
@@ -706,63 +729,73 @@ do {
     //    and skipped (for all destinations) — one bad folder must not abort the
     //    remaining folders or the Photos phase.
     var driveFailures = 0
-    if driveFolders.isEmpty {
-        Console.section("iCloud Drive")
-        Console.note("no --drive-folder given, skipping Drive")
-    } else {
-        for folder in driveFolders {
-            let url = URL(fileURLWithPath: (folder as NSString).expandingTildeInPath, isDirectory: true)
-            Console.section("iCloud Drive", detail: url.path)
-            do {
-                try DriveAcquirer().materializeAndVerify(folder: url, into: staging)
-            } catch {
-                driveFailures += 1
-                Console.failure("drive folder skipped: \(url.path) — \(error)")
-                continue
-            }
-            backupToAll(paths: [url], tags: [runTag, "drive"], label: url.lastPathComponent)
-        }
-    }
-
-    // 2) iCloud Photos — export in byte-budgeted batches; each batch is backed up
-    //    to EVERY destination and then deleted, so peak extra disk stays ~one
-    //    batch (not 27 GB) regardless of how many destinations there are.
     var photoFailures = 0
-    if photoAlbums.isEmpty {
-        Console.section("iCloud Photos")
-        Console.note("no photo album configured, skipping Photos")
-    } else {
-        // Batch indices run globally across albums so each photo snapshot in a
-        // run gets a distinct batch-N tag, even with more than one album. Indices
-        // advance by however many batches actually ran (lastIdx), so they stay
-        // monotonic even when an album fails partway. Per-source best-effort: a
-        // failing album is recorded and skipped, not fatal to the others.
-        var photoBatchBase = 0
-        for album in photoAlbums {
-            Console.section("iCloud Photos", detail: "album '\(album)' (batch budget \(photoBatchBytes) bytes)")
-            var lastIdx = -1
-            do {
-                try PhotosAcquirer().acquireBatched(
-                    albumTitle: album,
-                    byteBudget: photoBatchBytes,
-                    into: staging
-                ) { batchDir, idx in
-                    lastIdx = idx
-                    // backupToAll is best-effort and never throws, so a single
-                    // destination's failure does not abort the album's remaining
-                    // batches — the batch is still deleted, peak disk holds.
-                    backupToAll(
-                        paths: [batchDir],
-                        tags: [runTag, "photos", "batch-\(photoBatchBase + idx)"],
-                        label: "batch \(photoBatchBase + idx)"
-                    )
+    var runCancelled = false
+    // Drive and Photos run inside one do: a cancel surfaces as RunCancelled thrown
+    // out of backupToAll (or rethrown from a photo album), and unwinds straight to
+    // the cancelled finalizer below — without aborting the manifest write.
+    do {
+        if driveFolders.isEmpty {
+            Console.section("iCloud Drive")
+            Console.note("no --drive-folder given, skipping Drive")
+        } else {
+            for folder in driveFolders {
+                let url = URL(fileURLWithPath: (folder as NSString).expandingTildeInPath, isDirectory: true)
+                Console.section("iCloud Drive", detail: url.path)
+                do {
+                    try DriveAcquirer().materializeAndVerify(folder: url, into: staging)
+                } catch {
+                    driveFailures += 1
+                    Console.failure("drive folder skipped: \(url.path) — \(error)")
+                    continue
                 }
-            } catch {
-                photoFailures += 1
-                Console.failure("photo album skipped: '\(album)' — \(error)")
+                try backupToAll(paths: [url], tags: [runTag, "drive"], label: url.lastPathComponent)
             }
-            photoBatchBase += lastIdx + 1   // lastIdx = -1 (no batches ran) → no-op
         }
+
+        // 2) iCloud Photos — export in byte-budgeted batches; each batch is backed
+        //    up to EVERY destination and then deleted, so peak extra disk stays
+        //    ~one batch (not 27 GB) regardless of how many destinations there are.
+        if photoAlbums.isEmpty {
+            Console.section("iCloud Photos")
+            Console.note("no photo album configured, skipping Photos")
+        } else {
+            // Batch indices run globally across albums so each photo snapshot in a
+            // run gets a distinct batch-N tag, even with more than one album.
+            // Indices advance by however many batches actually ran (lastIdx), so
+            // they stay monotonic even when an album fails partway. Per-source
+            // best-effort: a failing album is recorded and skipped, not fatal.
+            var photoBatchBase = 0
+            for album in photoAlbums {
+                Console.section("iCloud Photos", detail: "album '\(album)' (batch budget \(photoBatchBytes) bytes)")
+                var lastIdx = -1
+                do {
+                    try PhotosAcquirer().acquireBatched(
+                        albumTitle: album,
+                        byteBudget: photoBatchBytes,
+                        into: staging
+                    ) { batchDir, idx in
+                        lastIdx = idx
+                        // backupToAll only throws RunCancelled — a single
+                        // destination's plain failure does not abort the album's
+                        // remaining batches; the batch is still deleted, peak holds.
+                        try backupToAll(
+                            paths: [batchDir],
+                            tags: [runTag, "photos", "batch-\(photoBatchBase + idx)"],
+                            label: "batch \(photoBatchBase + idx)"
+                        )
+                    }
+                } catch is RunCancelled {
+                    throw RunCancelled()   // bubble up to the phase-level catch
+                } catch {
+                    photoFailures += 1
+                    Console.failure("photo album skipped: '\(album)' — \(error)")
+                }
+                photoBatchBase += lastIdx + 1   // lastIdx = -1 (no batches ran) → no-op
+            }
+        }
+    } catch is RunCancelled {
+        runCancelled = true
     }
 
     try staging.writeManifest()
@@ -783,6 +816,21 @@ do {
                 : "\(r.destination.name): ok"
         }.joined(separator: "; ")
         details.append(("destinations", perDest))
+    }
+
+    // Cancellation takes precedence over the failure paths: restic was interrupted
+    // on purpose, the data it already uploaded persists in the repo (dedup reuses
+    // it next run), and we exit 130 (the conventional SIGINT code). Recorded as a
+    // cancelled run — not a failure, so no notification banner (the user is right
+    // here doing this).
+    if runCancelled {
+        Console.summary(
+            headline: "cancelled — \(verified)/\(total) acquired before interrupt; restic stopped, uploaded data kept for next run",
+            state: .warn,
+            details: details
+        )
+        recordRun(exitCode: 130, verified: verified, total: total, sourceFailures: sourceFailures)
+        exit(130)
     }
 
     if total == 0 {
