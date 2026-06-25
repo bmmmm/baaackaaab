@@ -29,6 +29,18 @@ enum PhotosError: Error, CustomStringConvertible {
 /// video, RAW, etc.), allowing iCloud network download for cloud-only assets.
 final class PhotosAcquirer {
 
+    /// Upper bound on a single resource's iCloud download. Generous (a 4K video
+    /// resource over a slow link is legitimately slow) but finite: without it a
+    /// stuck download would hang the whole backup forever — and under launchd
+    /// that also blocks every following scheduled run. On timeout the resource is
+    /// recorded unverified and skipped; the run continues.
+    private let resourceTimeout: TimeInterval = 600
+
+    /// Bound on the one-time Photos authorization wait. Long enough for a human
+    /// to answer the macOS prompt on first grant; under launchd TCC decides
+    /// immediately, so this only ever matters if the prompt machinery wedges.
+    private let authTimeout: TimeInterval = 300
+
     /// Export the album in byte-budgeted batches. After each batch fills the
     /// budget it is handed to `onBatchReady` (which backs it up) and then
     /// deleted, so peak extra disk is ~one batch — not the whole library. This
@@ -127,26 +139,29 @@ final class PhotosAcquirer {
                 writeError = error
                 semaphore.signal()
             }
-            semaphore.wait()
+            let completed = semaphore.wait(timeout: .now() + resourceTimeout) == .success
 
             let size = (try? dest.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? -1
-            let ok = writeError == nil && size > 0
+            let ok = completed && writeError == nil && size > 0
             if !ok {
-                // Never let a 0-byte / failed download reach restic.
+                // Never let a 0-byte / failed / timed-out download reach restic.
                 try? FileManager.default.removeItem(at: dest)
             } else {
                 bytes += size
             }
+            let note = !completed
+                ? "download timed out after \(Int(resourceTimeout))s"
+                : writeError.map { "\($0)" }
             staging.record(AcquiredItem(
                 source: "\(asset.localIdentifier)#\(resource.type.rawValue)",
                 kind: "photo-resource",
                 stagedPath: dest.path,
                 byteCount: size,
                 verified: ok,
-                note: writeError.map { "\($0)" }
+                note: note
             ))
-            let errSuffix = writeError.map { " error=\($0)" } ?? ""
-            Console.detail("resource type=\(resource.type.rawValue) '\(resource.originalFilename)' -> \(size) bytes verified=\(ok)\(errSuffix)")
+            let noteSuffix = note.map { " (\($0))" } ?? ""
+            Console.detail("resource type=\(resource.type.rawValue) '\(resource.originalFilename)' -> \(size) bytes verified=\(ok)\(noteSuffix)")
         }
         return bytes
     }
@@ -176,20 +191,22 @@ final class PhotosAcquirer {
             result = status
             semaphore.signal()
         }
-        semaphore.wait()
+        if semaphore.wait(timeout: .now() + authTimeout) == .timedOut {
+            return .notDetermined   // a wedged prompt counts as "not granted", never a hang
+        }
         return result
     }
 
     private func findAlbum(title: String) -> PHAssetCollection? {
         let collections = PHAssetCollection.fetchAssetCollections(with: .album, subtype: .any, options: nil)
-        var found: PHAssetCollection?
-        collections.enumerateObjects { collection, _, stop in
-            if collection.localizedTitle == title {
-                found = collection
-                stop.pointee = true
-            }
+        var matches: [PHAssetCollection] = []
+        collections.enumerateObjects { collection, _, _ in
+            if collection.localizedTitle == title { matches.append(collection) }
         }
-        return found
+        if matches.count > 1 {
+            Console.warn("\(matches.count) albums are titled '\(title)' — backing up the first one; rename them in Photos.app to disambiguate")
+        }
+        return matches.first
     }
 
     private func describe(_ status: PHAuthorizationStatus) -> String {
