@@ -108,6 +108,26 @@ enum LaunchdTimer {
         _ = launchctl(["print", "\(domain)/\(label)"])   // inherits stdout, shows live state
     }
 
+    /// Whether the timer plist is on disk and whether launchd has it loaded, read
+    /// WITHOUT printing (unlike `status()`). For the doctor diagnostic.
+    static func state() -> (installed: Bool, loaded: Bool) {
+        let installed = FileManager.default.fileExists(atPath: plistURL.path)
+        guard installed else { return (false, false) }
+        return (true, launchctlQuiet(["print", "\(domain)/\(label)"]) == 0)
+    }
+
+    /// launchctl with output discarded — for the quiet `state()` probe.
+    private static func launchctlQuiet(_ args: [String]) -> Int32 {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        proc.arguments = args
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+        do { try proc.run() } catch { return -1 }
+        proc.waitUntilExit()
+        return proc.terminationStatus
+    }
+
     // MARK: - Helpers
 
     /// The real (symlink-resolved) path to this executable, embedded into the

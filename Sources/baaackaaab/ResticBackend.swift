@@ -69,6 +69,30 @@ final class ResticBackend {
         return env
     }
 
+    /// The resolved restic binary path, or nil if not found anywhere. Static so a
+    /// diagnostic (doctor) can report restic availability with no destination
+    /// configured. Mirrors the per-instance resolution exactly.
+    static func locateExecutable() -> String? { resolveExecutable("restic") }
+
+    /// The restic version line (`restic version` → "restic 0.18.0 ..."), or nil if
+    /// restic is missing / the call failed. Read-only, no repo touched. For doctor.
+    static func resticVersion() -> String? {
+        guard let exe = locateExecutable() else { return nil }
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: exe)
+        proc.arguments = ["version"]
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = FileHandle.nullDevice
+        proc.standardInput = FileHandle.nullDevice
+        do { try proc.run() } catch { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        proc.waitUntilExit()
+        guard proc.terminationStatus == 0 else { return nil }
+        return String(data: data, encoding: .utf8)?
+            .split(separator: "\n").first.map { $0.trimmingCharacters(in: .whitespaces) }
+    }
+
     /// Resolve the restic binary to an absolute path.
     ///
     /// We must NOT rely on `/usr/bin/env restic` / a bare PATH lookup: under

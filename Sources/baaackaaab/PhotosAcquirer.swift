@@ -184,6 +184,25 @@ final class PhotosAcquirer {
         return out.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
     }
 
+    /// The CURRENT Photos authorization, read WITHOUT triggering a prompt (unlike
+    /// `requestAuthorization`, which would pop the system dialog). For the doctor
+    /// diagnostic, which must observe the grant, never request it. Returns whether
+    /// access is usable plus a human-readable, actionable label.
+    static func authorizationLabel() -> (granted: Bool, label: String) {
+        let s = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        let granted = (s == .authorized || s == .limited)
+        let label: String
+        switch s {
+        case .notDetermined: label = "not yet granted — the first Photos backup will prompt for access"
+        case .restricted:    label = "restricted by a system policy (MDM / parental controls)"
+        case .denied:        label = "denied — grant it under System Settings > Privacy & Security > Photos"
+        case .authorized:    label = "authorized"
+        case .limited:       label = "limited — only selected albums are visible; grant full access for a complete backup"
+        @unknown default:    label = "unknown(\(s.rawValue))"
+        }
+        return (granted, label)
+    }
+
     private func requestAuthorization() -> PHAuthorizationStatus {
         let semaphore = DispatchSemaphore(value: 0)
         var result: PHAuthorizationStatus = .notDetermined
