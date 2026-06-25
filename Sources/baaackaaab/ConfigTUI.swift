@@ -99,7 +99,7 @@ private final class RawTerminal {
     func restore() { var o = original; tcsetattr(STDIN_FILENO, TCSAFLUSH, &o) }
 }
 
-private enum Screen { case home, editor }
+private enum Screen { case home, editor, restore }
 
 final class ConfigTUI {
     private let configPath: URL
@@ -138,6 +138,15 @@ final class ConfigTUI {
         f.dateFormat = "yyyy-MM-dd HH:mm"
         return f
     }()
+
+    // Restore screen: a snapshot browser over one source destination (cycle with
+    // d when several are configured). Picking a snapshot re-execs the tested CLI
+    // restore (`--restore … --yes`) so the actual write goes through the same
+    // safe-by-construction engine — full restore into a fresh dir, revealed after.
+    private var restoreDestIndex = 0
+    private var restoreSnaps: [ResticBackend.Snapshot]?
+    private var restoreLoadError: String?
+    private var restoreCursor = 0, restoreTop = 0
 
     // The selected-set panel is always visible under the folder browser once
     // anything is picked. Navigation stays on the folder browser by default;
@@ -200,11 +209,16 @@ final class ConfigTUI {
         }
 
         loop: while true {
-            if screen == .home { renderHome() } else { render() }
+            switch screen {
+            case .home: renderHome()
+            case .restore: renderRestore()
+            case .editor: render()
+            }
             let key = readKey()
             statusMsg = ""
             let keepGoing: Bool
             if screen == .home { keepGoing = handleHome(key) }
+            else if screen == .restore { keepGoing = handleRestore(key) }
             else if pickAlbums { keepGoing = handleAlbumPicker(key) }
             else if panelFocused && !setRows().isEmpty { keepGoing = handleReview(key) }
             else { keepGoing = handleBrowse(key) }
@@ -260,6 +274,7 @@ final class ConfigTUI {
         case .char("e"), .enter, .right, .tab: screen = .editor
         case .char("s"): syncNow()
         case .char("r"): refreshRemote()
+        case .char("R"): enterRestore()
         case .char("q"), .esc, .ctrlC: if confirmQuit() { return false }
         case .eof: return false
         default: break
@@ -555,7 +570,7 @@ final class ConfigTUI {
     }
 
     private func homeHelpLine() -> String {
-        "e edit set \u{2022} s sync now \u{2022} r remote \u{2022} q quit"
+        "e edit set \u{2022} s sync now \u{2022} r remote \u{2022} R restore \u{2022} q quit"
     }
 
     // MARK: - Home actions
@@ -662,6 +677,188 @@ final class ConfigTUI {
     /// "2026-06-24T17:30:32.1+02:00" -> "2026-06-24 17:30".
     private func shortTime(_ iso: String) -> String {
         String(iso.prefix(16)).replacingOccurrences(of: "T", with: " ")
+    }
+
+    // MARK: - Restore screen (snapshot browser → safe CLI restore)
+
+    /// The destination currently selected on the restore screen.
+    private var restoreDest: Destination? {
+        guard restoreDestIndex < destinations.count else { return nil }
+        return destinations[restoreDestIndex]
+    }
+
+    /// Enter the restore browser: resolve destinations, then load the first one's
+    /// snapshots. Refuses (with a status message) when nothing is configured.
+    private func enterRestore() {
+        ensureRepoResolved()
+        guard !destinations.isEmpty else {
+            statusMsg = "no repository \u{2014} run baaackaaab --init-credentials first"
+            return
+        }
+        restoreDestIndex = min(restoreDestIndex, destinations.count - 1)
+        restoreSnaps = nil; restoreLoadError = nil
+        restoreCursor = 0; restoreTop = 0
+        screen = .restore
+        loadRestoreSnaps()
+    }
+
+    /// Query the selected destination's snapshots (read-only). Caches the result;
+    /// records a load error (missing key / unreachable) for the screen to show.
+    private func loadRestoreSnaps() {
+        guard let dest = restoreDest else { restoreLoadError = "no destination"; return }
+        guard dest.passwordAvailable else {
+            restoreLoadError = "no encryption password for \(dest.name)"; restoreSnaps = []; return
+        }
+        statusMsg = "loading snapshots from \(dest.name)\u{2026}"; renderRestore()
+        do {
+            restoreSnaps = try ResticBackend(destination: dest).listSnapshots()
+            restoreLoadError = nil
+        } catch {
+            restoreSnaps = []; restoreLoadError = "\(error)"
+        }
+        restoreCursor = 0; restoreTop = 0
+        reclaimForeground()   // the restic child may have grabbed the tty foreground
+        statusMsg = ""
+    }
+
+    private func renderRestore() {
+        let (rows, cols) = terminalSize()
+        var lines: [String] = []
+        lines.append(bold(fit("baaackaaab \u{2014} restore", cols)))
+        let destLabel = restoreDest.map { "source: \($0.name) [\($0.link)]" } ?? "source: (none)"
+        let switchHint = destinations.count > 1 ? "   (d: switch, \(restoreDestIndex + 1)/\(destinations.count))" : ""
+        lines.append(cyan(fit(destLabel + switchHint, cols)))
+        lines.append("")
+
+        let helpLines = wrapHelp(restoreHelpLine(), cols)
+        let footerH = 2 + helpLines.count
+        let contentH = max(1, rows - 3 - footerH)
+
+        var body: [String] = []
+        if let err = restoreLoadError {
+            body.append(yellow(fit("  cannot list snapshots: " + err, cols)))
+        } else if restoreSnaps == nil {
+            body.append(dim(fit("  loading\u{2026}", cols)))
+        } else if let snaps = restoreSnaps, snaps.isEmpty {
+            body.append(dim(fit("  no snapshots on this destination yet", cols)))
+        } else if let snaps = restoreSnaps {
+            body.append(dim(fit("  id        when              tags", cols)))
+            clamp(&restoreCursor, snaps.count)
+            let listH = max(1, contentH - 1)
+            adjustTop(&restoreTop, cursor: restoreCursor, height: listH, count: snaps.count)
+            for r in 0..<listH {
+                let idx = restoreTop + r
+                if idx < snaps.count {
+                    body.append(renderSnapshotRow(snaps[idx], cursor: idx == restoreCursor, cols: cols))
+                } else { body.append("") }
+            }
+        }
+        if body.count < contentH { body += Array(repeating: "", count: contentH - body.count) }
+        else if body.count > contentH { body = Array(body.prefix(contentH)) }
+        lines += body
+
+        lines.append("")
+        lines.append(dim(fit(statusLine(), cols)))
+        for hl in helpLines { lines.append(dim(fit(hl, cols))) }
+        draw(lines)
+    }
+
+    private func renderSnapshotRow(_ s: ResticBackend.Snapshot, cursor: Bool, cols: Int) -> String {
+        let tags = s.tags.isEmpty ? "" : s.tags.joined(separator: ",")
+        let text = "  \(s.shortID)  \(shortTime(s.time))  \(tags)"
+        var plain = fit(text, cols)
+        if cursor {
+            plain = plain.padding(toLength: cols, withPad: " ", startingAt: 0)
+            return rev(plain)
+        }
+        return plain
+    }
+
+    private func restoreHelpLine() -> String {
+        "up/dn move \u{2022} enter restore (full \u{2192} fresh dir) \u{2022} d switch dest \u{2022} esc back \u{2022} q quit"
+    }
+
+    private func handleRestore(_ key: Key) -> Bool {
+        let count = restoreSnaps?.count ?? 0
+        switch key {
+        case .up, .char("k"): restoreCursor = max(0, restoreCursor - 1)
+        case .down, .char("j"): restoreCursor = min(max(0, count - 1), restoreCursor + 1)
+        case .char("d"):
+            if destinations.count > 1 {
+                restoreDestIndex = (restoreDestIndex + 1) % destinations.count
+                restoreSnaps = nil; loadRestoreSnaps()
+            }
+        case .enter, .right, .char("l"):
+            if let snaps = restoreSnaps, restoreCursor < snaps.count {
+                restoreSelected(snaps[restoreCursor])
+            }
+        case .esc, .left, .char("h"): screen = .home
+        case .char("q"), .ctrlC: if confirmQuit() { return false }
+        case .eof: return false
+        default: break
+        }
+        return true
+    }
+
+    /// Confirm, then re-exec the tested CLI restore for the chosen snapshot — a
+    /// FULL restore into a fresh timestamped dir. The write goes through the same
+    /// safe engine (validate target → dry-run preview → restore → verify); the TUI
+    /// only picks the snapshot. Reveals the result in Finder on success.
+    private func restoreSelected(_ snap: ResticBackend.Snapshot) {
+        guard let dest = restoreDest else { return }
+        let fmt = DateFormatter()
+        fmt.locale = Locale(identifier: "en_US_POSIX")
+        fmt.dateFormat = "yyyyMMdd-HHmmss"
+        let target = RestoreEngine.defaultTarget(snapshot: snap.shortID, stamp: fmt.string(from: Date()))
+
+        drawPrompt("restore \(snap.shortID) (full) into ~/baaackaaab-restore/\(target.lastPathComponent)?   y: yes   n: cancel")
+        var go = false
+        confirm: while true {
+            switch readKey() {
+            case .char("y"), .char("Y"): go = true; break confirm
+            case .char("n"), .char("N"), .esc, .ctrlC: go = false; break confirm
+            case .eof: go = false; break confirm
+            default: break
+            }
+        }
+        guard go else { statusMsg = "restore cancelled"; return }
+
+        emit("\u{1B}[?25h\u{1B}[?1049l")   // leave alt screen + show cursor for live output
+        term.restore()
+        let code = runRestoreChild(dest: dest, snapshot: snap.shortID, target: target)
+        if code == 0 { revealInFinder(target) }
+        let tail = code == 0 ? "restore finished \u{2014} revealed in Finder" : "restore exited with code \(code)"
+        FileHandle.standardOutput.write(Data("\n\(tail) \u{2014} press any key to return\n".utf8))
+        term.enable()
+        _ = readKey()
+        reclaimForeground()
+        emit("\u{1B}[?1049h\u{1B}[?25l")   // back into the alternate screen
+        statusMsg = code == 0 ? "restored into \(target.path)" : "restore failed (code \(code))"
+    }
+
+    private func runRestoreChild(dest: Destination, snapshot: String, target: URL) -> Int32 {
+        var args = ["--restore", "--destination", dest.name, "--snapshot", snapshot,
+                    "--target", target.path, "--yes"]
+        // Forward an explicit ad-hoc target repo so the child resolves the same one.
+        if let r = argValue("--restic-repo") { args += ["--restic-repo", r] }
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: selfPath())
+        proc.arguments = args
+        do { try proc.run() } catch {
+            FileHandle.standardOutput.write(Data("could not launch restore: \(error)\n".utf8))
+            return -1
+        }
+        proc.waitUntilExit()
+        return proc.terminationStatus
+    }
+
+    /// Open the restored directory in Finder (best-effort; never blocks the TUI).
+    private func revealInFinder(_ url: URL) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        p.arguments = [url.path]
+        try? p.run()
+        p.waitUntilExit()
     }
 
     // MARK: - Directory listing (cached per cwd)
