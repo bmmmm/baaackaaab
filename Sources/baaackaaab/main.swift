@@ -50,7 +50,7 @@ func printUsage() {
 
     Console.section("Setup (first run)")
     Console.info([
-        ("--init-credentials", "generate + store both secrets in 0600 files, print the server hash"),
+        ("--init-credentials", "generate + store both secrets in 0600 files, print the server hash (refuses if files exist; --force overwrites + ORPHANS the repo)"),
         ("--migrate-credentials", "move existing Keychain secrets into 0600 files (one last Keychain prompt)"),
         ("--check", "verify the server is reachable, init the repo, then exit"),
     ])
@@ -118,6 +118,15 @@ func printUsage() {
 /// neither secret ever reaches argv, our environment, or a Keychain prompt.
 func initCredentials() throws {
     Console.banner("baaackaaab", tagline: "credential setup")
+
+    // Refuse to clobber an existing credential file store. Re-running this
+    // generates a NEW encryption password; overwriting the only copy of the key
+    // orphans the existing repository — every snapshot becomes permanently
+    // unreadable. Only --force (a deliberate fresh start) gets past this guard.
+    if CredentialFiles.present && !CommandLine.arguments.contains("--force") {
+        Console.error("credential files already exist at \(CredentialFiles.dir.path) — re-running --init-credentials generates a NEW encryption password and would ORPHAN the existing repository (its snapshots become permanently unreadable). To start a fresh repo on purpose, re-run with --force. To move existing Keychain secrets into the files WITHOUT regenerating, use --migrate-credentials.")
+        exit(1)
+    }
 
     let endpointPW = Credentials.randomURLSafe(byteCount: 24)   // ~192 bits, endpoint auth
     let repoPW = Credentials.randomURLSafe(byteCount: 32)       // ~256 bits, encryption key
