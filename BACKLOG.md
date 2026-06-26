@@ -89,8 +89,8 @@ the closest to the safety core and is worth doing first.
     is a lost diagnostic line at most.
   - Fix sketch: open with `O_APPEND` or take an `flock` around the write.
 
-- [ ] **Photos authorization timeout is reported as `notDetermined`, not "timed
-  out".** `Low`
+- [x] **Photos authorization timeout is reported as `notDetermined`, not "timed
+  out".** `Low` — done
   - `requestAuthorization` returns `.notDetermined` on a 300 s timeout
     (PhotosAcquirer.swift:206-217); the caller then throws
     `notAuthorized("notDetermined")` (PhotosAcquirer.swift:60-61), which reads as

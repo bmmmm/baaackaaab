@@ -9,12 +9,14 @@ struct PhotoAlbumInfo {
 
 enum PhotosError: Error, CustomStringConvertible {
     case notAuthorized(String)
+    case authorizationTimedOut(Int)
     case albumNotFound(String)
     case albumEmpty(String)
 
     var description: String {
         switch self {
         case .notAuthorized(let s): return "Photos access not granted (status: \(s)). Grant your terminal app access under System Settings > Privacy & Security > Photos."
+        case .authorizationTimedOut(let s): return "Photos authorization did not return within \(s)s — the system prompt machinery appears wedged (this is NOT a denial). Re-run, or grant access manually under System Settings > Privacy & Security > Photos."
         case .albumNotFound(let t): return "album not found: '\(t)' (create it in Photos.app and drop a few photos in)"
         case .albumEmpty(let t): return "album '\(t)' is empty"
         }
@@ -55,7 +57,7 @@ final class PhotosAcquirer {
         into staging: Staging,
         onBatchReady: (URL, Int) throws -> Void
     ) throws {
-        let status = requestAuthorization()
+        let status = try requestAuthorization()
         Console.step("authorization = \(describe(status))")
         guard status == .authorized || status == .limited else {
             throw PhotosError.notAuthorized(describe(status))
@@ -170,7 +172,7 @@ final class PhotosAcquirer {
     /// Triggers the Photos authorization prompt on first use — listing needs the
     /// same read grant the backup does (PhotoKit has no read-only access level).
     func listAlbums() throws -> [PhotoAlbumInfo] {
-        let status = requestAuthorization()
+        let status = try requestAuthorization()
         guard status == .authorized || status == .limited else {
             throw PhotosError.notAuthorized(describe(status))
         }
@@ -203,7 +205,7 @@ final class PhotosAcquirer {
         return (granted, label)
     }
 
-    private func requestAuthorization() -> PHAuthorizationStatus {
+    private func requestAuthorization() throws -> PHAuthorizationStatus {
         let semaphore = DispatchSemaphore(value: 0)
         var result: PHAuthorizationStatus = .notDetermined
         PHPhotoLibrary.requestAuthorization(for: .readWrite) { status in
@@ -211,7 +213,10 @@ final class PhotosAcquirer {
             semaphore.signal()
         }
         if semaphore.wait(timeout: .now() + authTimeout) == .timedOut {
-            return .notDetermined   // a wedged prompt counts as "not granted", never a hang
+            // Distinct from a genuine .notDetermined ("first run will prompt"): the
+            // prompt machinery never answered, so surface that as its own error
+            // instead of mislabelling a wedged hang as "not yet granted".
+            throw PhotosError.authorizationTimedOut(Int(authTimeout))
         }
         return result
     }
