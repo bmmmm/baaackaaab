@@ -48,7 +48,7 @@ the closest to the safety core and is worth doing first.
   - Fix sketch: after dispatch, validate that every `--flag` token is a known
     flag; exit with an actionable "unknown flag X" otherwise.
 
-- [ ] **`--dry-run` still materializes the entire Drive set.** `Med`
+- [x] **`--dry-run` still materializes the entire Drive set.** `Med` — done
   - `materializeAndVerify` runs regardless of `backupDryRun` (main.swift:1640);
     only Photos are skipped on a dry run. A "preview" therefore downloads every
     dataless Drive stub from iCloud (potentially the full ~11 GB). The comment

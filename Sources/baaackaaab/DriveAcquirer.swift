@@ -138,6 +138,31 @@ final class DriveAcquirer {
         Console.success("materialized \(count) file(s) under \(folder.lastPathComponent) — restic reads in place")
     }
 
+    /// Dry-run preview: walk the folder reading ONLY metadata (lstat for the
+    /// dataless flag — no coordinated read, so nothing is faulted in from iCloud)
+    /// and report how many regular files it holds and how many are still cloud-only
+    /// stubs. A real run materializes those stubs; a dry run must not, or the
+    /// "preview" would download the whole set. Counts hidden files too, matching
+    /// the set a real backup would cover.
+    func previewDataless(folder: URL) throws -> (files: Int, dataless: Int) {
+        guard let enumerator = fm.enumerator(
+            at: folder,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: []
+        ) else {
+            throw DriveError.cannotEnumerate(folder.path)
+        }
+        var files = 0
+        var dataless = 0
+        for case let fileURL as URL in enumerator {
+            let isFile = (try? fileURL.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile ?? false
+            guard isFile else { continue }
+            files += 1
+            if isDataless(fileURL) { dataless += 1 }   // lstat only — does NOT fault in
+        }
+        return (files, dataless)
+    }
+
     private func isUbiquitous(_ url: URL) -> Bool {
         (try? url.resourceValues(forKeys: [.isUbiquitousItemKey]))?.isUbiquitousItem ?? false
     }

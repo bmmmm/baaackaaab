@@ -1470,10 +1470,13 @@ if driveFolders.isEmpty && photoAlbums.isEmpty
     }
 }
 
-// `--dry-run` on a backup → preview only: restic reports what would be uploaded
-// and writes nothing. Drive folders are previewed (materialize is a read-only
-// coordinated read); Photos are SKIPPED on a dry run (a real preview there would
-// have to export every original to staging, costing as much as a real backup).
+// `--dry-run` on a backup → preview only: it writes NOTHING and downloads
+// nothing. Drive folders are previewed by a metadata-only walk that reports how
+// many files are still cloud-only (a real run would materialize them); we
+// deliberately do NOT run restic against the live Drive tree on a dry run,
+// because restic would read file contents and fault the whole set in from iCloud.
+// Photos are likewise SKIPPED (a real preview there would export every original
+// to staging, costing as much as a real backup).
 let backupDryRun = CommandLine.arguments.contains("--dry-run")
 
 // Scratch dir for photo batches + the manifest (Drive is backed up in place, so
@@ -1699,6 +1702,23 @@ do {
             for folder in driveFolders {
                 let url = URL(fileURLWithPath: (folder as NSString).expandingTildeInPath, isDirectory: true)
                 Console.section("iCloud Drive", detail: url.path)
+                if backupDryRun {
+                    // A dry run must download NOTHING. Walk metadata only (no
+                    // coordinated read → no fault-in) and report how many files are
+                    // still cloud-only; a real run would materialize exactly those.
+                    // We deliberately do NOT hand the live tree to restic here:
+                    // restic would read file contents to build its preview, and that
+                    // read faults the stubs in from iCloud — the cost the dry run
+                    // exists to avoid.
+                    do {
+                        let (files, dataless) = try DriveAcquirer().previewDataless(folder: url)
+                        Console.success("\(files) file(s); \(dataless) still cloud-only (a real run downloads those)")
+                    } catch {
+                        driveFailures += 1
+                        Console.failure("drive folder skipped: \(url.path) — \(error)")
+                    }
+                    continue
+                }
                 do {
                     try DriveAcquirer().materializeAndVerify(folder: url, into: staging)
                 } catch {
@@ -1766,11 +1786,11 @@ do {
         var d: [(String, String)] = [("run-tag", runTag)]
         let unavailable = runs.filter { $0.initError != nil }.count
         if unavailable > 0 { d.append(("note", "\(unavailable) destination(s) not previewable (repo not created yet)")) }
-        if driveFailures > 0 { d.append(("drive", "\(driveFailures) folder(s) could not be materialized")) }
+        if driveFailures > 0 { d.append(("drive", "\(driveFailures) folder(s) could not be previewed")) }
         Console.summary(
             headline: runCancelled
                 ? "dry run cancelled — nothing was written"
-                : "dry run complete — previewed against \(ready.count) destination(s); nothing was uploaded. Re-run without --dry-run to back up.",
+                : "dry run complete — \(ready.count) destination(s) reachable; Drive previewed by metadata (no download), nothing uploaded. Re-run without --dry-run to back up.",
             state: runCancelled ? .warn : .ok,
             details: d)
         exit(runCancelled ? 130 : 0)
