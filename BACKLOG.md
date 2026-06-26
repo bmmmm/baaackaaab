@@ -127,12 +127,15 @@ the closest to the safety core and is worth doing first.
 
 ## Refactor
 
-- [ ] **P3: extract the top-level backup orchestration into a `BackupRun`
-  type.** `refactor, no behaviour change`
-  - The ~320-line `do { … } catch { … }` at file scope (main.swift:1472-1795)
-    drives init, quota, Drive, Photos, manifest, summary, run-history and exit
-    codes inline. Extracting it into a type would make it testable and readable.
-    Lower value than P2 was; do after the correctness items.
+- [x] **P3: extract the top-level backup orchestration into a `BackupRun`
+  type.** `refactor, no behaviour change` — done
+  - The ~340-line `do { … } catch { … }` at file scope drove init, quota, Drive,
+    Photos, manifest, summary, run-history and exit codes inline. Moved verbatim
+    into `BackupRun.execute()` (BackupRun.swift); main.swift resolves the inputs
+    and calls `BackupRun(…).execute()`. The moved body was diffed byte-for-byte
+    against the original (modulo +8 indent) to keep "no behaviour change" honest;
+    main.swift's head is byte-identical to the prior commit. Compile + exit-code
+    smoke green. Runtime under launchd / Photos / restic is operator-verified.
 
 ## Decisions — do NOT re-investigate
 
