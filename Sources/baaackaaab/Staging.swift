@@ -39,12 +39,22 @@ final class Staging {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(items)
-        try data.write(to: root.appendingPathComponent("manifest.json"))
+        // Atomic: a crash mid-write must not leave a truncated manifest that a
+        // later read would fail to parse.
+        try data.write(to: root.appendingPathComponent("manifest.json"), options: .atomic)
     }
 
-    /// Make a string safe to use as a path component (asset ids contain "/").
+    /// Make a string safe to use as a path component (asset ids contain "/", and
+    /// an untrusted source filename could be ".", ".." or empty, which would
+    /// escape or collapse the staging path when appended).
     static func sanitize(_ s: String) -> String {
         let bad = CharacterSet(charactersIn: "/\\:")
-        return s.components(separatedBy: bad).joined(separator: "_")
+        let cleaned = s.components(separatedBy: bad).joined(separator: "_")
+        switch cleaned {
+        case "":   return "_"
+        case ".":  return "_"
+        case "..": return "__"
+        default:   return cleaned
+        }
     }
 }

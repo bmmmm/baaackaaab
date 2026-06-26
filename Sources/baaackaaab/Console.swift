@@ -56,7 +56,7 @@ enum Console {
     }
 
     private static func err(_ line: String) {
-        FileHandle.standardError.write((line + "\n").data(using: .utf8)!)
+        FileHandle.standardError.write(Data((line + "\n").utf8))
     }
 
     // MARK: - Header / banner
