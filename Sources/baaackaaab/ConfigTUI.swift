@@ -49,7 +49,7 @@ private enum DirState { case selected, partial, none }
 
 private enum Key: Equatable {
     case up, down, left, right
-    case enter, space, backspace, tab, esc, ctrlC, eof, other
+    case enter, space, backspace, tab, esc, ctrlC, eof, other, resize
     case char(Character)
 }
 
@@ -75,6 +75,12 @@ private func ttyRestoreSignalHandler(_ signo: Int32) {
     signal(signo, SIG_DFL)
     raise(signo)
 }
+
+// SIGWINCH (terminal resize) sets this flag from the async handler; the run loop
+// consumes it to re-render at the new size. sig_atomic_t is the only type the
+// handler may safely touch.
+private var winchPending: sig_atomic_t = 0
+private func winchSignalHandler(_ signo: Int32) { winchPending = 1 }
 
 /// RAII wrapper around the terminal's raw mode. cfmakeraw() turns off echo,
 /// canonical line buffering, signal generation (so Ctrl-C arrives as a byte we
@@ -224,12 +230,23 @@ final class ConfigTUI {
         signal(SIGHUP, ttyRestoreSignalHandler)
         signal(SIGTERM, ttyRestoreSignalHandler)
         signal(SIGINT, ttyRestoreSignalHandler)
+        // SIGWINCH must INTERRUPT the blocking read (no SA_RESTART) so the loop
+        // wakes on a resize and re-renders; signal() would install it with
+        // SA_RESTART and the read would silently resume, redrawing only on the
+        // next keypress.
+        winchPending = 0
+        var winchAction = sigaction()
+        winchAction.__sigaction_u.__sa_handler = winchSignalHandler
+        sigemptyset(&winchAction.sa_mask)
+        winchAction.sa_flags = 0
+        sigaction(SIGWINCH, &winchAction, nil)
         defer {
             term.restore()                 // always hand the terminal back cooked
             cookedTermValid = false
             signal(SIGHUP, SIG_DFL)
             signal(SIGTERM, SIG_DFL)
             signal(SIGINT, SIG_DFL)
+            signal(SIGWINCH, SIG_DFL)
         }
 
         loop: while true {
@@ -241,6 +258,7 @@ final class ConfigTUI {
             case .editor: render()
             }
             let key = readKey()
+            if case .resize = key { continue }   // re-render at the loop top, new size
             statusMsg = ""
             let keepGoing: Bool
             if screen == .home { keepGoing = handleHome(key) }
@@ -1615,7 +1633,14 @@ final class ConfigTUI {
     }
 
     private func readKey() -> Key {
-        guard let b0 = nextByte() else { return .eof }
+        guard let b0 = nextByte() else {
+            // A SIGWINCH interrupts the blocking read (EINTR → nextByte returns
+            // nil) and sets winchPending; surface it as a redraw, not EOF, so the
+            // layout tracks the new size now instead of on the next keypress — and
+            // a resize never reads as quit.
+            if winchPending != 0 { winchPending = 0; return .resize }
+            return .eof
+        }
         if b0 == 0x1B {
             // An arrow arrives as ESC [ A/B/C/D. If the buffer is exhausted right
             // after ESC, the "[..." may simply not have arrived yet (a split read

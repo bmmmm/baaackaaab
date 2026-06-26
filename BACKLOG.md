@@ -119,7 +119,8 @@ the closest to the safety core and is worth doing first.
   - Fix sketch: after a bare ESC, do a short `VTIME`/`poll`-bounded read for a
     following `[` before deciding it was a lone ESC.
 
-- [ ] **SIGWINCH not handled: a resize redraws only on the next keypress.** `Low`
+- [x] **SIGWINCH not handled: a resize redraws only on the next keypress.** `Low`
+  — done (operator-verifiable: build green; runtime needs a real TTY)
   - `terminalSize()` is read per render (ConfigTUI.swift:1621-1627), but nothing
     triggers a render on resize, so the layout is stale until the next key.
   - Fix sketch: install a SIGWINCH handler that sets a flag and nudges the loop.
