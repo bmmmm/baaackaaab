@@ -70,8 +70,8 @@ the closest to the safety core and is worth doing first.
 
 ## Robustness
 
-- [ ] **restic probe timeout terminates with SIGTERM only, no SIGKILL
-  escalation.** `Low`
+- [x] **restic probe timeout terminates with SIGTERM only, no SIGKILL
+  escalation.** `Low` — done
   - On timeout the bounded read-only probes call `proc.terminate()` (SIGTERM),
     wait 5 s, then throw regardless of whether the child died
     (ResticBackend.swift:716-719 and 791-795). A restic child wedged in a state

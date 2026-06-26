@@ -714,8 +714,7 @@ final class ResticBackend {
             sem.signal()
         }
         if sem.wait(timeout: .now() + timeout) == .timedOut {
-            proc.terminate()
-            _ = sem.wait(timeout: .now() + 5)
+            forceTerminate(proc, reaped: sem)
             throw ResticError.timedOut(command: args.first ?? "restic", seconds: Int(timeout))
         }
         if proc.terminationStatus != 0 {
@@ -789,10 +788,22 @@ final class ResticBackend {
         let sem = DispatchSemaphore(value: 0)
         DispatchQueue.global(qos: .userInitiated).async { proc.waitUntilExit(); sem.signal() }
         if sem.wait(timeout: .now() + timeout) == .timedOut {
-            proc.terminate()
-            _ = sem.wait(timeout: .now() + 5)   // let SIGTERM land before returning
+            forceTerminate(proc, reaped: sem)
             throw ResticError.timedOut(command: args.first ?? "restic", seconds: Int(timeout))
         }
         return proc.terminationStatus
+    }
+
+    /// Stop a timed-out child and make sure it actually dies. We SIGTERM it first
+    /// (graceful), then wait up to 5 s for the reaper thread to observe the exit;
+    /// if it is still running it is wedged ignoring SIGTERM, so escalate to SIGKILL
+    /// — otherwise the child AND the blocked reaper thread leak. Only ever called
+    /// for read-only probes/queries, never a writing backup we must let finish.
+    private func forceTerminate(_ proc: Process, reaped sem: DispatchSemaphore) {
+        proc.terminate()                                   // SIGTERM
+        if sem.wait(timeout: .now() + 5) == .timedOut, proc.isRunning {
+            kill(proc.processIdentifier, SIGKILL)
+            _ = sem.wait(timeout: .now() + 5)              // let the reaper see the exit
+        }
     }
 }
