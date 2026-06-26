@@ -10,8 +10,8 @@ the closest to the safety core and is worth doing first.
 
 ## Data integrity
 
-- [ ] **Drive: `verified` flag is recorded, never used as a backup gate; small
-  within-folder re-eviction window remains.** `Med-Low`
+- [x] **Drive: `verified` flag is recorded, never used as a backup gate; small
+  within-folder re-eviction window remains.** `Med-Low` — done
   - `DriveAcquirer.materializeAndVerify` (DriveAcquirer.swift:100-139) records
     `verified: size >= 0` per file, but the Drive backup hands restic the *live
     folder tree* wholesale (`backupToAll(paths: [url], …)`, main.swift:1647). The
@@ -37,6 +37,20 @@ the closest to the safety core and is worth doing first.
     the folder when any regular file ends up `verified: false`.
   - Non-issue confirmed: skipping symlinks/dirs in the materialize pass
     (`guard isFile`) is correct — they carry no cloud byte-content to fault in.
+  - Resolution: chose the minimal gate + a post-backup re-eviction check over a
+    staging copy. (a) `materializeAndVerify` now THROWS `verificationFailed` when
+    a regular file's size can't be read, so the whole folder is skipped — every
+    drive item recorded is now `verified: true` and the Staging invariant holds.
+    (b) After each folder's backup, `BackupRun` re-walks it metadata-only
+    (`previewDataless`, lstat, no fault-in); any file that became dataless again
+    means restic may have captured a stub mid-read, so the folder is reported as
+    a failure and the next run re-captures it (a recheck that can't run warns, it
+    does not fail the already-successful backup). The staging copy was rejected:
+    it would cost the ~11 GB the in-place design avoids AND store ephemeral
+    staging paths in the snapshot, breaking restore-to-original-location for
+    Drive. Staging.swift's docstring (which wrongly claimed a full copy) was
+    corrected. Compile green; runtime needs a real backup against the store
+    (operator-verified).
 
 ## CLI strictness / UX
 

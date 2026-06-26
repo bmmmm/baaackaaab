@@ -224,6 +224,25 @@ struct BackupRun {
                             continue
                         }
                         try backupToAll(paths: [url], tags: [runTag, "drive"], label: url.lastPathComponent)
+
+                        // Re-eviction guard: materialize proved real bytes before
+                        // restic read the tree, but under storage pressure the file
+                        // provider could re-evict a file mid-read, letting restic
+                        // capture a 0-byte stub. A metadata-only re-walk (lstat, no
+                        // fault-in) catches it: anything dataless again means this
+                        // snapshot may hold a stub, so fail the folder and let the
+                        // next run re-capture it rather than report a silent success.
+                        do {
+                            let recheck = try DriveAcquirer().previewDataless(folder: url)
+                            if recheck.dataless > 0 {
+                                driveFailures += 1
+                                Console.failure("\(url.lastPathComponent): \(recheck.dataless) file(s) were re-evicted during the backup — this snapshot may contain 0-byte stubs; re-run to re-capture them")
+                            }
+                        } catch {
+                            // The backup itself succeeded; we just cannot confirm
+                            // nothing was re-evicted mid-read. Warn, don't fail.
+                            Console.warn("\(url.lastPathComponent): backed up, but the post-backup re-eviction check could not run (\(error))")
+                        }
                     }
                 }
 

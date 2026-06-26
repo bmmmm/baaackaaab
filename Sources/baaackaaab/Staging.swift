@@ -13,9 +13,14 @@ struct AcquiredItem: Codable {
     let note: String?
 }
 
-/// Owns the staging directory: a clean, fully-materialized copy of everything
-/// we are about to hand to restic. We never back up the live iCloud tree
-/// directly, because a dataless stub there would be captured as a 0-byte file.
+/// Owns the staging directory: scratch space for data on its way to restic.
+/// Photos are exported here in byte-budgeted batches — a dataless asset would
+/// otherwise reach restic as a 0-byte file. Drive is the deliberate exception:
+/// it is verified in place and restic reads the live tree directly (a full copy
+/// would cost the ~11 GB the in-place design avoids on a disk-constrained Mac).
+/// A materialize-and-verify pass plus a post-backup re-eviction check guard
+/// against capturing a stub there, so the verification invariant below holds for
+/// both sources.
 final class Staging {
     let root: URL
     private(set) var items: [AcquiredItem] = []

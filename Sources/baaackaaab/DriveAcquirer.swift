@@ -4,12 +4,14 @@ enum DriveError: Error, CustomStringConvertible {
     case cannotEnumerate(String)
     case downloadTimeout(String)
     case stillDataless(String)
+    case verificationFailed(String)
 
     var description: String {
         switch self {
         case .cannotEnumerate(let p): return "cannot enumerate \(p)"
         case .downloadTimeout(let p): return "iCloud download timed out for \(p)"
         case .stillDataless(let p): return "file is still a dataless stub after download attempt: \(p)"
+        case .verificationFailed(let p): return "could not read the size of a materialized file (\(p)) — its bytes are not verifiable, so the whole folder is skipped this run; re-run, and if it persists inspect the file in Finder"
         }
     }
 }
@@ -122,16 +124,19 @@ final class DriveAcquirer {
             if isDataless(fileURL) { throw DriveError.stillDataless(rel) }
 
             // We already proved it is not dataless; the only remaining failure is
-            // an unreadable size, which must NOT be recorded as verified.
+            // an unreadable size. That file's bytes are not verifiable, so we must
+            // NOT hand the folder to restic with it unverified — fail the whole
+            // folder. This makes the documented Staging invariant true (nothing
+            // unverified is backed up): every drive item we record is verified.
             let size = (try? fileURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? -1
-            let ok = size >= 0
+            guard size >= 0 else { throw DriveError.verificationFailed(rel) }
             staging.record(AcquiredItem(
                 source: fileURL.path,
                 kind: "drive",
                 stagedPath: fileURL.path,   // backed up in place — no copy
                 byteCount: size,
-                verified: ok,
-                note: ok ? "in-place (restic reads source)" : "size read failed"
+                verified: true,
+                note: "in-place (restic reads source)"
             ))
             count += 1
         }
