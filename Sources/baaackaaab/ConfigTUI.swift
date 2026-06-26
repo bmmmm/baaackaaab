@@ -909,7 +909,7 @@ final class ConfigTUI {
     private func ensureRepoResolved() {
         if repoResolved { return }
         repoResolved = true
-        destinations = DestinationStore.resolveEnabled(explicitRepo: argValue("--restic-repo"))
+        destinations = DestinationStore.resolveEnabled(explicitRepo: cli.value("--restic-repo"))
     }
 
     private func syncArgs() -> [String] {
@@ -920,7 +920,7 @@ final class ConfigTUI {
         // Preserve a non-default config so the child backs up the same set.
         if configPath.path != BackupSet.defaultPath().path { args += ["--config", configPath.path] }
         // Forward an explicit ad-hoc target so the child hits the same repo.
-        if let r = argValue("--restic-repo") { args += ["--restic-repo", r] }
+        if let r = cli.value("--restic-repo") { args += ["--restic-repo", r] }
         return args
     }
 
@@ -1083,7 +1083,7 @@ final class ConfigTUI {
                 }
                 var args = ["--diff", snaps[restoreCursor + 1].shortID, snaps[restoreCursor].shortID,
                             "--destination", dest.name]
-                if let r = argValue("--restic-repo") { args += ["--restic-repo", r] }
+                if let r = cli.value("--restic-repo") { args += ["--restic-repo", r] }
                 runChildAndWait(args, label: "diff")
             }
         case .esc, .left, .char("h"): screen = .home
@@ -1136,7 +1136,7 @@ final class ConfigTUI {
                     "--target", target.path, "--yes"]
         if let include { args += ["--include", include] }
         // Forward an explicit ad-hoc target repo so the child resolves the same one.
-        if let r = argValue("--restic-repo") { args += ["--restic-repo", r] }
+        if let r = cli.value("--restic-repo") { args += ["--restic-repo", r] }
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: selfPath())
         proc.arguments = args

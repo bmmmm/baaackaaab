@@ -9,101 +9,6 @@ import Darwin
 // bytes landed, stage them. Never writes back to the user's data. A separate
 // shell step then hands the verified staging tree to restic.
 
-func argValue(_ name: String, default fallback: String? = nil) -> String? {
-    let args = CommandLine.arguments
-    if let i = args.firstIndex(of: name), i + 1 < args.count {
-        return args[i + 1]
-    }
-    return fallback
-}
-
-/// Collect every value of a repeatable flag, e.g. `--drive-folder a --drive-folder b`.
-func argValues(_ name: String) -> [String] {
-    let args = CommandLine.arguments
-    var out: [String] = []
-    var i = 0
-    while i < args.count {
-        if args[i] == name, i + 1 < args.count {
-            out.append(args[i + 1])
-            i += 2
-        } else {
-            i += 1
-        }
-    }
-    return out
-}
-
-/// The two tokens after a flag, e.g. `--diff <a> <b>`. nil if fewer than two
-/// follow it. Used by the two-argument snapshot diff.
-func argPair(_ name: String) -> (String, String)? {
-    let args = CommandLine.arguments
-    guard let i = args.firstIndex(of: name), i + 2 < args.count else { return nil }
-    return (args[i + 1], args[i + 2])
-}
-
-/// A numeric flag that must be a positive integer when present. Returns
-/// `fallback` when the flag is absent; exits with an actionable error when it is
-/// present but not a positive integer — so a typo or a negative/zero value fails
-/// loudly instead of silently degrading the run (e.g. `--max-bytes -1` collapsing
-/// a sample to one file). `unit` is woven into the error, e.g. "KiB/s".
-func positiveIntArg(_ name: String, default fallback: Int, unit: String? = nil) -> Int {
-    guard let raw = argValue(name) else { return fallback }
-    guard let n = Int(raw), n > 0 else {
-        let u = unit.map { " (\($0))" } ?? ""
-        Console.error("\(name) needs a positive integer\(u) — got '\(raw)'")
-        exit(1)
-    }
-    return n
-}
-
-/// Parse an `--at HH:MM` value (24-hour) into (hour, minute). nil when malformed,
-/// so the caller can reject an explicitly-supplied bad value rather than silently
-/// substituting a wrong time. A wholly absent `--at` is handled by parseSchedule.
-func parseAtTime(_ s: String) -> (hour: Int, minute: Int)? {
-    guard let colon = s.firstIndex(of: ":"),
-          let h = Int(s[s.startIndex..<colon]),
-          let m = Int(s[s.index(after: colon)...]),
-          (0...23).contains(h), (0...59).contains(m) else { return nil }
-    return (h, m)
-}
-
-/// Parse a `--days` csv ("mon,wed,fri") into launchd weekday numbers
-/// (Sun=0 … Sat=6), plus any tokens that did not resolve to a weekday. An
-/// empty/absent value yields ([], []) (which means "every day"). Unrecognized
-/// tokens are returned so the caller can reject them instead of silently
-/// dropping them (a typo'd `--days saturdy` must not become a daily timer).
-func parseDays(_ csv: String?) -> (days: [Int], unknown: [String]) {
-    guard let csv, !csv.isEmpty else { return ([], []) }
-    let map: [String: Int] = ["sun": 0, "mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6]
-    var days = Set<Int>()
-    var unknown: [String] = []
-    for tok in csv.lowercased().split(whereSeparator: { $0 == "," || $0 == " " }) {
-        if let d = map[String(tok.prefix(3))] { days.insert(d) } else { unknown.append(String(tok)) }
-    }
-    return (days.sorted(), unknown)
-}
-
-/// Build the timer Schedule from `--at` (repeatable; default 12:00 when absent)
-/// and `--days` (csv of weekdays; absent = every day). Exits with an actionable
-/// error on any malformed `--at` or unrecognized `--days` token, so an
-/// install never silently lands on the wrong time or the wrong (daily) cadence.
-func parseSchedule() -> Schedule {
-    var times: [(hour: Int, minute: Int)] = []
-    for raw in argValues("--at") {
-        guard let t = parseAtTime(raw) else {
-            Console.error("--at needs HH:MM in 24-hour form — got '\(raw)' (e.g. --at 09:00 --at 18:30)")
-            exit(1)
-        }
-        times.append(t)
-    }
-    let (days, unknown) = parseDays(argValue("--days"))
-    if !unknown.isEmpty {
-        Console.error("--days has unrecognized weekday(s): \(unknown.joined(separator: ", ")) — use mon,tue,wed,thu,fri,sat,sun")
-        exit(1)
-    }
-    return Schedule(times: times.isEmpty ? [(hour: 12, minute: 0)] : times, weekdays: days)
-}
-
 /// Usage / help screen. Printed on `--help`/`-h` and when invoked with no
 /// arguments at all. Styled through Console so it matches the run output.
 func printUsage() {
@@ -233,7 +138,7 @@ func initCredentials() throws {
     // generates a NEW encryption password; overwriting the only copy of the key
     // orphans the existing repository — every snapshot becomes permanently
     // unreadable. Only --force (a deliberate fresh start) gets past this guard.
-    if CredentialFiles.present && !CommandLine.arguments.contains("--force") {
+    if CredentialFiles.present && !cli.has("--force") {
         Console.error("credential files already exist at \(CredentialFiles.dir.path) — re-running --init-credentials generates a NEW encryption password and would ORPHAN the existing repository (its snapshots become permanently unreadable). To start a fresh repo on purpose, re-run with --force. To move existing Keychain secrets into the files WITHOUT regenerating, use --migrate-credentials.")
         exit(1)
     }
@@ -319,7 +224,7 @@ func migrateCredentials() throws {
 /// environment — each `Destination` carries them as a per-restic-child env
 /// overlay (see `ResticBackend`).
 func resolveDestinationsOrExit() -> [Destination] {
-    let dests = DestinationStore.resolveEnabled(explicitRepo: argValue("--restic-repo"))
+    let dests = DestinationStore.resolveEnabled(explicitRepo: cli.value("--restic-repo"))
     if !dests.isEmpty { return dests }
     Console.error("no repository — pass --restic-repo, set RESTIC_REPOSITORY, run `baaackaaab --migrate-credentials` (Keychain→files), or `--init-credentials` first")
     exit(1)
@@ -374,7 +279,7 @@ func checkRemote() {
 /// uses this to pick its source repository.
 func destinationsForCommand() -> [Destination] {
     let all = resolveDestinationsOrExit()
-    guard let name = argValue("--destination") else { return all }
+    guard let name = cli.value("--destination") else { return all }
     guard let match = all.first(where: { $0.name == name }) else {
         Console.error("no enabled destination named '\(name)' — configured: \(all.map { $0.name }.joined(separator: ", "))")
         exit(1)
@@ -466,11 +371,11 @@ func listSnapshotsCommand() {
 /// `--restore --include` then takes) and size, per destination.
 func findCommand() {
     Console.banner("baaackaaab", tagline: "find")
-    guard let pattern = argValue("--find"), !pattern.isEmpty else {
+    guard let pattern = cli.value("--find"), !pattern.isEmpty else {
         Console.error("--find needs a pattern, e.g. --find note.txt or --find '*.pdf'")
         exit(1)
     }
-    let snapshot = argValue("--snapshot") ?? "latest"
+    let snapshot = cli.value("--snapshot") ?? "latest"
     let dests = destinationsForCommand()
     var anyHits = false
     let failures = forEachDestination(dests) { dest in
@@ -503,8 +408,8 @@ func findCommand() {
 /// exactly what `--restore --include` takes, so this doubles as restore discovery.
 func lsCommand() {
     Console.banner("baaackaaab", tagline: "ls — browse a snapshot")
-    let snapshot = argValue("--ls") ?? "latest"
-    let subpath = argValue("--include")
+    let snapshot = cli.value("--ls") ?? "latest"
+    let subpath = cli.value("--include")
     let dests = destinationsForCommand()
     let failures = forEachDestination(dests) { dest in
         let entries = try ResticBackend(destination: dest).ls(snapshot: snapshot, path: subpath)
@@ -537,7 +442,7 @@ func lsCommand() {
 /// (+ added, - removed, M content, T type, U metadata) and the byte/file totals.
 func diffCommand() {
     Console.banner("baaackaaab", tagline: "diff — compare two snapshots")
-    guard let (a, b) = argPair("--diff"), !a.isEmpty, !b.isEmpty,
+    guard let (a, b) = cli.pair("--diff"), !a.isEmpty, !b.isEmpty,
           !a.hasPrefix("-"), !b.hasPrefix("-") else {
         Console.error("--diff needs two snapshot ids: baaackaaab --diff <olderID> <newerID> (list ids with --snapshots)")
         exit(1)
@@ -602,7 +507,7 @@ func restoreCommand() {
     // which copy to restore from and require --destination.
     let all = resolveDestinationsOrExit()
     let dest: Destination
-    if all.count == 1 && argValue("--destination") == nil {
+    if all.count == 1 && cli.value("--destination") == nil {
         dest = all[0]
     } else {
         let picked = destinationsForCommand()   // filtered by --destination, or all
@@ -617,17 +522,17 @@ func restoreCommand() {
         exit(1)
     }
 
-    let snapshot = argValue("--snapshot") ?? "latest"
-    let include = argValue("--include")
-    let dryRun = CommandLine.arguments.contains("--dry-run")
-    let verify = !CommandLine.arguments.contains("--no-verify")
+    let snapshot = cli.value("--snapshot") ?? "latest"
+    let include = cli.value("--include")
+    let dryRun = cli.has("--dry-run")
+    let verify = !cli.has("--no-verify")
 
     // Target: an explicit --target, else a fresh timestamped dir. Validated hard.
     let stampFmt = DateFormatter()
     stampFmt.locale = Locale(identifier: "en_US_POSIX")
     stampFmt.dateFormat = "yyyyMMdd-HHmmss"
     let stamp = stampFmt.string(from: Date())
-    let target = argValue("--target").map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
+    let target = cli.value("--target").map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
         ?? RestoreEngine.defaultTarget(snapshot: snapshot, stamp: stamp)
     do { try RestoreEngine.validateTarget(target) }
     catch { Console.error("\(error)"); exit(1) }
@@ -663,7 +568,7 @@ func restoreCommand() {
 
     // 2) Confirm before writing. On a TTY, prompt; non-interactively, demand --yes
     //    so a scripted restore can't silently write gigabytes somewhere.
-    if !CommandLine.arguments.contains("--yes") {
+    if !cli.has("--yes") {
         guard isatty(STDIN_FILENO) != 0 else {
             Console.error("refusing to write a restore non-interactively without --yes — re-run with --yes, or --dry-run to preview only")
             exit(1)
@@ -704,9 +609,9 @@ func restoreCommand() {
 /// only to its own temp dir. Acts on ONE destination.
 func testRestoreCommand() {
     Console.banner("baaackaaab", tagline: "test-restore — prove a backup is restorable")
-    let snapshot = argValue("--snapshot") ?? "latest"
-    let sampleCount = positiveIntArg("--sample", default: 10)
-    let budget = positiveIntArg("--max-bytes", default: 1_000_000_000, unit: "bytes")
+    let snapshot = cli.value("--snapshot") ?? "latest"
+    let sampleCount = cli.positiveInt("--sample", default: 10)
+    let budget = cli.positiveInt("--max-bytes", default: 1_000_000_000, unit: "bytes")
 
     let dest = requireSingleDestination(action: "test-restore checks a single repository")
     let backend = ResticBackend(destination: dest)
@@ -791,7 +696,7 @@ func testRestoreCommand() {
 /// if any destination reports problems.
 func verifyRepoCommand() {
     Console.banner("baaackaaab", tagline: "verify repository")
-    let subset = argValue("--read-data-subset")
+    let subset = cli.value("--read-data-subset")
     let dests = destinationsForCommand()
     let failures = forEachDestination(dests) { dest in
         if let subset {
@@ -858,7 +763,7 @@ func unlockCommand() {
         }
     }
 
-    let removeAll = CommandLine.arguments.contains("--remove-all")
+    let removeAll = cli.has("--remove-all")
     Console.section(removeAll ? "Remove ALL locks" : "Remove stale locks")
     if removeAll {
         Console.warn("--remove-all deletes EVERY lock, including one a backup that is genuinely running right now holds. Only do this when you are certain no backup or prune is in progress against this repo.")
@@ -868,7 +773,7 @@ func unlockCommand() {
     Console.note("This is the ONLY operation that deletes from the repo, and it removes lock files only — never snapshots or data. On an append-only server the lock prefix must be carved out for this to succeed; if it is not, the server refuses (403) and nothing changes.")
 
     // Confirm — unlock deletes (lock files) from the repo, so gate it like restore.
-    if !CommandLine.arguments.contains("--yes") {
+    if !cli.has("--yes") {
         guard isatty(STDIN_FILENO) != 0 else {
             Console.error("refusing to remove locks non-interactively without --yes — re-run with --yes (or interactively to confirm)")
             exit(1)
@@ -1052,17 +957,17 @@ func listDestinations() {
 /// first so the existing backup is preserved.
 func addDestination(name: String) {
     Console.banner("baaackaaab", tagline: "add destination")
-    guard let url = argValue("--repo-url"), !url.isEmpty else {
+    guard let url = cli.value("--repo-url"), !url.isEmpty else {
         Console.error("--add-destination needs --repo-url <url> (a rest:https://… URL, a local path, sftp:…, etc.)")
         exit(1)
     }
-    let link = argValue("--link") ?? "default"
-    let order = argValue("--order").flatMap { Int($0) }
-    let enabled = !CommandLine.arguments.contains("--disabled")
+    let link = cli.value("--link") ?? "default"
+    let order = cli.value("--order").flatMap { Int($0) }
+    let enabled = !cli.has("--disabled")
 
-    let importing = argValue("--repo-password-file") != nil
+    let importing = cli.value("--repo-password-file") != nil
     let password: String
-    if let pwFile = argValue("--repo-password-file") {
+    if let pwFile = cli.value("--repo-password-file") {
         guard let data = FileManager.default.contents(atPath: (pwFile as NSString).expandingTildeInPath),
               let s = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
               !s.isEmpty else {
@@ -1151,25 +1056,25 @@ func manageBackupSet(configPath: URL) {
     }
 
     var changed = false
-    for f in argValues("--add-folder") {
+    for f in cli.values("--add-folder") {
         if set.addFolder(f) { changed = true; Console.success("added drive folder  \(f)") }
         else { Console.note("drive folder already in set: \(f)") }
     }
-    for f in argValues("--remove-folder") {
+    for f in cli.values("--remove-folder") {
         if set.removeFolder(f) { changed = true; Console.success("removed drive folder  \(f)") }
         else { Console.note("drive folder not in set: \(f)") }
     }
-    for a in argValues("--add-album") {
+    for a in cli.values("--add-album") {
         if set.addAlbum(a) { changed = true; Console.success("added photo album  \(a)") }
         else { Console.note("photo album already in set: \(a)") }
     }
-    for a in argValues("--remove-album") {
+    for a in cli.values("--remove-album") {
         if set.removeAlbum(a) { changed = true; Console.success("removed photo album  \(a)") }
         else { Console.note("photo album not in set: \(a)") }
     }
     // Upload-throttle knob: persisted in the set so the unattended timer is
     // throttled too. `--limit-upload <n>` sets KiB/s; `--clear-limit-upload` lifts it.
-    if let raw = argValue("--limit-upload") {
+    if let raw = cli.value("--limit-upload") {
         guard let n = Int(raw), n > 0 else {
             Console.error("--limit-upload needs a positive integer (KiB/s), e.g. --limit-upload 2048 for ~2 MiB/s")
             exit(1)
@@ -1177,7 +1082,7 @@ func manageBackupSet(configPath: URL) {
         if set.limitUploadKiBps != n { set.limitUploadKiBps = n; changed = true; Console.success("upload limit set to \(n) KiB/s") }
         else { Console.note("upload limit already \(n) KiB/s") }
     }
-    if CommandLine.arguments.contains("--clear-limit-upload") {
+    if cli.has("--clear-limit-upload") {
         if set.limitUploadKiBps != nil { set.limitUploadKiBps = nil; changed = true; Console.success("upload limit cleared (unthrottled)") }
         else { Console.note("no upload limit was set") }
     }
@@ -1221,7 +1126,7 @@ func rejectUnknownFlags() {
         "--install-timer", "--uninstall-timer", "--timer-status", "--doctor",
         "--center", "--help", "-h",
     ]
-    let args = CommandLine.arguments
+    let args = cli.tokens
     var i = 1   // skip argv[0]
     while i < args.count {
         let tok = args[i]
@@ -1247,10 +1152,10 @@ setvbuf(stdout, nil, _IOLBF, 0)
 // when piped / under launchd (no TTY) — the launchd timer always passes
 // --run-tag, so it never lands here. The center launch itself happens below,
 // after the config path is resolved.
-let bareInteractive = CommandLine.arguments.count == 1
+let bareInteractive = cli.count == 1
     && isatty(STDIN_FILENO) != 0 && isatty(STDOUT_FILENO) != 0
-if CommandLine.arguments.contains("--help") || CommandLine.arguments.contains("-h")
-    || (CommandLine.arguments.count == 1 && !bareInteractive) {
+if cli.has("--help") || cli.has("-h")
+    || (cli.count == 1 && !bareInteractive) {
     printUsage()
     exit(0)
 }
@@ -1261,7 +1166,7 @@ rejectUnknownFlags()
 
 // Standalone diagnostic: prove the evict/dataless round-trip on one file.
 // Runs in isolation and exits — never touches staging or the normal flow.
-if let evictTarget = argValue("--evict-test") {
+if let evictTarget = cli.value("--evict-test") {
     do {
         try DriveAcquirer().evictRoundTripTest(URL(fileURLWithPath: evictTarget))
         exit(0)
@@ -1271,7 +1176,7 @@ if let evictTarget = argValue("--evict-test") {
     }
 }
 
-if let matTarget = argValue("--materialize-test") {
+if let matTarget = cli.value("--materialize-test") {
     do {
         try DriveAcquirer().materializeTest(URL(fileURLWithPath: matTarget))
         exit(0)
@@ -1282,120 +1187,120 @@ if let matTarget = argValue("--materialize-test") {
 }
 
 // First-run setup: generate + store both secrets, print the server hash.
-if CommandLine.arguments.contains("--init-credentials") {
+if cli.has("--init-credentials") {
     do { try initCredentials(); exit(0) }
     catch { Console.error("\(error)"); exit(1) }
 }
 
 // One-time migration: move existing Keychain secrets into the 0600 file store.
-if CommandLine.arguments.contains("--migrate-credentials") {
+if cli.has("--migrate-credentials") {
     do { try migrateCredentials(); exit(0) }
     catch { Console.error("\(error)"); exit(1) }
 }
 
 // Connectivity + auth + repo-init check, then exit.
-if CommandLine.arguments.contains("--check") {
+if cli.has("--check") {
     checkRemote()
     exit(0)
 }
 
 // --read-data-subset only has meaning with --verify-repo; on its own it would be
 // silently ignored and the run would fall through to a backup. Fail loudly.
-if argValue("--read-data-subset") != nil && !CommandLine.arguments.contains("--verify-repo") {
+if cli.value("--read-data-subset") != nil && !cli.has("--verify-repo") {
     Console.error("--read-data-subset only applies to --verify-repo — re-run as `baaackaaab --verify-repo --read-data-subset <n%|n/t|nM>`")
     exit(1)
 }
 
 // Repository integrity check (`restic check`), read-only. Optional
 // --read-data-subset re-reads a fraction of the pack data for bit-rot.
-if CommandLine.arguments.contains("--verify-repo") {
+if cli.has("--verify-repo") {
     verifyRepoCommand()
     exit(0)
 }
 
 // Remove repository locks (the only delete op). Lists locks, confirms, then runs
 // `restic unlock` (stale only, or --remove-all). Removes lock files only.
-if CommandLine.arguments.contains("--unlock") {
+if cli.has("--unlock") {
     unlockCommand()
     exit(0)
 }
 
 // Consolidated read-only health check (restic, destinations, disk, Photos, timer).
-if CommandLine.arguments.contains("--doctor") {
+if cli.has("--doctor") {
     doctorCommand()
     exit(0)
 }
 
 // Read-only snapshot browser (restore starts here: pick a snapshot's short id).
-if CommandLine.arguments.contains("--snapshots") {
+if cli.has("--snapshots") {
     listSnapshotsCommand()
     exit(0)
 }
 
 // Locate a file inside a snapshot by name/glob (single-file restore discovery).
-if argValue("--find") != nil {
+if cli.value("--find") != nil {
     findCommand()
     exit(0)
 }
 
 // Browse a snapshot's contents (read-only). The listed paths feed --restore --include.
-if argValue("--ls") != nil {
+if cli.value("--ls") != nil {
     lsCommand()
     exit(0)
 }
 
 // Compare two snapshots (read-only): what changed between them.
-if CommandLine.arguments.contains("--diff") {
+if cli.has("--diff") {
     diffCommand()
     exit(0)
 }
 
 // Restore a snapshot into a fresh directory (safe by construction). Previews,
 // confirms, restores, verifies. Never writes into live iCloud Drive / Photos.
-if CommandLine.arguments.contains("--restore") {
+if cli.has("--restore") {
     restoreCommand()
     exit(0)
 }
 
 // Sampled test-restore: prove a backup is restorable by restoring a random
 // sample into a throwaway temp dir + verify, then deleting it. Read-only on the repo.
-if CommandLine.arguments.contains("--test-restore") {
+if cli.has("--test-restore") {
     testRestoreCommand()
     exit(0)
 }
 
 // Destination management (read-only list / add / remove), then exit. These edit
 // only the local store; remove never touches remote data.
-if CommandLine.arguments.contains("--list-destinations") {
+if cli.has("--list-destinations") {
     listDestinations()
     exit(0)
 }
-if let name = argValue("--add-destination") {
+if let name = cli.value("--add-destination") {
     addDestination(name: name)
     exit(0)
 }
-if let name = argValue("--remove-destination") {
+if let name = cli.value("--remove-destination") {
     removeDestination(name: name)
     exit(0)
 }
 
 // Resolve the backup-set config path (override with --config, e.g. for tests).
-let configPath: URL = argValue("--config").map {
+let configPath: URL = cli.value("--config").map {
     URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath)
 } ?? BackupSet.defaultPath()
 
 // Scheduled-backup launchd timer. Installs/removes a per-user LaunchAgent that
 // runs `baaackaaab --run-tag scheduled` (non-bare, so it backs up the set under
 // launchd without a TTY). These touch the user's launchd, not the repo.
-if CommandLine.arguments.contains("--install-timer") {
-    do { try LaunchdTimer.install(schedule: parseSchedule(), configPath: configPath); exit(0) }
+if cli.has("--install-timer") {
+    do { try LaunchdTimer.install(schedule: cli.schedule(), configPath: configPath); exit(0) }
     catch { Console.error("\(error)"); exit(1) }
 }
-if CommandLine.arguments.contains("--uninstall-timer") {
+if cli.has("--uninstall-timer") {
     do { try LaunchdTimer.uninstall(); exit(0) }
     catch { Console.error("\(error)"); exit(1) }
 }
-if CommandLine.arguments.contains("--timer-status") {
+if cli.has("--timer-status") {
     LaunchdTimer.status()
     exit(0)
 }
@@ -1404,7 +1309,7 @@ if CommandLine.arguments.contains("--timer-status") {
 // full-screen TUI opens on its home dashboard (backup set + remote status) and
 // ties set-editing, sync, and the remote dashboard together in one raw loop. The
 // explicit --center flag forces it (e.g. with a custom --config).
-if bareInteractive || CommandLine.arguments.contains("--center") {
+if bareInteractive || cli.has("--center") {
     guard isatty(STDIN_FILENO) != 0, isatty(STDOUT_FILENO) != 0 else {
         Console.error("the command center needs an interactive terminal — run it directly in Terminal.app")
         exit(1)
@@ -1416,7 +1321,7 @@ if bareInteractive || CommandLine.arguments.contains("--center") {
 // Interactive editor for the backup set, jumping straight past the home screen.
 // Needs a real terminal (the raw-mode TUI can't run in a pipe or a launchd log);
 // guard before touching termios.
-if CommandLine.arguments.contains("--configure") {
+if cli.has("--configure") {
     guard isatty(STDIN_FILENO) != 0, isatty(STDOUT_FILENO) != 0 else {
         Console.error("--configure needs an interactive terminal — run it directly in Terminal.app")
         exit(1)
@@ -1431,9 +1336,9 @@ if CommandLine.arguments.contains("--configure") {
 // source flags they would silently win the set-management dispatch below (edit
 // the set and exit), so a user expecting a throttled one-off backup would get
 // none. Reject the ambiguous combination loudly instead of quietly skipping it.
-if CommandLine.arguments.contains("--limit-upload")
-    || CommandLine.arguments.contains("--clear-limit-upload") {
-    if !argValues("--drive-folder").isEmpty || !argValues("--photo-album").isEmpty {
+if cli.has("--limit-upload")
+    || cli.has("--clear-limit-upload") {
+    if !cli.values("--drive-folder").isEmpty || !cli.values("--photo-album").isEmpty {
         Console.error("--limit-upload / --clear-limit-upload change the backup set's PERSISTENT upload throttle; they are not per-run flags (a run reads the throttle from the set — there is no ad-hoc throttle). Set it on its own first (`baaackaaab --limit-upload <KiB/s>`), then run the backup separately. Combined with --drive-folder/--photo-album it would silently edit the set and skip the backup.")
         exit(1)
     }
@@ -1442,9 +1347,8 @@ if CommandLine.arguments.contains("--limit-upload")
 // Backup-set management (--list / --add-* / --remove-* / --limit-upload): edit
 // the set and exit. --limit-upload is a PERSISTENT knob (like --add-folder), not
 // a per-run flag — a backup reads the throttle from the set, never from argv.
-if ["--list", "--add-folder", "--remove-folder", "--add-album", "--remove-album",
-    "--limit-upload", "--clear-limit-upload"]
-    .contains(where: CommandLine.arguments.contains) {
+if cli.hasAny(["--list", "--add-folder", "--remove-folder", "--add-album", "--remove-album",
+               "--limit-upload", "--clear-limit-upload"]) {
     manageBackupSet(configPath: configPath)
     exit(0)
 }
@@ -1452,8 +1356,8 @@ if ["--list", "--add-folder", "--remove-folder", "--add-album", "--remove-album"
 // Sources: explicit --drive-folder/--photo-album flags take precedence (ad-hoc /
 // test runs). With NO source flag at all, fall back to the declarative backup
 // set — so the launchd timer runs `baaackaaab` with no arguments.
-var driveFolders = argValues("--drive-folder")
-var photoAlbums = argValues("--photo-album")
+var driveFolders = cli.values("--drive-folder")
+var photoAlbums = cli.values("--photo-album")
 var configQuotaBytes: Int? = nil
 var configLimitUploadKiBps: Int? = nil
 if driveFolders.isEmpty && photoAlbums.isEmpty
@@ -1477,27 +1381,27 @@ if driveFolders.isEmpty && photoAlbums.isEmpty
 // because restic would read file contents and fault the whole set in from iCloud.
 // Photos are likewise SKIPPED (a real preview there would export every original
 // to staging, costing as much as a real backup).
-let backupDryRun = CommandLine.arguments.contains("--dry-run")
+let backupDryRun = cli.has("--dry-run")
 
 // Scratch dir for photo batches + the manifest (Drive is backed up in place, so
 // it is not copied here). Default to an ABSOLUTE path under Caches: a relative
 // `./tmp/staging` would resolve against the launchd run's CWD (/), writing to
 // /tmp/staging or failing — the scheduled backup must not depend on CWD.
 let stagingURL: URL = {
-    if let s = argValue("--staging") {
+    if let s = cli.value("--staging") {
         return URL(fileURLWithPath: (s as NSString).expandingTildeInPath, isDirectory: true)
     }
     return FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Caches/baaackaaab/staging", isDirectory: true)
 }()
-let photoBatchBytes = positiveIntArg("--photo-batch-bytes", default: 3_000_000_000, unit: "bytes")
-let host = argValue("--host") ?? ProcessInfo.processInfo.hostName
+let photoBatchBytes = cli.positiveInt("--photo-batch-bytes", default: 3_000_000_000, unit: "bytes")
+let host = cli.value("--host") ?? ProcessInfo.processInfo.hostName
 // Optional remote-quota pre-flight. The rest-server's `--max-size` is a hard
 // server-side stop; this is a soft client-side gauge that warns BEFORE a run
 // when the repo is filling up, so the cap can be raised in time. We can't query
 // the server's configured quota, so it comes from --repo-quota-bytes or the set.
 let repoQuotaBytes: Int? = {
-    guard let raw = argValue("--repo-quota-bytes") else { return configQuotaBytes }
+    guard let raw = cli.value("--repo-quota-bytes") else { return configQuotaBytes }
     guard let n = Int(raw), n > 0 else {
         Console.error("--repo-quota-bytes needs a positive integer (bytes) — got '\(raw)'")
         exit(1)
@@ -1505,7 +1409,7 @@ let repoQuotaBytes: Int? = {
     return n
 }()
 let quotaWarnFraction: Double = {
-    guard let raw = argValue("--quota-warn-fraction") else { return 0.85 }
+    guard let raw = cli.value("--quota-warn-fraction") else { return 0.85 }
     guard let f = Double(raw), f > 0, f <= 1 else {
         Console.error("--quota-warn-fraction needs a number in (0, 1] — got '\(raw)' (e.g. 0.85)")
         exit(1)
@@ -1521,7 +1425,7 @@ let primaryRepo = destinations[0].displayURL ?? destinations[0].name
 let runFmt = DateFormatter()
 runFmt.locale = Locale(identifier: "en_US_POSIX")
 runFmt.dateFormat = "yyyyMMdd-HHmmss"
-let runTag = argValue("--run-tag") ?? "run-\(runFmt.string(from: Date()))"
+let runTag = cli.value("--run-tag") ?? "run-\(runFmt.string(from: Date()))"
 let runStart = Date()
 
 // Hand off to the extracted orchestrator: it runs init, quota, Drive, Photos,
