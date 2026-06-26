@@ -336,7 +336,7 @@ func checkRemote() {
         Console.section("Destination", detail: "\(dest.name) [\(dest.link)]")
         Console.info([("repo", Credentials.redact(repo))])
         guard dest.passwordAvailable else {
-            Console.failure("no encryption password — the credential files are missing or unreadable")
+            Console.failure(noPasswordNote())
             failures += 1
             continue
         }
@@ -382,36 +382,78 @@ func destinationsForCommand() -> [Destination] {
     return [match]
 }
 
+/// The repeated "missing encryption key" note, in one place so the wording stays
+/// identical everywhere it can surface. `name` is woven in for the single-
+/// destination commands that already know which destination failed.
+func noPasswordNote(for name: String? = nil) -> String {
+    let who = name.map { " for '\($0)'" } ?? ""
+    return "no encryption password\(who) — the credential files are missing or unreadable"
+}
+
+/// Fan a read/verify command out over `dests`, wrapping the scaffold every one
+/// of them repeats: the per-destination section header and the missing-key guard
+/// (printed as a failure and counted). `body` runs only for a destination whose
+/// key is present; it returns false — or throws — to mark that destination
+/// failed (a thrown error is printed as the failure line). Returns the count of
+/// failed destinations; the caller prints its own command-specific summary/exit.
+@discardableResult
+func forEachDestination(_ dests: [Destination], _ body: (Destination) throws -> Bool) -> Int {
+    var failures = 0
+    for dest in dests {
+        Console.section("Destination", detail: "\(dest.name) [\(dest.link)]")
+        guard dest.passwordAvailable else {
+            Console.failure(noPasswordNote())
+            failures += 1
+            continue
+        }
+        do { if !(try body(dest)) { failures += 1 } }
+        catch {
+            Console.failure("\(error)")
+            failures += 1
+        }
+    }
+    return failures
+}
+
+/// Resolve exactly one destination for a single-repository command (diff,
+/// test-restore, unlock), print its section header, and verify its key is
+/// present — exiting with an actionable error when several/none are configured or
+/// the key is missing. `action` completes the "choose ONE destination" sentence,
+/// e.g. "diff compares two snapshots in a single repository".
+func requireSingleDestination(action: String) -> Destination {
+    let picked = destinationsForCommand()
+    guard picked.count == 1 else {
+        Console.error("choose ONE destination with --destination <name> — \(action) (configured: \(picked.map { $0.name }.joined(separator: ", ")))")
+        exit(1)
+    }
+    let dest = picked[0]
+    Console.section("Destination", detail: "\(dest.name) [\(dest.link)]")
+    guard dest.passwordAvailable else {
+        Console.error(noPasswordNote(for: dest.name))
+        exit(1)
+    }
+    return dest
+}
+
 /// List snapshots (read-only restore browser, CLI form). For each destination —
 /// all, or just `--destination <name>` — its snapshots newest-first with the short
 /// id, time, host, tags, and covered paths. The short id is what `--restore` takes.
 func listSnapshotsCommand() {
     Console.banner("baaackaaab", tagline: "snapshots")
     let dests = destinationsForCommand()
-    var failures = 0
-    for dest in dests {
-        Console.section("Destination", detail: "\(dest.name) [\(dest.link)]")
-        guard dest.passwordAvailable else {
-            Console.failure("no encryption password — the credential files are missing or unreadable")
-            failures += 1
-            continue
+    let failures = forEachDestination(dests) { dest in
+        let snaps = try ResticBackend(destination: dest).listSnapshots()
+        if snaps.isEmpty {
+            Console.note("no snapshots yet")
+            return true
         }
-        do {
-            let snaps = try ResticBackend(destination: dest).listSnapshots()
-            if snaps.isEmpty {
-                Console.note("no snapshots yet")
-                continue
-            }
-            for s in snaps {
-                let when = String(s.time.prefix(16)).replacingOccurrences(of: "T", with: " ")
-                let tags = s.tags.isEmpty ? "" : "  [" + s.tags.joined(separator: ",") + "]"
-                Console.step("\(s.shortID)  \(when)  \(s.hostname)\(tags)")
-                Console.detail(s.paths.joined(separator: ", "))
-            }
-        } catch {
-            Console.failure("\(error)")
-            failures += 1
+        for s in snaps {
+            let when = String(s.time.prefix(16)).replacingOccurrences(of: "T", with: " ")
+            let tags = s.tags.isEmpty ? "" : "  [" + s.tags.joined(separator: ",") + "]"
+            Console.step("\(s.shortID)  \(when)  \(s.hostname)\(tags)")
+            Console.detail(s.paths.joined(separator: ", "))
         }
+        return true
     }
     if failures > 0 {
         Console.error("\(failures)/\(dests.count) destination(s) could not be listed — see above")
@@ -430,31 +472,20 @@ func findCommand() {
     }
     let snapshot = argValue("--snapshot") ?? "latest"
     let dests = destinationsForCommand()
-    var failures = 0
     var anyHits = false
-    for dest in dests {
-        Console.section("Destination", detail: "\(dest.name) [\(dest.link)]")
-        guard dest.passwordAvailable else {
-            Console.failure("no encryption password — the credential files are missing or unreadable")
-            failures += 1
-            continue
+    let failures = forEachDestination(dests) { dest in
+        let hits = try ResticBackend(destination: dest).find(pattern: pattern, snapshot: snapshot)
+        if hits.isEmpty {
+            Console.note("no match for '\(pattern)' in snapshot \(snapshot)")
+            return true
         }
-        do {
-            let hits = try ResticBackend(destination: dest).find(pattern: pattern, snapshot: snapshot)
-            if hits.isEmpty {
-                Console.note("no match for '\(pattern)' in snapshot \(snapshot)")
-                continue
-            }
-            anyHits = true
-            for h in hits {
-                let size = h.size.map { " (" + ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .file) + ")" } ?? ""
-                let kind = h.type == "dir" ? "/" : ""
-                Console.step("\(h.path)\(kind)\(size)")
-            }
-        } catch {
-            Console.failure("\(error)")
-            failures += 1
+        anyHits = true
+        for h in hits {
+            let size = h.size.map { " (" + ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .file) + ")" } ?? ""
+            let kind = h.type == "dir" ? "/" : ""
+            Console.step("\(h.path)\(kind)\(size)")
         }
+        return true
     }
     if anyHits {
         let destFlag = dests.count > 1 ? " --destination <name>" : ""
@@ -475,35 +506,24 @@ func lsCommand() {
     let snapshot = argValue("--ls") ?? "latest"
     let subpath = argValue("--include")
     let dests = destinationsForCommand()
-    var failures = 0
-    for dest in dests {
-        Console.section("Destination", detail: "\(dest.name) [\(dest.link)]")
-        guard dest.passwordAvailable else {
-            Console.failure("no encryption password — the credential files are missing or unreadable")
-            failures += 1
-            continue
+    let failures = forEachDestination(dests) { dest in
+        let entries = try ResticBackend(destination: dest).ls(snapshot: snapshot, path: subpath)
+        if entries.isEmpty {
+            Console.note("nothing in snapshot \(snapshot)\(subpath.map { " under \($0)" } ?? "")")
+            return true
         }
-        do {
-            let entries = try ResticBackend(destination: dest).ls(snapshot: snapshot, path: subpath)
-            if entries.isEmpty {
-                Console.note("nothing in snapshot \(snapshot)\(subpath.map { " under \($0)" } ?? "")")
-                continue
-            }
-            // Cap the dump so a huge snapshot doesn't flood the terminal; say so
-            // explicitly (never a silent truncation) and point at how to narrow it.
-            let cap = 500
-            for e in entries.prefix(cap) {
-                let kind = e.type == "dir" ? "/" : ""
-                let size = e.size.map { " (" + ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .file) + ")" } ?? ""
-                Console.detail("\(e.path)\(kind)\(size)")
-            }
-            if entries.count > cap {
-                Console.note("… and \(entries.count - cap) more (\(entries.count) entries total) — narrow with --include <subpath>")
-            }
-        } catch {
-            Console.failure("\(error)")
-            failures += 1
+        // Cap the dump so a huge snapshot doesn't flood the terminal; say so
+        // explicitly (never a silent truncation) and point at how to narrow it.
+        let cap = 500
+        for e in entries.prefix(cap) {
+            let kind = e.type == "dir" ? "/" : ""
+            let size = e.size.map { " (" + ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .file) + ")" } ?? ""
+            Console.detail("\(e.path)\(kind)\(size)")
         }
+        if entries.count > cap {
+            Console.note("… and \(entries.count - cap) more (\(entries.count) entries total) — narrow with --include <subpath>")
+        }
+        return true
     }
     if failures > 0 {
         Console.error("\(failures)/\(dests.count) destination(s) could not be listed — see above")
@@ -522,17 +542,7 @@ func diffCommand() {
         Console.error("--diff needs two snapshot ids: baaackaaab --diff <olderID> <newerID> (list ids with --snapshots)")
         exit(1)
     }
-    let picked = destinationsForCommand()
-    guard picked.count == 1 else {
-        Console.error("choose ONE destination with --destination <name> — diff compares two snapshots in a single repository (configured: \(picked.map { $0.name }.joined(separator: ", ")))")
-        exit(1)
-    }
-    let dest = picked[0]
-    Console.section("Destination", detail: "\(dest.name) [\(dest.link)]")
-    guard dest.passwordAvailable else {
-        Console.error("no encryption password for '\(dest.name)' — the credential files are missing or unreadable")
-        exit(1)
-    }
+    let dest = requireSingleDestination(action: "diff compares two snapshots in a single repository")
     do {
         let r = try ResticBackend(destination: dest).diff(snapshotA: a, snapshotB: b)
         Console.step("\(a) → \(b)")
@@ -603,7 +613,7 @@ func restoreCommand() {
         dest = picked[0]
     }
     guard dest.passwordAvailable else {
-        Console.error("no encryption password for '\(dest.name)' — the credential files are missing or unreadable")
+        Console.error(noPasswordNote(for: dest.name))
         exit(1)
     }
 
@@ -698,17 +708,7 @@ func testRestoreCommand() {
     let sampleCount = positiveIntArg("--sample", default: 10)
     let budget = positiveIntArg("--max-bytes", default: 1_000_000_000, unit: "bytes")
 
-    let picked = destinationsForCommand()
-    guard picked.count == 1 else {
-        Console.error("choose ONE destination with --destination <name> — test-restore checks a single repository (configured: \(picked.map { $0.name }.joined(separator: ", ")))")
-        exit(1)
-    }
-    let dest = picked[0]
-    Console.section("Destination", detail: "\(dest.name) [\(dest.link)]")
-    guard dest.passwordAvailable else {
-        Console.error("no encryption password for '\(dest.name)' — the credential files are missing or unreadable")
-        exit(1)
-    }
+    let dest = requireSingleDestination(action: "test-restore checks a single repository")
     let backend = ResticBackend(destination: dest)
 
     // 1) Enumerate the snapshot's files; pick a random, budget-bounded sample.
@@ -793,14 +793,7 @@ func verifyRepoCommand() {
     Console.banner("baaackaaab", tagline: "verify repository")
     let subset = argValue("--read-data-subset")
     let dests = destinationsForCommand()
-    var failures = 0
-    for dest in dests {
-        Console.section("Destination", detail: "\(dest.name) [\(dest.link)]")
-        guard dest.passwordAvailable else {
-            Console.failure("no encryption password — the credential files are missing or unreadable")
-            failures += 1
-            continue
-        }
+    let failures = forEachDestination(dests) { dest in
         if let subset {
             Console.step("checking structure + re-reading \(subset) of pack data — reads from the repo, can take a while")
         } else {
@@ -809,13 +802,13 @@ func verifyRepoCommand() {
         let result = ResticBackend(destination: dest).checkRepo(readDataSubset: subset)
         if result.clean {
             Console.success("no errors found — repository is intact")
+            return true
         } else if result.lockedOut {
             // Not a damage verdict — the repo is healthy but busy. Count it as a
             // non-pass (exit non-zero) but say so accurately, not "repair it".
-            failures += 1
             Console.warn("could not check '\(dest.name)' — the repository is locked (a backup or prune is in progress). This is NOT a damage verdict; retry when idle, or clear a stale lock with `--unlock --destination \(dest.name)`.")
+            return false
         } else {
-            failures += 1
             Console.failure("restic check reported problems:")
             let lines = result.errorLines.isEmpty
                 ? result.output.split(separator: "\n").map(String.init).suffix(10).map { $0 }
@@ -824,6 +817,7 @@ func verifyRepoCommand() {
             // endpoint password) in its check output — redact each line.
             for line in lines { Console.detail(Credentials.redact(line)) }
             Console.note("a damaged repo is fixed SERVER-side (restic prune/repair runs with a delete-capable key on the host that owns the repo) — never from this Mac, which has no delete right.")
+            return false
         }
     }
     if failures > 0 {
@@ -840,17 +834,7 @@ func verifyRepoCommand() {
 /// confirms before removing (or demands --yes non-interactively, since this writes).
 func unlockCommand() {
     Console.banner("baaackaaab", tagline: "unlock — remove repository locks")
-    let picked = destinationsForCommand()
-    guard picked.count == 1 else {
-        Console.error("choose ONE destination with --destination <name> — unlock acts on a single repository at a time (configured: \(picked.map { $0.name }.joined(separator: ", ")))")
-        exit(1)
-    }
-    let dest = picked[0]
-    Console.section("Destination", detail: "\(dest.name) [\(dest.link)]")
-    guard dest.passwordAvailable else {
-        Console.error("no encryption password for '\(dest.name)' — the credential files are missing or unreadable")
-        exit(1)
-    }
+    let dest = requireSingleDestination(action: "unlock acts on a single repository at a time")
     let backend = ResticBackend(destination: dest)
 
     let (listCode, ids) = backend.listLockIDs()
@@ -968,7 +952,7 @@ func doctorCommand() {
     }
     for dest in dests {
         guard dest.passwordAvailable else {
-            Console.failure("\(dest.name): no encryption password — the credential files are missing or unreadable")
+            Console.failure("\(dest.name): " + noPasswordNote())
             problems += 1
             continue
         }
