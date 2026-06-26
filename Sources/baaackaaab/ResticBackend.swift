@@ -182,12 +182,31 @@ final class ResticBackend {
                                          onStatus: { bar.update($0) },
                                          onSummary: { bar.finish($0) })
             bar.clear()   // wipe a half-drawn bar if no summary arrived (cancel/fail)
-            if code != 0 { throw ResticError.failed(command: "backup", code: code) }
+            try finishBackup(code: code)
             return
         }
 
         let code = try run(args)
-        if code != 0 { throw ResticError.failed(command: "backup", code: code) }
+        try finishBackup(code: code)
+    }
+
+    /// Interpret a `restic backup` exit code. 0 is a clean success. Exit 3 means
+    /// restic created a VALID but incomplete snapshot because some source files
+    /// could not be read — they changed or vanished mid-backup, which is routine
+    /// against a live iCloud FileProvider / Photos tree. The snapshot landed and
+    /// is restorable, so this is a warning, not a destination failure: returning
+    /// (instead of throwing) keeps the destination marked ok. Any other non-zero
+    /// code is a real failure. A cancel surfaces as 130 here and IS thrown, so the
+    /// caller's isCancelled check turns it into a clean RunCancelled.
+    private func finishBackup(code: Int32) throws {
+        switch code {
+        case 0:
+            return
+        case 3:
+            Console.warn("\(destinationName): restic finished with warnings (exit 3) — a valid snapshot was created, but some source files could not be read (changed or vanished mid-backup). They will be picked up next run.")
+        default:
+            throw ResticError.failed(command: "backup", code: code)
+        }
     }
 
     /// Run `restic backup --json`, parsing the newline-delimited JSON stream and
