@@ -277,14 +277,21 @@ final class ResticBackend {
     }
 
     /// Restore a snapshot into `target`. `dryRun` previews (writes nothing);
-    /// `include` restores only that subpath; `verify` re-reads the restored files
-    /// against the repo afterward. Streams restic's output. This only READS the
-    /// repository — restore never modifies or deletes a snapshot, so it keeps the
-    /// read + append-only invariant. (`--verify` and `--dry-run` are mutually
+    /// `include` restores only that LITERAL subpath; `verify` re-reads the restored
+    /// files against the repo afterward. Streams restic's output. This only READS
+    /// the repository — restore never modifies or deletes a snapshot, so it keeps
+    /// the read + append-only invariant. (`--verify` and `--dry-run` are mutually
     /// exclusive in restic, so verify is dropped on a dry run.)
+    ///
+    /// `--include` is a restic glob (filepath.Match), but every documented use of
+    /// this path passes a literal path the user copied from `--ls`/`--find`. So we
+    /// escape the glob metacharacters (as restoreVerify already does) — otherwise a
+    /// real path like "IMG[1].jpg" would match nothing and silently restore zero
+    /// files (exit 0). Folder subtrees have no metacharacters, so escaping is a
+    /// no-op for them.
     func restore(snapshot: String, target: URL, include: String?, dryRun: Bool, verify: Bool) throws {
         var args = ["restore", snapshot, "--target", target.path]
-        if let include, !include.isEmpty { args += ["--include", include] }
+        if let include, !include.isEmpty { args += ["--include", Self.escapeResticPattern(include)] }
         if dryRun {
             args += ["--dry-run", "--verbose"]
         } else if verify {
