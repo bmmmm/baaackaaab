@@ -99,8 +99,8 @@ the closest to the safety core and is worth doing first.
 
 ## TUI (TTY-only — operator-verifiable, not unit-testable)
 
-- [ ] **Unicode display width: layout counts graphemes, not terminal cells.**
-  `Low-Med`
+- [x] **Unicode display width: layout counts graphemes, not terminal cells.**
+  `Low-Med` — done (operator-verifiable: build green; runtime needs a real TTY)
   - `fit` (ConfigTUI.swift:1643-1647), the reverse-video cursor padding
     (`.padding(toLength: cols, …)` in every render*Row), and `divider`
     (ConfigTUI.swift:1569-1573) all assume 1 character = 1 column. A CJK/emoji

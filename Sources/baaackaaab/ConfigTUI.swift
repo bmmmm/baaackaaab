@@ -1026,7 +1026,7 @@ final class ConfigTUI {
         let text = "  \(s.shortID)  \(shortTime(s.time))  \(tags)"
         var plain = fit(text, cols)
         if cursor {
-            plain = plain.padding(toLength: cols, withPad: " ", startingAt: 0)
+            plain = padToWidth(plain, cols)
             return rev(plain)
         }
         return plain
@@ -1247,7 +1247,7 @@ final class ConfigTUI {
         let text = "  \(tag) \(name)\(sizeStr)"
         var plain = fit(text, cols)
         if cursor {
-            plain = plain.padding(toLength: cols, withPad: " ", startingAt: 0)
+            plain = padToWidth(plain, cols)
             return rev(plain)
         }
         return e.type == "dir" ? cyan(plain) : plain
@@ -1434,7 +1434,7 @@ final class ConfigTUI {
         let box = set.photoAlbums.contains(a.title) ? "[x] " : "[ ] "
         var plain = fit(box + a.title + "  (\(a.count))", cols)
         if cursor {
-            plain = plain.padding(toLength: cols, withPad: " ", startingAt: 0)
+            plain = padToWidth(plain, cols)
             return rev(plain)
         }
         return set.photoAlbums.contains(a.title) ? green(plain) : plain
@@ -1506,7 +1506,7 @@ final class ConfigTUI {
         }
         var plain = fit(text, cols)
         if cursor {
-            plain = plain.padding(toLength: cols, withPad: " ", startingAt: 0)
+            plain = padToWidth(plain, cols)
             return rev(plain)
         }
         switch state {
@@ -1524,7 +1524,7 @@ final class ConfigTUI {
         }
         var plain = fit(text, cols)
         if cursor {
-            plain = plain.padding(toLength: cols, withPad: " ", startingAt: 0)
+            plain = padToWidth(plain, cols)
             return rev(plain)
         }
         return plain
@@ -1568,8 +1568,9 @@ final class ConfigTUI {
     /// `cols` so it reads as a section break (no fit() ellipsis at the end).
     private func divider(_ label: String, _ cols: Int) -> String {
         let head = "\u{2500}\u{2500} " + label
-        if head.count >= cols { return dim(String(head.prefix(cols))) }
-        return dim(head + String(repeating: "\u{2500}", count: cols - head.count))
+        let hw = displayWidth(head)
+        if hw >= cols { return dim(fit(head, cols)) }
+        return dim(head + String(repeating: "\u{2500}", count: cols - hw))
     }
 
     // Pending input bytes. read(2) can hand back a whole burst (a held key, a
@@ -1640,10 +1641,83 @@ final class ConfigTUI {
         return String(format: "%.1f GB", Double(b) / 1_073_741_824)
     }
 
+    // Terminal-cell width, not grapheme count. Folder + album names are
+    // user-controlled and may hold CJK/emoji (2 cells per glyph) or combining
+    // marks (0 cells); counting them as 1 each overflows the fixed-width layout
+    // and smears the reverse-video highlight bar. fit/padToWidth/divider all go
+    // through this. A pragmatic subset of wcwidth — enough for real names without
+    // dragging in a full Unicode width table.
+    private func scalarWidth(_ u: Unicode.Scalar) -> Int {
+        let v = u.value
+        if v == 0 { return 0 }
+        // Combining / zero-width.
+        if (0x0300...0x036F).contains(v)        // combining diacritical marks
+            || (0x1AB0...0x1AFF).contains(v)
+            || (0x1DC0...0x1DFF).contains(v)
+            || (0x20D0...0x20FF).contains(v)    // combining marks for symbols
+            || (0xFE20...0xFE2F).contains(v)    // combining half marks
+            || v == 0x200B || v == 0x200C || v == 0x200D   // ZW space / non-joiner / joiner
+            || v == 0xFEFF {                    // ZW no-break space
+            return 0
+        }
+        // East-Asian Wide / Fullwidth + emoji blocks.
+        if (0x1100...0x115F).contains(v)        // Hangul Jamo
+            || (0x2E80...0x303E).contains(v)    // CJK radicals, Kangxi, punctuation
+            || (0x3041...0x33FF).contains(v)    // Hiragana .. CJK compat
+            || (0x3400...0x4DBF).contains(v)    // CJK Ext A
+            || (0x4E00...0x9FFF).contains(v)    // CJK Unified
+            || (0xA000...0xA4CF).contains(v)    // Yi
+            || (0xAC00...0xD7A3).contains(v)    // Hangul syllables
+            || (0xF900...0xFAFF).contains(v)    // CJK compat ideographs
+            || (0xFE30...0xFE4F).contains(v)    // CJK compat forms
+            || (0xFF00...0xFF60).contains(v)    // Fullwidth forms
+            || (0xFFE0...0xFFE6).contains(v)    // Fullwidth signs
+            || (0x1F300...0x1FAFF).contains(v)  // emoji & symbols
+            || (0x20000...0x3FFFD).contains(v) {// CJK Ext B+
+            return 2
+        }
+        return 1
+    }
+
+    /// Cell width of one grapheme cluster: 2 if it contains any wide scalar (an
+    /// emoji ZWJ sequence or flag collapses to 2, not the sum of its parts), 1 for
+    /// a normal cluster, 0 for a pure combining/zero-width cluster.
+    private func charWidth(_ ch: Character) -> Int {
+        var width = 0
+        for u in ch.unicodeScalars {
+            let sw = scalarWidth(u)
+            if sw == 2 { return 2 }
+            if sw == 1 { width = 1 }
+        }
+        return width
+    }
+
+    private func displayWidth(_ s: String) -> Int {
+        var w = 0
+        for ch in s { w += charWidth(ch) }
+        return w
+    }
+
+    /// Pad `s` with trailing spaces to exactly `width` terminal cells. Unlike
+    /// String.padding(toLength:), which counts graphemes, this counts cells, so a
+    /// CJK/emoji name lands on the right column instead of overshooting.
+    private func padToWidth(_ s: String, _ width: Int) -> String {
+        let w = displayWidth(s)
+        return w >= width ? s : s + String(repeating: " ", count: width - w)
+    }
+
     private func fit(_ s: String, _ width: Int) -> String {
-        if s.count <= width { return s }
-        if width <= 1 { return String(s.prefix(max(0, width))) }
-        return String(s.prefix(width - 1)) + "\u{2026}"
+        if width <= 0 { return "" }
+        if displayWidth(s) <= width { return s }
+        if width == 1 { return "\u{2026}" }   // the ellipsis itself is one cell
+        // Keep clusters until the next one would leave no room for the ellipsis.
+        var out = "", used = 0
+        for ch in s {
+            let cw = charWidth(ch)
+            if used + cw > width - 1 { break }
+            out.append(ch); used += cw
+        }
+        return out + "\u{2026}"
     }
 
     private func clamp(_ v: inout Int, _ count: Int) {
