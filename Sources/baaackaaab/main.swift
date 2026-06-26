@@ -150,13 +150,18 @@ if cli.has("--snapshots") {
 }
 
 // Locate a file inside a snapshot by name/glob (single-file restore discovery).
-if cli.value("--find") != nil {
+// Dispatch on the flag's PRESENCE, not on a non-nil value: `--find` with no
+// pattern (a forgotten argument) must route into findCommand and fail loudly
+// there, never fall through the dispatch chain to a full backup of the set.
+if cli.has("--find") {
     findCommand()
     exit(0)
 }
 
 // Browse a snapshot's contents (read-only). The listed paths feed --restore --include.
-if cli.value("--ls") != nil {
+// `--ls` with no id is valid (defaults to the latest snapshot); dispatch on
+// presence so a bare `--ls` browses latest instead of falling through to a backup.
+if cli.has("--ls") {
     lsCommand()
     exit(0)
 }
@@ -187,11 +192,22 @@ if cli.has("--list-destinations") {
     listDestinations()
     exit(0)
 }
-if let name = cli.value("--add-destination") {
+// Dispatch on presence and validate the value inside: `--add-destination` /
+// `--remove-destination` with a missing name must fail loudly here, never skip
+// the dispatch and fall through to a backup of the set.
+if cli.has("--add-destination") {
+    guard let name = cli.value("--add-destination"), !name.isEmpty else {
+        Console.error("--add-destination needs a name, e.g. --add-destination offsite")
+        exit(1)
+    }
     addDestination(name: name)
     exit(0)
 }
-if let name = cli.value("--remove-destination") {
+if cli.has("--remove-destination") {
+    guard let name = cli.value("--remove-destination"), !name.isEmpty else {
+        Console.error("--remove-destination needs a name — list the configured ones with --list-destinations")
+        exit(1)
+    }
     removeDestination(name: name)
     exit(0)
 }
