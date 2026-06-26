@@ -81,7 +81,7 @@ the closest to the safety core and is worth doing first.
   - Fix sketch: after the 5 s grace, `kill(proc.processIdentifier, SIGKILL)` if
     still running.
 
-- [ ] **`RunHistory.append` is not locked against concurrent runs.** `Low`
+- [x] **`RunHistory.append` is not locked against concurrent runs.** `Low` — done
   - `seekToEnd` + `write` without `flock`/`O_APPEND` (RunHistory.swift:67-81). Two
     concurrent processes can seek to the same offset and one overwrites the
     other's line. Concurrent backups are rare (restic repo-locks anyway) and the

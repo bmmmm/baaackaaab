@@ -9,6 +9,18 @@ import Foundation
 // name + ok flag + (already-redacted) restic error string. Written 0600 anyway,
 // to match the rest of the store.
 
+enum RunHistoryError: Error, CustomStringConvertible {
+    case cannotOpen(String)
+    case shortWrite(written: Int, expected: Int)
+
+    var description: String {
+        switch self {
+        case .cannotOpen(let why): return "could not open run history for append: \(why)"
+        case .shortWrite(let w, let e): return "run history append was truncated (\(w)/\(e) bytes)"
+        }
+    }
+}
+
 /// One recorded backup run. Times are ISO-8601; `exitCode` mirrors the process
 /// exit (0 ok, 2 partial/failed, 1 crashed early, 130 cancelled).
 struct RunRecord: Codable {
@@ -74,10 +86,21 @@ enum RunHistory {
             fm.createFile(atPath: file.path, contents: nil,
                           attributes: [.posixPermissions: 0o600])
         }
-        let fh = try FileHandle(forWritingTo: file)
-        defer { try? fh.close() }
-        try fh.seekToEnd()
-        try fh.write(contentsOf: data)
+        // O_APPEND makes the kernel seek-to-end and write atomically per write(2),
+        // so two concurrent runs (rare — restic repo-locks anyway) can't seek to
+        // the same offset and clobber each other's line. The record is one short
+        // NDJSON line written in a single write call, which preserves that
+        // atomicity (a partial write split could interleave with another writer).
+        let fd = open(file.path, O_WRONLY | O_APPEND)
+        guard fd >= 0 else { throw RunHistoryError.cannotOpen(String(cString: strerror(errno))) }
+        defer { close(fd) }
+        let written = data.withUnsafeBytes { ptr -> Int in
+            guard let base = ptr.baseAddress else { return 0 }
+            return write(fd, base, data.count)
+        }
+        guard written == data.count else {
+            throw RunHistoryError.shortWrite(written: written, expected: data.count)
+        }
     }
 
     /// The last `limit` records, newest first, for the dashboard. Tolerant of a
