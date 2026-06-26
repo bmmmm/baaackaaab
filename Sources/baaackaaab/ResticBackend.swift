@@ -151,14 +151,20 @@ final class ResticBackend {
         if code != 0 { throw ResticError.failed(command: "init", code: code) }
     }
 
-    /// Back up the given paths into a single snapshot. restic output streams
-    /// live to the terminal so progress is visible. `dryRun` passes
+    /// Back up the given paths into a single snapshot. `dryRun` passes
     /// `--dry-run --verbose` so restic reports what WOULD be backed up (new /
     /// changed bytes) and uploads nothing — a true preview that touches the repo
     /// read-only. `limitUploadKiBps`, when > 0, throttles the upload via
     /// `--limit-upload` (KiB/s); it is irrelevant on a dry run (nothing uploads).
+    ///
+    /// `showProgress` (a real backup on a TTY) switches restic to `--json` and
+    /// renders a parsed, self-rewriting progress bar; otherwise restic's own
+    /// output streams straight to the terminal. The dry-run path always keeps the
+    /// plain `--verbose` output — there its value is the file list, not a bar — and
+    /// off a TTY (launchd / a pipe) we never use --json so the log stays readable.
     func backup(paths: [URL], tags: [String], host: String?,
-                dryRun: Bool = false, limitUploadKiBps: Int? = nil) throws {
+                dryRun: Bool = false, limitUploadKiBps: Int? = nil,
+                showProgress: Bool = false) throws {
         var args = ["backup", "--compression", "auto"]
         if let limitUploadKiBps, limitUploadKiBps > 0, !dryRun {
             args += ["--limit-upload", String(limitUploadKiBps)]
@@ -171,8 +177,94 @@ final class ResticBackend {
         let names = paths.map { $0.lastPathComponent }.joined(separator: ", ")
         let mode = dryRun ? " (dry run — nothing uploaded)" : ""
         Console.step("restic: backup [\(names)] tags=\(tags.joined(separator: ","))\(mode)")
+
+        if showProgress && !dryRun {
+            let bar = BackupProgressBar(label: destinationName)
+            let code = try runBackupJSON(args + ["--json"],
+                                         onStatus: { bar.update($0) },
+                                         onSummary: { bar.finish($0) })
+            bar.clear()   // wipe a half-drawn bar if no summary arrived (cancel/fail)
+            if code != 0 { throw ResticError.failed(command: "backup", code: code) }
+            return
+        }
+
         let code = try run(args)
         if code != 0 { throw ResticError.failed(command: "backup", code: code) }
+    }
+
+    /// Run `restic backup --json`, parsing the newline-delimited JSON stream and
+    /// forwarding status / summary messages to the caller (which renders the bar).
+    /// Returns restic's exit code. stderr is left inherited so restic's warnings /
+    /// errors stay visible alongside the bar. The child is registered with
+    /// BackupCancellation exactly like `run`, so Ctrl-C interrupts restic (exit
+    /// 130) instead of hard-killing us; the pipe then hits EOF and the loop ends.
+    private func runBackupJSON(_ args: [String],
+                               onStatus: (ResticStatus) -> Void,
+                               onSummary: (ResticSummary) -> Void) throws -> Int32 {
+        guard let exe = executablePath else { throw ResticError.notFound }
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: exe)
+        proc.arguments = args
+        proc.environment = environment   // this destination's repo + password
+        let outPipe = Pipe()
+        proc.standardOutput = outPipe
+        proc.standardError = FileHandle.standardError   // keep restic's diagnostics visible
+        proc.standardInput = FileHandle.nullDevice      // never block on a password prompt
+        do { try proc.run() } catch { throw ResticError.notFound }
+        BackupCancellation.shared.setCurrent(proc)
+        defer { BackupCancellation.shared.clearCurrent(proc) }
+
+        // Read stdout line by line. `availableData` blocks until data arrives or
+        // returns empty at EOF; we split the rolling buffer on '\n' so a JSON
+        // object spanning two reads is still decoded once it completes.
+        let reader = outPipe.fileHandleForReading
+        var buffer = Data()
+        while true {
+            let chunk = reader.availableData
+            if chunk.isEmpty { break }   // EOF — restic exited and closed the pipe
+            buffer.append(chunk)
+            while let nl = buffer.firstIndex(of: 0x0A) {
+                let line = buffer.subdata(in: buffer.startIndex..<nl)
+                buffer.removeSubrange(buffer.startIndex...nl)
+                Self.dispatchJSONLine(line, onStatus: onStatus, onSummary: onSummary)
+            }
+        }
+        if !buffer.isEmpty {
+            Self.dispatchJSONLine(buffer, onStatus: onStatus, onSummary: onSummary)
+        }
+        proc.waitUntilExit()
+        return proc.terminationStatus
+    }
+
+    /// Decode one `restic backup --json` line and dispatch it by message_type.
+    /// Non-JSON lines and types we don't render (e.g. verbose_status) are ignored;
+    /// `error` messages are echoed to stderr so a failure isn't swallowed.
+    private static func dispatchJSONLine(_ data: Data,
+                                         onStatus: (ResticStatus) -> Void,
+                                         onSummary: (ResticSummary) -> Void) {
+        guard !data.isEmpty,
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let type = obj["message_type"] as? String else { return }
+        func int(_ k: String) -> Int { (obj[k] as? NSNumber)?.intValue ?? 0 }
+        func dbl(_ k: String) -> Double { (obj[k] as? NSNumber)?.doubleValue ?? 0 }
+        switch type {
+        case "status":
+            onStatus(ResticStatus(
+                percentDone: dbl("percent_done"), totalFiles: int("total_files"),
+                filesDone: int("files_done"), totalBytes: int("total_bytes"),
+                bytesDone: int("bytes_done")))
+        case "summary":
+            onSummary(ResticSummary(
+                filesNew: int("files_new"), filesChanged: int("files_changed"),
+                dataAdded: int("data_added"), totalDuration: dbl("total_duration"),
+                snapshotID: obj["snapshot_id"] as? String))
+        case "error":
+            let msg = (obj["error"] as? [String: Any])?["message"] as? String
+                ?? (obj["error"] as? String) ?? "unknown error"
+            FileHandle.standardError.write(Data(("\nrestic: " + msg + "\n").utf8))
+        default:
+            break   // verbose_status and any future types: not rendered
+        }
     }
 
     /// Read-only existence probe: true when the repository is present and

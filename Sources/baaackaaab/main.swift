@@ -78,7 +78,7 @@ func printUsage() {
         ("--clear-limit-upload", "remove the upload throttle"),
         ("--config <path>", "backup-set file (default ~/.config/baaackaaab/backup-set.json)"),
     ])
-    Console.note("A bare `baaackaaab` (no source flags) backs up the set; the launchd timer runs exactly that. Explicit --drive-folder/--photo-album override the set for ad-hoc runs. Add --dry-run to preview a backup (reports what would upload, writes nothing; Photos are skipped in a dry run).")
+    Console.note("A bare `baaackaaab` (no source flags) backs up the set; the launchd timer runs exactly that. Explicit --drive-folder/--photo-album override the set for ad-hoc runs. Add --dry-run to preview a backup (reports what would upload, writes nothing; Photos are skipped in a dry run). On a terminal a real backup shows a live progress bar (percent, bytes, ETA); piped or under the timer it logs restic's plain output.")
 
     Console.section("Restic target")
     Console.info([
@@ -1294,12 +1294,17 @@ do {
     // the run. (Parallel-by-link is a later slice; this is the sequential base.)
     // The ONLY thing it throws is RunCancelled — a real restic failure is recorded
     // and swallowed, but a cancel must propagate so the run stops launching work.
+    // A real backup on a TTY renders the parsed `restic backup --json` progress
+    // bar; a dry run (file-list preview) and any non-TTY run (launchd / a pipe)
+    // keep restic's plain output so logs stay readable.
+    let showProgress = isatty(STDOUT_FILENO) != 0 && !backupDryRun
     func backupToAll(paths: [URL], tags: [String], label: String) throws {
         for run in ready {
             if BackupCancellation.shared.isCancelled { throw RunCancelled() }
             do {
                 try run.backend.backup(paths: paths, tags: tags, host: host,
-                                       dryRun: backupDryRun, limitUploadKiBps: configLimitUploadKiBps)
+                                       dryRun: backupDryRun, limitUploadKiBps: configLimitUploadKiBps,
+                                       showProgress: showProgress)
             } catch {
                 // A cancel interrupts restic into a non-zero (130) exit; treat that
                 // as cancellation, not as this destination's own backup failure.
