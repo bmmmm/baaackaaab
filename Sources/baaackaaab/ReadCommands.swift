@@ -159,6 +159,18 @@ func restoreSourceLabel(_ tags: [String]) -> String {
     return "unknown"
 }
 
+/// Count regular files anywhere under `dir` (recursive). Distinguishes a restore
+/// that actually wrote files from one that matched nothing yet still exited 0.
+func regularFileCount(under dir: URL) -> Int {
+    guard let en = FileManager.default.enumerator(
+        at: dir, includingPropertiesForKeys: [.isRegularFileKey], options: []) else { return 0 }
+    var n = 0
+    for case let u as URL in en {
+        if (try? u.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true { n += 1 }
+    }
+    return n
+}
+
 /// Restore a snapshot from ONE destination into a fresh directory. Safe by
 /// construction (see RestoreEngine): the target is validated (never live iCloud
 /// Drive / Photos, never an existing non-empty dir), the operation is previewed
@@ -251,6 +263,23 @@ func restoreCommand() {
         try backend.restore(snapshot: snapshot, target: target, include: include, dryRun: false, verify: verify)
     } catch {
         Console.error("restore failed: \(error)")
+        exit(1)
+    }
+
+    // restic exits 0 even when an --include matched nothing — a mistyped subpath, or
+    // a path whose glob metacharacters were escaped to a literal no file equals — so
+    // it writes an empty tree and reports success. An empty target is a FAILED
+    // restore, not a silent success: catch it and point at how to find the real path.
+    if regularFileCount(under: target) == 0 {
+        Console.summary(
+            headline: "restore wrote no files — nothing in snapshot \(snapshot) matched\(include.map { " --include \($0)" } ?? "")",
+            state: .fail,
+            details: [
+                ("target", target.path),
+                ("next", include != nil
+                    ? "copy an exact path from `baaackaaab --ls \(snapshot)` or `--find <name>` and pass it verbatim to --include"
+                    : "the snapshot appears to have no files — check `baaackaaab --snapshots`"),
+            ])
         exit(1)
     }
 
