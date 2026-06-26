@@ -29,30 +29,6 @@ enum Keychain {
         }
     }
 
-    /// Store or replace a generic-password item for `account`.
-    static func set(account: String, value: String) throws {
-        let data = Data(value.utf8)
-        let match: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-        ]
-        let update: [String: Any] = [
-            kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
-        ]
-        let status = SecItemUpdate(match as CFDictionary, update as CFDictionary)
-        if status == errSecItemNotFound {
-            var add = match
-            add[kSecValueData as String] = data
-            add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
-            let addStatus = SecItemAdd(add as CFDictionary, nil)
-            guard addStatus == errSecSuccess else { throw KeychainError.unexpectedStatus(addStatus) }
-        } else if status != errSecSuccess {
-            throw KeychainError.unexpectedStatus(status)
-        }
-    }
-
     /// Read a generic-password item, or nil if it is not present.
     static func get(account: String) throws -> String? {
         let query: [String: Any] = [

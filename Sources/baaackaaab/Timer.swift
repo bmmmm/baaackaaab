@@ -22,11 +22,6 @@ struct Schedule {
     var times: [(hour: Int, minute: Int)]
     var weekdays: [Int]   // empty = daily
 
-    /// The historical default: a single time, every day.
-    static func daily(hour: Int, minute: Int) -> Schedule {
-        Schedule(times: [(hour, minute)], weekdays: [])
-    }
-
     /// Short three-letter weekday name (Sun…Sat) for a launchd weekday number.
     static func weekdayName(_ wd: Int) -> String {
         let names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
