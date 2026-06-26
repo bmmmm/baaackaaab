@@ -294,6 +294,18 @@ final class ResticBackend {
         if code != 0 { throw ResticError.failed(command: "restore", code: code) }
     }
 
+    /// Restore specific paths (each passed as `--include`) into `target` WITH
+    /// `--verify`, capturing the exit code and combined output instead of throwing
+    /// — for the sampled test-restore, where a non-zero exit IS the result to
+    /// report. restic recreates each file at `target` + its original absolute path,
+    /// then re-reads it against the repo. Read-only towards the repository; the
+    /// caller restores into (and then deletes) a throwaway temp dir.
+    func restoreVerify(snapshot: String, target: URL, includes: [String]) -> (code: Int32, output: String) {
+        var args = ["restore", snapshot, "--target", target.path, "--verify"]
+        for inc in includes where !inc.isEmpty { args += ["--include", inc] }
+        return runCapturingResult(args)
+    }
+
     /// The outcome of a `restic check` integrity pass.
     struct CheckResult {
         /// restic exited 0 — no integrity problems were reported.

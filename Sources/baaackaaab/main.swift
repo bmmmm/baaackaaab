@@ -116,6 +116,9 @@ func printUsage() {
         ("--diff <a> <b>", "show what changed between two snapshots (needs one --destination), then exit"),
         ("--find <pattern>", "locate a file in a snapshot (single-file restore discovery), then exit"),
         ("--restore", "restore a snapshot into a fresh directory (preview → confirm → verify)"),
+        ("--test-restore", "restore a random file sample into a temp dir + verify (proves restorability), then exit"),
+        ("--sample <n>", "with --test-restore, how many files to sample (default 10)"),
+        ("--max-bytes <n>", "with --test-restore, byte budget for the sample (default 1000000000)"),
         ("--destination <name>", "source destination (required when several are configured)"),
         ("--snapshot <id>", "which snapshot to find/restore (short id; default 'latest')"),
         ("--target <dir>", "restore into this dir (default: ~/baaackaaab-restore/<snap>-<stamp>)"),
@@ -626,6 +629,103 @@ func restoreCommand() {
             ("target", target.path),
             ("next", restoreSourceNote(restoredTags)),
         ])
+}
+
+/// Sampled test-restore: prove a destination's backup is actually RESTORABLE, not
+/// just structurally intact. Restores a random, budget-bounded sample of files
+/// from a snapshot into a throwaway temp dir WITH --verify (re-reads them against
+/// the repo), confirms they landed non-empty, then deletes the temp dir. Stronger
+/// than --verify-repo because it exercises the full read → decrypt → write →
+/// re-verify path end to end. Strictly read-only towards the repository; writes
+/// only to its own temp dir. Acts on ONE destination.
+func testRestoreCommand() {
+    Console.banner("baaackaaab", tagline: "test-restore — prove a backup is restorable")
+    let snapshot = argValue("--snapshot") ?? "latest"
+    let sampleCount = max(1, argValue("--sample").flatMap { Int($0) } ?? 10)
+    let budget = argValue("--max-bytes").flatMap { Int($0) } ?? 1_000_000_000
+
+    let picked = destinationsForCommand()
+    guard picked.count == 1 else {
+        Console.error("choose ONE destination with --destination <name> — test-restore checks a single repository (configured: \(picked.map { $0.name }.joined(separator: ", ")))")
+        exit(1)
+    }
+    let dest = picked[0]
+    Console.section("Destination", detail: "\(dest.name) [\(dest.link)]")
+    guard dest.passwordAvailable else {
+        Console.error("no encryption password for '\(dest.name)' — the credential files are missing or unreadable")
+        exit(1)
+    }
+    let backend = ResticBackend(destination: dest)
+
+    // 1) Enumerate the snapshot's files; pick a random, budget-bounded sample.
+    let entries: [ResticBackend.LsEntry]
+    do { entries = try backend.ls(snapshot: snapshot, path: nil) }
+    catch { Console.error("could not list snapshot \(snapshot): \(error)"); exit(1) }
+    let files = entries.filter { $0.type == "file" && ($0.size ?? 0) > 0 }
+    guard !files.isEmpty else {
+        Console.error("snapshot \(snapshot) has no non-empty files to test")
+        exit(1)
+    }
+    var sample: [ResticBackend.LsEntry] = []
+    var bytes = 0, skippedBudget = 0
+    for f in files.shuffled() {
+        if sample.count >= sampleCount { break }
+        let sz = f.size ?? 0
+        if !sample.isEmpty && bytes + sz > budget { skippedBudget += 1; continue }
+        sample.append(f); bytes += sz
+    }
+    let sampledHuman = ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
+    Console.step("sampling \(sample.count) of \(files.count) file(s) from snapshot \(snapshot) (\(sampledHuman))")
+    if skippedBudget > 0 {
+        let budgetHuman = ByteCountFormatter.string(fromByteCount: Int64(budget), countStyle: .file)
+        Console.note("\(skippedBudget) file(s) skipped to stay under the \(budgetHuman) test budget (raise with --max-bytes)")
+    }
+
+    // 2) Throwaway temp target, auto-removed. Validated like any restore target
+    //    (never live iCloud Drive / Photos), but it lives under the temp dir.
+    let stampFmt = DateFormatter()
+    stampFmt.locale = Locale(identifier: "en_US_POSIX")
+    stampFmt.dateFormat = "yyyyMMdd-HHmmss"
+    let target = FileManager.default.temporaryDirectory
+        .appendingPathComponent("baaackaaab-test-restore-\(stampFmt.string(from: Date()))", isDirectory: true)
+    do { try RestoreEngine.validateTarget(target); try RestoreEngine.ensureTargetDir(target) }
+    catch { Console.error("\(error)"); exit(1) }
+    defer { try? FileManager.default.removeItem(at: target) }
+
+    // 3) Restore the sample WITH --verify (restic re-reads each restored file
+    //    against the repo). A non-zero exit means the backup is not cleanly
+    //    restorable — that IS the test result.
+    Console.step("restoring + verifying into a throwaway temp dir")
+    let (code, out) = backend.restoreVerify(snapshot: snapshot, target: target, includes: sample.map { $0.path })
+    if code != 0 {
+        for line in out.split(separator: "\n").suffix(8) { Console.detail(String(line)) }
+        Console.summary(headline: "test-restore FAILED — restic exited \(code); the backup may not be cleanly restorable",
+                        state: .fail, details: [("snapshot", snapshot), ("next", "investigate with --verify-repo; check the destination is reachable")])
+        exit(1)
+    }
+
+    // 4) Belt-and-braces: restic recreates each file at target + its original
+    //    absolute path; confirm each sampled file landed non-empty on disk.
+    var present = 0
+    var missing: [String] = []
+    for f in sample {
+        let landed = target.path + f.path   // f.path is absolute (leading /)
+        let size = (try? FileManager.default.attributesOfItem(atPath: landed))
+            .flatMap { ($0[.size] as? NSNumber)?.intValue } ?? 0
+        if size > 0 { present += 1 } else { missing.append(f.path) }
+    }
+    if present == sample.count {
+        Console.summary(
+            headline: "test-restore PASSED — \(present)/\(sample.count) sampled file(s) restored and verified from \(dest.name)",
+            state: .ok,
+            details: [("snapshot", snapshot), ("sampled", sampledHuman), ("temp", "removed")])
+    } else {
+        for m in missing.prefix(10) { Console.detail("missing/empty after restore: \(m)") }
+        Console.summary(
+            headline: "test-restore FAILED — only \(present)/\(sample.count) sampled file(s) landed non-empty",
+            state: .fail, details: [("snapshot", snapshot)])
+        exit(1)
+    }
 }
 
 /// Verify repository integrity with `restic check`, per destination (all, or just
@@ -1160,6 +1260,13 @@ if CommandLine.arguments.contains("--diff") {
 // confirms, restores, verifies. Never writes into live iCloud Drive / Photos.
 if CommandLine.arguments.contains("--restore") {
     restoreCommand()
+    exit(0)
+}
+
+// Sampled test-restore: prove a backup is restorable by restoring a random
+// sample into a throwaway temp dir + verify, then deleting it. Read-only on the repo.
+if CommandLine.arguments.contains("--test-restore") {
+    testRestoreCommand()
     exit(0)
 }
 
