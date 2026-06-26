@@ -701,7 +701,8 @@ final class ConfigTUI {
     /// wait for a key and return to the current screen. Same screen dance as
     /// dryRunNow(). `label` names the action in the "press any key" footer and any
     /// non-zero status line.
-    private func runChildAndWait(_ args: [String], label: String) {
+    @discardableResult
+    private func runChildAndWait(_ args: [String], label: String) -> Int32 {
         emit("\u{1B}[?25h\u{1B}[?1049l")   // show cursor, leave the alternate screen
         term.restore()
         let proc = Process()
@@ -716,6 +717,7 @@ final class ConfigTUI {
         reclaimForeground()
         emit("\u{1B}[?1049h\u{1B}[?25l")   // back into the alternate screen
         statusMsg = code == 0 ? "" : "\(label) exited with code \(code)"
+        return code
     }
 
     // MARK: - Timer screen
@@ -760,6 +762,11 @@ final class ConfigTUI {
         if timerState.installed {
             body.append(green(fit("  installed" + (timerState.loaded ? " + loaded" : " (not loaded)"), cols)))
             if let cur = timerCurrent { body.append(dim(fit("  current: " + cur.describe(), cols))) }
+            // The editor handles a single time; warn before it silently collapses a
+            // multi-time CLI schedule down to the one edited here on install.
+            if (timerCurrent?.times.count ?? 0) > 1 {
+                body.append(yellow(fit("  note: current has several times; the editor sets one — installing replaces all with it (use --at repeatedly on the CLI for several)", cols)))
+            }
         } else {
             body.append(dim(fit("  not installed", cols)))
         }
@@ -836,16 +843,17 @@ final class ConfigTUI {
             args += ["--days", timerWeekdays.sorted().map { names[$0] }.joined(separator: ",")]
         }
         if configPath.path != BackupSet.defaultPath().path { args += ["--config", configPath.path] }
-        runChildAndWait(args, label: "install-timer")
+        let code = runChildAndWait(args, label: "install-timer")
         refreshTimerState()
-        statusMsg = "timer: " + previewSchedule().describe()
+        if code == 0 { statusMsg = "timer: " + previewSchedule().describe() }
+        // on failure runChildAndWait already set an actionable "exited with code N"
     }
 
     /// Remove the launchd schedule via the tested CLI, then refresh cached state.
     private func uninstallTimerNow() {
-        runChildAndWait(["--uninstall-timer"], label: "uninstall-timer")
+        let code = runChildAndWait(["--uninstall-timer"], label: "uninstall-timer")
         refreshTimerState()
-        statusMsg = "timer removed"
+        if code == 0 { statusMsg = "timer removed" }
     }
 
     /// Read-only refresh of the remote panel: query EVERY enabled destination so

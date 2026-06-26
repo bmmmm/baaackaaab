@@ -302,8 +302,25 @@ final class ResticBackend {
     /// caller restores into (and then deletes) a throwaway temp dir.
     func restoreVerify(snapshot: String, target: URL, includes: [String]) -> (code: Int32, output: String) {
         var args = ["restore", snapshot, "--target", target.path, "--verify"]
-        for inc in includes where !inc.isEmpty { args += ["--include", inc] }
+        for inc in includes where !inc.isEmpty { args += ["--include", Self.escapeResticPattern(inc)] }
         return runCapturingResult(args)
+    }
+
+    /// Escape restic include-pattern metacharacters so an EXACT file path matches
+    /// itself literally. restic treats `--include` as a glob (filepath.Match-style:
+    /// `*`, `?`, `[...]`, with `\` as the escape char), so a path containing those
+    /// characters — common in Photos/iCloud exports, e.g. "IMG[1].jpg" — would
+    /// otherwise match nothing and silently restore zero files (exit 0). The
+    /// test-restore passes literal paths, so backslash-escape the metacharacters
+    /// (and the escape char itself) to force a literal match.
+    private static func escapeResticPattern(_ s: String) -> String {
+        var out = ""
+        out.reserveCapacity(s.count)
+        for ch in s {
+            if ch == "\\" || ch == "*" || ch == "?" || ch == "[" || ch == "]" { out.append("\\") }
+            out.append(ch)
+        }
+        return out
     }
 
     /// The outcome of a `restic check` integrity pass.
