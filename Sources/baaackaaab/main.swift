@@ -720,7 +720,9 @@ func testRestoreCommand() {
     Console.step("restoring + verifying into a throwaway temp dir")
     let (code, out) = backend.restoreVerify(snapshot: snapshot, target: target, includes: sample.map { $0.path })
     if code != 0 {
-        for line in out.split(separator: "\n").suffix(8) { Console.detail(String(line)) }
+        // restic can echo the repository location (which embeds the endpoint
+        // password) into its diagnostics — redact before printing.
+        for line in out.split(separator: "\n").suffix(8) { Console.detail(Credentials.redact(String(line))) }
         Console.summary(headline: "test-restore FAILED — restic exited \(code); the backup may not be cleanly restorable",
                         state: .fail, details: [("snapshot", snapshot), ("next", "investigate with --verify-repo; check the destination is reachable")])
         exit(1)
@@ -786,7 +788,9 @@ func verifyRepoCommand() {
             let lines = result.errorLines.isEmpty
                 ? result.output.split(separator: "\n").map(String.init).suffix(10).map { $0 }
                 : Array(result.errorLines.prefix(20))
-            for line in lines { Console.detail(line) }
+            // restic may print the repository location (with the embedded
+            // endpoint password) in its check output — redact each line.
+            for line in lines { Console.detail(Credentials.redact(line)) }
             Console.note("a damaged repo is fixed SERVER-side (restic prune/repair runs with a delete-capable key on the host that owns the repo) — never from this Mac, which has no delete right.")
         }
     }
@@ -864,10 +868,14 @@ func unlockCommand() {
     let (code, out) = backend.unlock(removeAll: removeAll)
     let trimmed = out.trimmingCharacters(in: .whitespacesAndNewlines)
     if code == 0 {
-        if !trimmed.isEmpty { Console.detail(trimmed) }
+        // restic's unlock output can carry the repository location (and its
+        // embedded endpoint password) — redact per line before surfacing it.
+        if !trimmed.isEmpty {
+            for line in trimmed.split(separator: "\n") { Console.detail(Credentials.redact(String(line))) }
+        }
         Console.success(removeAll ? "unlock complete — all locks removed" : "unlock complete — stale lock(s) removed")
     } else {
-        for line in trimmed.split(separator: "\n").suffix(8) { Console.detail(String(line)) }
+        for line in trimmed.split(separator: "\n").suffix(8) { Console.detail(Credentials.redact(String(line))) }
         Console.error("unlock failed (restic exit \(code)). A 403/forbidden means the server's append-only mode does not carve out the lock prefix — locks can then only be cleared with a delete-capable key on the host. Nothing was changed.")
         exit(1)
     }
