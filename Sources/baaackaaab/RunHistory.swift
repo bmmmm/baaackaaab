@@ -94,12 +94,33 @@ enum RunHistory {
         let fd = open(file.path, O_WRONLY | O_APPEND)
         guard fd >= 0 else { throw RunHistoryError.cannotOpen(String(cString: strerror(errno))) }
         defer { close(fd) }
-        let written = data.withUnsafeBytes { ptr -> Int in
-            guard let base = ptr.baseAddress else { return 0 }
-            return write(fd, base, data.count)
+
+        // Capture the pre-write size so a partial/failed write can be rolled back.
+        // A single write(2) may return fewer bytes than requested (a near-full disk,
+        // a signal), leaving a newline-less fragment; the NEXT O_APPEND record would
+        // then concatenate onto it, merging two JSON objects into one undecodable
+        // line and losing BOTH. So we loop until every byte lands and, on any error,
+        // ftruncate the fragment back off — the file stays a clean sequence of whole
+        // NDJSON lines (recent() only tolerates a truncated TRAILING line, not a
+        // fragment in the middle).
+        var st = stat()
+        let preSize: off_t = fstat(fd, &st) == 0 ? st.st_size : -1
+
+        let count = data.count
+        var total = 0
+        let ok = data.withUnsafeBytes { raw -> Bool in
+            guard let base = raw.baseAddress else { return false }
+            while total < count {
+                let n = write(fd, base + total, count - total)
+                if n > 0 { total += n; continue }
+                if n < 0 && errno == EINTR { continue }   // interrupted — retry
+                return false                               // real error — give up
+            }
+            return true
         }
-        guard written == data.count else {
-            throw RunHistoryError.shortWrite(written: written, expected: data.count)
+        guard ok && total == count else {
+            if preSize >= 0 { ftruncate(fd, preSize) }
+            throw RunHistoryError.shortWrite(written: total, expected: count)
         }
     }
 
