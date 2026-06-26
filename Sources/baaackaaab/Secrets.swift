@@ -111,15 +111,25 @@ enum Credentials {
     /// userinfo when there is no colon (e.g. `rest:https://TOKEN@host`) — that
     /// token-as-username form must not leak either. Returns the input unchanged
     /// only when there is no `scheme://…@host` userinfo at all.
+    ///
+    /// The userinfo is delimited by the LAST `@` in the authority (the segment
+    /// between `://` and the first `/`), not the first `@` anywhere: the URL embeds
+    /// a raw, un-percent-encoded password (see repoURL(password:)), so a password
+    /// containing `@` would, with a first-`@` split, leave its tail unmasked. Bounding
+    /// the search to the authority also stops a `@` in the PATH from being mistaken
+    /// for the userinfo delimiter.
     static func redact(_ repoURL: String) -> String {
-        guard let scheme = repoURL.range(of: "://"),
-              let at = repoURL.range(of: "@", range: scheme.upperBound..<repoURL.endIndex)
-        else { return repoURL }
-        let userinfo = repoURL[scheme.upperBound..<at.lowerBound]
+        guard let scheme = repoURL.range(of: "://") else { return repoURL }
+        let afterScheme = scheme.upperBound
+        let authorityEnd = repoURL.range(of: "/", range: afterScheme..<repoURL.endIndex)?.lowerBound
+            ?? repoURL.endIndex
+        let authority = repoURL[afterScheme..<authorityEnd]
+        guard let at = authority.lastIndex(of: "@") else { return repoURL }
+        let userinfo = repoURL[afterScheme..<at]
         if let colon = userinfo.firstIndex(of: ":") {
-            return String(repoURL[..<repoURL.index(after: colon)]) + "***" + String(repoURL[at.lowerBound...])
+            return String(repoURL[..<repoURL.index(after: colon)]) + "***" + String(repoURL[at...])
         }
-        return String(repoURL[..<scheme.upperBound]) + "***" + String(repoURL[at.lowerBound...])
+        return String(repoURL[..<afterScheme]) + "***" + String(repoURL[at...])
     }
 
     /// Compute the bcrypt `user:$2y$…` htpasswd line for the server. The
