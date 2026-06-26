@@ -196,16 +196,24 @@ enum CredentialFiles {
         return !data.isEmpty
     }
 
-    /// Write `value` to `file` created with `0600` from the start (no
-    /// world-readable window), the directory `0700`. No trailing newline —
-    /// restic strips one anyway, but an exact byte image is cleaner.
+    /// Atomically write `value` to `file` created with `0600` from the start (no
+    /// world-readable window), the directory `0700`. No trailing newline — restic
+    /// strips one anyway, but an exact byte image is cleaner. The write goes to a
+    /// sibling temp file and is rename(2)d over the target, so an interrupt or full
+    /// disk mid-write leaves either the old credential or the new one — never a
+    /// missing file (the previous remove-then-create could, losing the credential).
     static func write(_ value: String, to file: URL) throws {
         let fm = FileManager.default
         try fm.createDirectory(at: dir, withIntermediateDirectories: true,
                                attributes: [.posixPermissions: 0o700])
-        if fm.fileExists(atPath: file.path) { try fm.removeItem(at: file) }
-        guard fm.createFile(atPath: file.path, contents: Data(value.utf8),
+        let tmp = dir.appendingPathComponent(".\(file.lastPathComponent).tmp-\(ProcessInfo.processInfo.processIdentifier)")
+        if fm.fileExists(atPath: tmp.path) { try fm.removeItem(at: tmp) }
+        guard fm.createFile(atPath: tmp.path, contents: Data(value.utf8),
                             attributes: [.posixPermissions: 0o600]) else {
+            throw CredentialFileError.writeFailed(file.path)
+        }
+        guard rename(tmp.path, file.path) == 0 else {
+            try? fm.removeItem(at: tmp)
             throw CredentialFileError.writeFailed(file.path)
         }
     }

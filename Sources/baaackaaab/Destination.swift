@@ -100,6 +100,18 @@ struct DestinationMeta: Codable {
         self.order = order
         self.enabled = enabled
     }
+
+    /// Decode each field independently, falling back to its default when absent.
+    /// Without this, adding ONE field to the schema (or an older file missing a
+    /// newer key) would fail the whole decode and silently reset link/order/enabled
+    /// to defaults — re-enabling a destination the user disabled and collapsing its
+    /// order onto the primary's. Per-field decoding keeps the present values intact.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.link = try c.decodeIfPresent(String.self, forKey: .link) ?? "default"
+        self.order = try c.decodeIfPresent(Int.self, forKey: .order) ?? 0
+        self.enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+    }
 }
 
 /// The set of configured destinations on disk, plus the resolution order that
@@ -143,13 +155,29 @@ enum DestinationStore {
     /// Load one stored destination by name, or nil if its files are missing.
     static func load(_ name: String) -> Destination? {
         guard nonEmpty(urlFile(name)), nonEmpty(passwordFile(name)) else { return nil }
-        let meta: DestinationMeta = (FileManager.default.contents(atPath: metaFile(name).path))
-            .flatMap { try? JSONDecoder().decode(DestinationMeta.self, from: $0) }
-            ?? DestinationMeta()
+        let meta = loadMeta(name)
         return Destination(
             name: name, link: meta.link, order: meta.order, enabled: meta.enabled,
             repo: .file(urlFile(name)), password: .file(passwordFile(name))
         )
+    }
+
+    /// Read a destination's meta.json. A MISSING file is the legitimate default
+    /// (the legacy single repo, or before the first writeMeta). A file that EXISTS
+    /// but won't decode is NOT silently defaulted to enabled=true — that would
+    /// re-enable a destination the user disabled and collapse its order onto the
+    /// primary's. We warn loudly so the corruption is actionable, then fall back to
+    /// defaults (keeping the destination visible rather than silently dropping it).
+    private static func loadMeta(_ name: String) -> DestinationMeta {
+        guard let data = FileManager.default.contents(atPath: metaFile(name).path) else {
+            return DestinationMeta()   // no meta.json yet — legitimate default
+        }
+        do {
+            return try JSONDecoder().decode(DestinationMeta.self, from: data)
+        } catch {
+            Console.warn("destination '\(name)': meta.json is unreadable (\(error)) — falling back to defaults (enabled, order 0). Re-check with --list-destinations and re-apply --order/--disabled if needed.")
+            return DestinationMeta()
+        }
     }
 
     /// All stored destinations (or the legacy single "default"), ordered by
@@ -255,16 +283,29 @@ extension DestinationStore {
         return name.unicodeScalars.allSatisfy { allowed.contains($0) }
     }
 
-    /// Write a value to a 0600 file, creating its parent (0700) first. Used for
-    /// the per-destination url / password / meta files.
+    /// Atomically write a value to a 0600 file, creating its parent (0700) first.
+    /// Used for the per-destination url / password / meta files. Writes a sibling
+    /// temp file (created 0600 from the start — no world-readable window) and then
+    /// rename(2)s it over the target: an interrupt or full disk mid-write leaves
+    /// either the old file or the new one, never a missing or half-written one. The
+    /// previous remove-then-create left NO file if interrupted between the two
+    /// steps, which (for meta.json) silently reset a destination to defaults.
     private static func write0600(_ value: String, to file: URL) throws {
         let fm = FileManager.default
-        try fm.createDirectory(at: file.deletingLastPathComponent(),
-                               withIntermediateDirectories: true,
+        let dir = file.deletingLastPathComponent()
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true,
                                attributes: [.posixPermissions: 0o700])
-        if fm.fileExists(atPath: file.path) { try fm.removeItem(at: file) }
-        guard fm.createFile(atPath: file.path, contents: Data(value.utf8),
+        let tmp = dir.appendingPathComponent(".\(file.lastPathComponent).tmp-\(ProcessInfo.processInfo.processIdentifier)")
+        if fm.fileExists(atPath: tmp.path) { try fm.removeItem(at: tmp) }
+        guard fm.createFile(atPath: tmp.path, contents: Data(value.utf8),
                             attributes: [.posixPermissions: 0o600]) else {
+            throw DestinationError.writeFailed(file.path)
+        }
+        // rename(2) atomically replaces an existing destination on the same volume
+        // (tmp is a sibling, so it is). Foundation's moveItem refuses an existing
+        // target, so use the POSIX call to get a true atomic swap.
+        guard rename(tmp.path, file.path) == 0 else {
+            try? fm.removeItem(at: tmp)
             throw DestinationError.writeFailed(file.path)
         }
     }
