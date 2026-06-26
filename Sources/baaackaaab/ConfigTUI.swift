@@ -166,6 +166,10 @@ final class ConfigTUI {
     private var lsLoadError: String?
     private var lsCursor = 0, lsTop = 0
     private var lsCurrentPath = "/"
+    // The level the browser opens on after auto-descending the single-child
+    // wrapper directories (see initialBrowsePath). Left/esc at this path exits
+    // back to the snapshot list instead of walking up into the empty wrappers.
+    private var lsRootPath = "/"
 
     // The selected-set panel is always visible under the folder browser once
     // anything is picked. Navigation stays on the folder browser by default;
@@ -457,12 +461,13 @@ final class ConfigTUI {
     /// Returns true if the editor should quit. Prompts on unsaved changes.
     private func confirmQuit() -> Bool {
         if !dirty { return true }
-        drawPrompt("unsaved changes — y: save & quit   n: discard & quit   esc: cancel")
+        drawPrompt("unsaved changes — y: save & quit   n: discard & quit   enter/esc: cancel (default)")
         while true {
             switch readKey() {
             case .char("y"), .char("Y"): save(); return true
             case .char("n"), .char("N"): return true
-            case .esc, .ctrlC: return false
+            // The safe default — enter/esc keeps the editor open, never discards.
+            case .enter, .esc, .ctrlC: return false
             case .eof: return true   // no more input — quit without overwriting
             default: break
             }
@@ -1028,7 +1033,7 @@ final class ConfigTUI {
     }
 
     private func restoreHelpLine() -> String {
-        "up/dn move \u{2022} enter restore (full) \u{2022} v browse files \u{2022} c diff prev \u{2022} d switch dest \u{2022} esc back \u{2022} q quit"
+        "up/dn move \u{2022} enter/\u{2192} browse \u{2022} r restore (full) \u{2022} c diff prev \u{2022} d switch dest \u{2022} esc back \u{2022} q quit"
     }
 
     private func handleRestore(_ key: Key) -> Bool {
@@ -1041,13 +1046,16 @@ final class ConfigTUI {
                 restoreDestIndex = (restoreDestIndex + 1) % destinations.count
                 restoreSnaps = nil; loadRestoreSnaps()
             }
-        case .enter, .right, .char("l"):
-            if let snaps = restoreSnaps, restoreCursor < snaps.count {
-                restoreSelected(snaps[restoreCursor])
-            }
-        case .char("v"):
+        // Arrows/enter/v all DRILL IN (browse the snapshot's files); a full
+        // restore is the explicit `r` key, so no stray arrow can trigger a
+        // gigabyte-scale write (see TODO).
+        case .enter, .right, .char("l"), .char("v"):
             if let snaps = restoreSnaps, restoreCursor < snaps.count {
                 enterFileBrowser(snap: snaps[restoreCursor])
+            }
+        case .char("r"):
+            if let snaps = restoreSnaps, restoreCursor < snaps.count {
+                restoreSelected(snaps[restoreCursor])
             }
         case .char("c"):   // compare with the next-older snapshot (restic diff), read-only
             if let snaps = restoreSnaps, restoreCursor < snaps.count, let dest = restoreDest {
@@ -1079,12 +1087,13 @@ final class ConfigTUI {
         fmt.dateFormat = "yyyyMMdd-HHmmss"
         let target = RestoreEngine.defaultTarget(snapshot: snap.shortID, stamp: fmt.string(from: Date()))
 
-        drawPrompt("restore \(snap.shortID) (full) into ~/baaackaaab-restore/\(target.lastPathComponent)?   y: yes   n: cancel")
+        drawPrompt("restore \(snap.shortID) (full) into ~/baaackaaab-restore/\(target.lastPathComponent)?   y: restore   enter/esc: cancel (default)")
         var go = false
         confirm: while true {
             switch readKey() {
             case .char("y"), .char("Y"): go = true; break confirm
-            case .char("n"), .char("N"), .esc, .ctrlC: go = false; break confirm
+            // Cancel is the default: only an explicit y writes anything.
+            case .char("n"), .char("N"), .enter, .esc, .ctrlC: go = false; break confirm
             case .eof: go = false; break confirm
             default: break
             }
@@ -1140,18 +1149,38 @@ final class ConfigTUI {
         lsSnap = snap
         lsEntries = nil
         lsLoadError = nil
-        lsCurrentPath = "/"
+        lsCurrentPath = "/"; lsRootPath = "/"
         lsCursor = 0; lsTop = 0
         screen = .fileBrowser
         statusMsg = "loading snapshot \(snap.shortID)\u{2026}"; renderFileBrowser()
         do {
-            lsEntries = try ResticBackend(destination: dest).ls(snapshot: snap.shortID, path: nil)
+            let entries = try ResticBackend(destination: dest).ls(snapshot: snap.shortID, path: nil)
+            lsEntries = entries
             lsLoadError = nil
+            // Land on the first directory that actually branches, so iCloud's
+            // deep /Users/<name>/Library/Mobile Documents/… prefix isn't a chain
+            // of one-entry folders the user has to click through.
+            lsRootPath = initialBrowsePath(entries)
+            lsCurrentPath = lsRootPath
         } catch {
             lsEntries = []; lsLoadError = "\(error)"
         }
         reclaimForeground()
         statusMsg = ""
+    }
+
+    /// Where to open the file browser: skip past chains of single-subdirectory
+    /// levels so the browser lands where the tree first branches (or holds a
+    /// file), instead of making the user drill through one-entry directories.
+    private func initialBrowsePath(_ entries: [ResticBackend.LsEntry]) -> String {
+        var path = "/"
+        while true {
+            let children = entries.filter {
+                URL(fileURLWithPath: $0.path).deletingLastPathComponent().path == path
+            }
+            guard children.count == 1, children[0].type == "dir" else { return path }
+            path = children[0].path
+        }
     }
 
     /// Direct children of `lsCurrentPath`, sorted dirs-first then alphabetically.
@@ -1234,7 +1263,7 @@ final class ConfigTUI {
     }
 
     private func fileBrowserHelpLine() -> String {
-        "up/dn move \u{2022} enter/right browse dir \u{2022} r restore \u{2022} left/esc back \u{2022} q quit"
+        "up/dn move \u{2022} enter/\u{2192} into dir \u{2022} r restore \u{2022} left/esc back \u{2022} q quit"
     }
 
     private func handleFileBrowser(_ key: Key) -> Bool {
@@ -1242,14 +1271,16 @@ final class ConfigTUI {
         switch key {
         case .up, .char("k"): lsCursor = max(0, lsCursor - 1)
         case .down, .char("j"): lsCursor = min(max(0, children.count - 1), lsCursor + 1)
+        // Arrows/enter only NAVIGATE: into a directory, or a hint on a file.
+        // Restore is the explicit `r` key, never a stray arrow (see TODO).
         case .enter, .right, .char("l"):
             if lsCursor < children.count {
                 let entry = children[lsCursor]
                 if entry.type == "dir" {
                     lsCurrentPath = entry.path
                     lsCursor = 0; lsTop = 0
-                } else if let snap = lsSnap {
-                    lsRestoreTargeted(snap: snap, includePath: entry.path)
+                } else {
+                    statusMsg = "press r to restore this file"
                 }
             }
         case .char("r"):
@@ -1257,7 +1288,7 @@ final class ConfigTUI {
                 lsRestoreTargeted(snap: snap, includePath: children[lsCursor].path)
             }
         case .left, .backspace, .char("h"), .esc:
-            if lsCurrentPath == "/" {
+            if lsCurrentPath == lsRootPath {
                 screen = .restore
             } else {
                 let parent = URL(fileURLWithPath: lsCurrentPath).deletingLastPathComponent().path
@@ -1282,12 +1313,13 @@ final class ConfigTUI {
         fmt.dateFormat = "yyyyMMdd-HHmmss"
         let target = RestoreEngine.defaultTarget(snapshot: snap.shortID, stamp: fmt.string(from: Date()))
 
-        drawPrompt("restore \(fit(includePath, 40)) from \(snap.shortID)?   y: yes   n: cancel")
+        drawPrompt("restore \(fit(includePath, 40)) from \(snap.shortID)?   y: restore   enter/esc: cancel (default)")
         var go = false
         confirm: while true {
             switch readKey() {
             case .char("y"), .char("Y"): go = true; break confirm
-            case .char("n"), .char("N"), .esc, .ctrlC: go = false; break confirm
+            // Cancel is the default: only an explicit y writes anything.
+            case .char("n"), .char("N"), .enter, .esc, .ctrlC: go = false; break confirm
             case .eof: go = false; break confirm
             default: break
             }
