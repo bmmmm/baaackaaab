@@ -1,10 +1,10 @@
-// swift-tools-version:5.9
+// swift-tools-version:6.0
 import PackageDescription
 
-// Prototype acquisition CLI for baaackaaab.
-// Swift 5 language mode on purpose: keeps the prototype free of Swift 6
-// strict-concurrency noise while we validate the two risky API surfaces
-// (FileProvider/iCloud Drive and PhotoKit). We tighten this later.
+// Acquisition CLI for baaackaaab. Built in the Swift 6 language mode: complete
+// strict-concurrency checking is enforced at compile time, so the global mutable
+// state shared with the signal handlers and the sync/async bridges is audited
+// rather than assumed safe.
 let package = Package(
     name: "baaackaaab",
     platforms: [.macOS(.v13)],
@@ -25,5 +25,6 @@ let package = Package(
                 ])
             ]
         )
-    ]
+    ],
+    swiftLanguageModes: [.v6]
 )

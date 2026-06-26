@@ -61,8 +61,13 @@ private enum Key: Equatable {
 // async-signal-safe handlers (tcsetattr / write / signal / raise are all
 // async-signal-safe) that restore it and then re-raise with the default
 // disposition so the exit status still reflects the signal.
-private var cookedTermForSignal = termios()
-private var cookedTermValid = false
+// nonisolated(unsafe): these are reachable only from the async-signal-safe
+// restore handler (and written once in RawTerminal.init before any handler can
+// fire). A C signal handler can touch nothing but globals, so global mutable
+// state is inherent here; the safety is the single-write-then-read-only ordering,
+// which the compiler can't see — hence the explicit unsafe opt-out.
+nonisolated(unsafe) private var cookedTermForSignal = termios()
+nonisolated(unsafe) private var cookedTermValid = false
 private let ttyRestoreBytes: [UInt8] = Array("\u{1B}[?25h\u{1B}[?1049l".utf8)   // show cursor + leave alt screen
 
 private func ttyRestoreSignalHandler(_ signo: Int32) {
@@ -79,7 +84,11 @@ private func ttyRestoreSignalHandler(_ signo: Int32) {
 // SIGWINCH (terminal resize) sets this flag from the async handler; the run loop
 // consumes it to re-render at the new size. sig_atomic_t is the only type the
 // handler may safely touch.
-private var winchPending: sig_atomic_t = 0
+// nonisolated(unsafe): sig_atomic_t is the one type a signal handler may set;
+// the handler writes it and the run loop reads/clears it. The atomicity is the
+// safety guarantee (that is what sig_atomic_t is for), so the unsafe opt-out is
+// accurate — there is no data race to fix, only a proof the compiler can't make.
+nonisolated(unsafe) private var winchPending: sig_atomic_t = 0
 private func winchSignalHandler(_ signo: Int32) { winchPending = 1 }
 
 /// RAII wrapper around the terminal's raw mode. cfmakeraw() turns off echo,

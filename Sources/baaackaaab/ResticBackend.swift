@@ -17,8 +17,6 @@ enum ResticError: Error, CustomStringConvertible {
     }
 }
 
-private final class DataCapture { var data = Data() }
-
 /// Thin wrapper around the `restic` CLI.
 ///
 /// The Mac stays strictly write-only towards the store: this only ever runs
@@ -706,10 +704,10 @@ final class ResticBackend {
             }
             return String(data: data, encoding: .utf8) ?? ""
         }
-        let capture = DataCapture()
+        let capture = SyncBox<Data>(Data())
         let sem = DispatchSemaphore(value: 0)
         DispatchQueue.global(qos: .userInitiated).async {
-            capture.data = pipe.fileHandleForReading.readDataToEndOfFile()
+            capture.value = pipe.fileHandleForReading.readDataToEndOfFile()
             proc.waitUntilExit()
             sem.signal()
         }
@@ -720,7 +718,7 @@ final class ResticBackend {
         if proc.terminationStatus != 0 {
             throw ResticError.failed(command: command, code: proc.terminationStatus)
         }
-        return String(data: capture.data, encoding: .utf8) ?? ""
+        return String(data: capture.value, encoding: .utf8) ?? ""
     }
 
     /// Run restic capturing stdout AND stderr together, returning the exit code and

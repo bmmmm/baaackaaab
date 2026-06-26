@@ -66,7 +66,7 @@ final class DriveAcquirer {
         try? fm.startDownloadingUbiquitousItem(at: url)   // legacy kick; harmless no-op on FileProvider
 
         let sem = DispatchSemaphore(value: 0)
-        var failure: Error?
+        let failure = SyncBox<Error?>(nil)
         DispatchQueue.global(qos: .userInitiated).async {
             let coordinator = NSFileCoordinator()
             var coordErr: NSError?
@@ -77,15 +77,15 @@ final class DriveAcquirer {
                     try? fh.close()
                 }
             }
-            failure = coordErr
+            failure.value = coordErr
             sem.signal()
         }
 
         if sem.wait(timeout: .now() + timeout) == .timedOut {
             throw DriveError.downloadTimeout(url.lastPathComponent)
         }
-        if let failure {
-            throw DriveError.downloadTimeout("\(url.lastPathComponent): \(failure)")
+        if let err = failure.value {
+            throw DriveError.downloadTimeout("\(url.lastPathComponent): \(err)")
         }
         if isDataless(url) {
             throw DriveError.stillDataless(url.lastPathComponent)

@@ -136,15 +136,15 @@ final class PhotosAcquirer {
             options.isNetworkAccessAllowed = true   // allow download of cloud-only originals
 
             let semaphore = DispatchSemaphore(value: 0)
-            var writeError: Error?
+            let writeError = SyncBox<Error?>(nil)
             manager.writeData(for: resource, toFile: dest, options: options) { error in
-                writeError = error
+                writeError.value = error
                 semaphore.signal()
             }
             let completed = semaphore.wait(timeout: .now() + resourceTimeout) == .success
 
             let size = (try? dest.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? -1
-            let ok = completed && writeError == nil && size > 0
+            let ok = completed && writeError.value == nil && size > 0
             if !ok {
                 // Never let a 0-byte / failed / timed-out download reach restic.
                 try? FileManager.default.removeItem(at: dest)
@@ -153,7 +153,7 @@ final class PhotosAcquirer {
             }
             let note = !completed
                 ? "download timed out after \(Int(resourceTimeout))s"
-                : writeError.map { "\($0)" }
+                : writeError.value.map { "\($0)" }
             staging.record(AcquiredItem(
                 source: "\(asset.localIdentifier)#\(resource.type.rawValue)",
                 kind: "photo-resource",
@@ -207,9 +207,9 @@ final class PhotosAcquirer {
 
     private func requestAuthorization() throws -> PHAuthorizationStatus {
         let semaphore = DispatchSemaphore(value: 0)
-        var result: PHAuthorizationStatus = .notDetermined
+        let result = SyncBox<PHAuthorizationStatus>(.notDetermined)
         PHPhotoLibrary.requestAuthorization(for: .readWrite) { status in
-            result = status
+            result.value = status
             semaphore.signal()
         }
         if semaphore.wait(timeout: .now() + authTimeout) == .timedOut {
@@ -218,7 +218,7 @@ final class PhotosAcquirer {
             // instead of mislabelling a wedged hang as "not yet granted".
             throw PhotosError.authorizationTimedOut(Int(authTimeout))
         }
-        return result
+        return result.value
     }
 
     private func findAlbum(title: String) -> PHAssetCollection? {

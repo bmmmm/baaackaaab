@@ -20,7 +20,11 @@ import Darwin
 /// the run's cancelled-summary finalizer (distinct from a real backup failure).
 struct RunCancelled: Error {}
 
-final class BackupCancellation {
+// @unchecked Sendable: every mutable field below (current / cancelledFlag /
+// armed / sources) is accessed only under `lock`, so the type is thread-safe by
+// construction — the compiler just can't prove the NSLock discipline, hence
+// "unchecked". This is what lets `static let shared` be a concurrency-safe global.
+final class BackupCancellation: @unchecked Sendable {
     static let shared = BackupCancellation()
     private init() {}
 
