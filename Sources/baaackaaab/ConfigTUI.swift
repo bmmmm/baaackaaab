@@ -99,7 +99,7 @@ private final class RawTerminal {
     func restore() { var o = original; tcsetattr(STDIN_FILENO, TCSAFLUSH, &o) }
 }
 
-private enum Screen { case home, editor, restore, fileBrowser }
+private enum Screen { case home, editor, restore, fileBrowser, timer }
 
 final class ConfigTUI {
     private let configPath: URL
@@ -147,6 +147,16 @@ final class ConfigTUI {
     private var restoreSnaps: [ResticBackend.Snapshot]?
     private var restoreLoadError: String?
     private var restoreCursor = 0, restoreTop = 0
+
+    // Timer screen: edit one time-of-day + an optional weekday set, then install /
+    // uninstall the launchd schedule via the tested CLI. Loaded from the installed
+    // plist on enter. The (installed, loaded) state is cached so a render never
+    // spawns launchctl — it is refreshed only on enter and after install/uninstall.
+    private var timerHour = 12, timerMinute = 0
+    private var timerWeekdays = Set<Int>()      // launchd weekday numbers; empty = daily
+    private var timerFieldMinute = false        // which time field up/down adjusts
+    private var timerState: (installed: Bool, loaded: Bool) = (false, false)
+    private var timerCurrent: Schedule?
 
     // File browser screen: in-TUI navigation of a snapshot's directory tree.
     // `lsEntries` holds ALL entries from `restic ls` (flat depth-first list), loaded
@@ -223,6 +233,7 @@ final class ConfigTUI {
             case .home: renderHome()
             case .restore: renderRestore()
             case .fileBrowser: renderFileBrowser()
+            case .timer: renderTimer()
             case .editor: render()
             }
             let key = readKey()
@@ -231,6 +242,7 @@ final class ConfigTUI {
             if screen == .home { keepGoing = handleHome(key) }
             else if screen == .restore { keepGoing = handleRestore(key) }
             else if screen == .fileBrowser { keepGoing = handleFileBrowser(key) }
+            else if screen == .timer { keepGoing = handleTimer(key) }
             else if pickAlbums { keepGoing = handleAlbumPicker(key) }
             else if panelFocused && !setRows().isEmpty { keepGoing = handleReview(key) }
             else { keepGoing = handleBrowse(key) }
@@ -288,6 +300,7 @@ final class ConfigTUI {
         case .char("p"): dryRunNow()
         case .char("r"): refreshRemote()
         case .char("R"): enterRestore()
+        case .char("t"): enterTimer()
         case .char("?"): showHelp.toggle()
         case .char("q"), .esc, .ctrlC: if confirmQuit() { return false }
         case .eof: return false
@@ -588,7 +601,7 @@ final class ConfigTUI {
     }
 
     private func homeHelpLine() -> String {
-        "e edit \u{2022} s sync \u{2022} p preview \u{2022} r remote \u{2022} R restore \u{2022} ? help \u{2022} q quit"
+        "e edit \u{2022} s sync \u{2022} p preview \u{2022} r remote \u{2022} R restore \u{2022} t timer \u{2022} ? help \u{2022} q quit"
     }
 
     /// Help overlay content: replaces the body area when showHelp is toggled.
@@ -599,6 +612,7 @@ final class ConfigTUI {
             ("p", "dry-run preview (reads repo, uploads nothing)"),
             ("r", "refresh remote status"),
             ("R", "open restore browser"),
+            ("t", "edit the scheduled-backup timer"),
             ("?", "toggle this overlay"),
             ("q / esc", "quit"),
         ]
@@ -682,11 +696,12 @@ final class ConfigTUI {
         statusMsg = code == 0 ? "dry run complete \u{2014} nothing uploaded" : "dry run failed (code \(code))"
     }
 
-    /// Shell out to a read-only browse command (`--ls` / `--diff`) and page its
-    /// output, then wait for a key and return to the restore browser. Same screen
-    /// dance as dryRunNow(); these commands only READ the repository. `label` names
-    /// the action in the "press any key" footer and any non-zero status line.
-    private func runBrowseChild(_ args: [String], label: String) {
+    /// Shell out to a child invocation of this binary (a read-only browse like
+    /// `--ls` / `--diff`, or a timer install/uninstall) and page its output, then
+    /// wait for a key and return to the current screen. Same screen dance as
+    /// dryRunNow(). `label` names the action in the "press any key" footer and any
+    /// non-zero status line.
+    private func runChildAndWait(_ args: [String], label: String) {
         emit("\u{1B}[?25h\u{1B}[?1049l")   // show cursor, leave the alternate screen
         term.restore()
         let proc = Process()
@@ -701,6 +716,136 @@ final class ConfigTUI {
         reclaimForeground()
         emit("\u{1B}[?1049h\u{1B}[?25l")   // back into the alternate screen
         statusMsg = code == 0 ? "" : "\(label) exited with code \(code)"
+    }
+
+    // MARK: - Timer screen
+
+    /// Open the timer editor: cache the install state and pre-fill the fields from
+    /// the currently installed schedule (first time + its weekdays) if any.
+    private func enterTimer() {
+        refreshTimerState()
+        if let s = timerCurrent, let first = s.times.first {
+            timerHour = first.hour; timerMinute = first.minute
+            timerWeekdays = Set(s.weekdays)
+        }
+        screen = .timer
+    }
+
+    /// Refresh the cached install state + installed schedule. Spawns launchctl, so
+    /// it is called only on enter and after install/uninstall — never per render.
+    private func refreshTimerState() {
+        timerState = LaunchdTimer.state()
+        timerCurrent = LaunchdTimer.installedSchedule()
+    }
+
+    /// The schedule the editor would install: the single edited time, plus the
+    /// chosen weekdays (empty = every day).
+    private func previewSchedule() -> Schedule {
+        Schedule(times: [(timerHour, timerMinute)], weekdays: timerWeekdays.sorted())
+    }
+
+    private func renderTimer() {
+        let (rows, cols) = terminalSize()
+        var lines: [String] = []
+        lines.append(bold(fit("baaackaaab \u{2014} timer", cols)))
+        lines.append(cyan(fit("scheduled backup of the set", cols)))
+        lines.append("")
+
+        let helpLines = wrapHelp(timerHelpLine(), cols)
+        let footerH = 2 + helpLines.count
+        let contentH = max(1, rows - 3 - footerH)
+
+        var body: [String] = []
+        body.append(divider("status", cols))
+        if timerState.installed {
+            body.append(green(fit("  installed" + (timerState.loaded ? " + loaded" : " (not loaded)"), cols)))
+            if let cur = timerCurrent { body.append(dim(fit("  current: " + cur.describe(), cols))) }
+        } else {
+            body.append(dim(fit("  not installed", cols)))
+        }
+        body.append("")
+
+        body.append(divider("edit schedule", cols))
+        let hh = String(format: "%02d", timerHour), mm = String(format: "%02d", timerMinute)
+        let timeStr = timerFieldMinute ? "\(hh):[\(mm)]" : "[\(hh)]:\(mm)"
+        body.append(fit("  time:  \(timeStr)", cols))
+        // Mon…Sun (launchd numbers 1…6, 0), selected ones bracketed.
+        let order = [1, 2, 3, 4, 5, 6, 0]
+        let dayStr = order.map { timerWeekdays.contains($0) ? "[\(Schedule.weekdayName($0))]" : " \(Schedule.weekdayName($0)) " }.joined()
+        body.append(fit("  days:  \(timerWeekdays.isEmpty ? "every day" : dayStr)", cols))
+        body.append("")
+        body.append(dim(fit("  will install: " + previewSchedule().describe(), cols)))
+
+        if body.count < contentH { body += Array(repeating: "", count: contentH - body.count) }
+        if body.count > contentH { body = Array(body.prefix(contentH)) }
+        lines += body
+
+        lines.append("")
+        lines.append(dim(fit(statusLine(), cols)))
+        for hl in helpLines { lines.append(dim(fit(hl, cols))) }
+        draw(lines)
+    }
+
+    private func timerHelpLine() -> String {
+        "\u{2191}/\u{2193} adjust \u{2022} \u{2190}/\u{2192} hr/min \u{2022} 1-7 weekday \u{2022} 0 every day \u{2022} i install \u{2022} u uninstall \u{2022} esc back"
+    }
+
+    private func handleTimer(_ key: Key) -> Bool {
+        switch key {
+        case .up: adjustTimer(by: 1)
+        case .down: adjustTimer(by: -1)
+        case .left, .right, .tab: timerFieldMinute.toggle()
+        case .char("1"): toggleWeekday(1)
+        case .char("2"): toggleWeekday(2)
+        case .char("3"): toggleWeekday(3)
+        case .char("4"): toggleWeekday(4)
+        case .char("5"): toggleWeekday(5)
+        case .char("6"): toggleWeekday(6)
+        case .char("7"): toggleWeekday(0)   // 7 = Sunday (launchd weekday 0)
+        case .char("0"): timerWeekdays.removeAll()
+        case .char("i"): installTimerNow()
+        case .char("u"): uninstallTimerNow()
+        case .esc, .char("h"): screen = .home
+        case .char("q"), .ctrlC: if confirmQuit() { return false }
+        case .eof: return false
+        default: break
+        }
+        return true
+    }
+
+    /// Adjust the focused time field: minute by 5 (wrapping 0–59), hour by 1
+    /// (wrapping 0–23). Five-minute steps are plenty for a daily backup.
+    private func adjustTimer(by delta: Int) {
+        if timerFieldMinute {
+            timerMinute = ((timerMinute + delta * 5) % 60 + 60) % 60
+        } else {
+            timerHour = ((timerHour + delta) % 24 + 24) % 24
+        }
+    }
+
+    private func toggleWeekday(_ wd: Int) {
+        if timerWeekdays.contains(wd) { timerWeekdays.remove(wd) } else { timerWeekdays.insert(wd) }
+    }
+
+    /// Install the edited schedule by shelling out to the tested CLI (writes the
+    /// plist + bootstraps launchd), then refresh the cached state.
+    private func installTimerNow() {
+        var args = ["--install-timer", "--at", String(format: "%02d:%02d", timerHour, timerMinute)]
+        if !timerWeekdays.isEmpty {
+            let names = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"]
+            args += ["--days", timerWeekdays.sorted().map { names[$0] }.joined(separator: ",")]
+        }
+        if configPath.path != BackupSet.defaultPath().path { args += ["--config", configPath.path] }
+        runChildAndWait(args, label: "install-timer")
+        refreshTimerState()
+        statusMsg = "timer: " + previewSchedule().describe()
+    }
+
+    /// Remove the launchd schedule via the tested CLI, then refresh cached state.
+    private func uninstallTimerNow() {
+        runChildAndWait(["--uninstall-timer"], label: "uninstall-timer")
+        refreshTimerState()
+        statusMsg = "timer removed"
     }
 
     /// Read-only refresh of the remote panel: query EVERY enabled destination so
@@ -905,7 +1050,7 @@ final class ConfigTUI {
                 var args = ["--diff", snaps[restoreCursor + 1].shortID, snaps[restoreCursor].shortID,
                             "--destination", dest.name]
                 if let r = argValue("--restic-repo") { args += ["--restic-repo", r] }
-                runBrowseChild(args, label: "diff")
+                runChildAndWait(args, label: "diff")
             }
         case .esc, .left, .char("h"): screen = .home
         case .char("q"), .ctrlC: if confirmQuit() { return false }
