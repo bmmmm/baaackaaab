@@ -1579,6 +1579,13 @@ final class ConfigTUI {
     private var inbuf: [UInt8] = []
     private var inpos = 0
 
+    // How long to wait for the rest of an escape sequence after a lone ESC at a
+    // read() boundary, before deciding it really was a back/quit ESC. A single
+    // keypress's 3 bytes almost always arrive together; this only matters on a
+    // slow/loaded PTY where ESC and "[A" land in separate reads. Short enough to
+    // be imperceptible on a real ESC.
+    private let escSequenceGraceMs: Int32 = 30
+
     private func nextByte() -> UInt8? {
         if inpos >= inbuf.count {
             var tmp = [UInt8](repeating: 0, count: 32)
@@ -1592,11 +1599,29 @@ final class ConfigTUI {
 
     private func peekByte() -> UInt8? { inpos < inbuf.count ? inbuf[inpos] : nil }
 
+    /// Block up to `ms` for at least one more input byte, used to tell a lone ESC
+    /// apart from the start of a split arrow sequence. Returns true if bytes are
+    /// now buffered; on timeout/error it returns false so a genuine ESC falls
+    /// through after only the short grace.
+    private func waitForMoreInput(_ ms: Int32) -> Bool {
+        if inpos < inbuf.count { return true }
+        var pfd = pollfd(fd: STDIN_FILENO, events: Int16(POLLIN), revents: 0)
+        guard poll(&pfd, 1, ms) > 0 else { return false }
+        var tmp = [UInt8](repeating: 0, count: 32)
+        let n = read(STDIN_FILENO, &tmp, 32)
+        guard n > 0 else { return false }
+        inbuf = Array(tmp[0..<n]); inpos = 0
+        return true
+    }
+
     private func readKey() -> Key {
         guard let b0 = nextByte() else { return .eof }
         if b0 == 0x1B {
-            // Arrow keys (ESC [ A/B/C/D) only when the rest of the sequence is
-            // already buffered; a lone ESC at a burst boundary means quit.
+            // An arrow arrives as ESC [ A/B/C/D. If the buffer is exhausted right
+            // after ESC, the "[..." may simply not have arrived yet (a split read
+            // on a slow/loaded PTY) — wait briefly before deciding this was a lone
+            // ESC (back/quit). Once "[" is buffered, decode the arrow as before.
+            if peekByte() == nil { _ = waitForMoreInput(escSequenceGraceMs) }
             if peekByte() == 0x5B {
                 _ = nextByte()
                 switch nextByte() {

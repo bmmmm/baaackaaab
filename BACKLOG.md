@@ -109,8 +109,8 @@ the closest to the safety core and is worth doing first.
     user-controlled (iCloud Drive folders, Photos albums).
   - Fix sketch: a small `wcwidth`-style width function used by fit/pad/divider.
 
-- [ ] **ESC vs. arrow keys: a lone ESC at a read() boundary is treated as
-  back/quit.** `Low`
+- [x] **ESC vs. arrow keys: a lone ESC at a read() boundary is treated as
+  back/quit.** `Low` — done (operator-verifiable: build green; runtime needs a real TTY)
   - `readKey` only decodes an arrow when `[` is already buffered after ESC; a
     `\u{1B}[A` split across two `read(2)` calls makes the first ESC return `.esc`
     (ConfigTUI.swift:1594-1619). The comment documents this as an accepted
