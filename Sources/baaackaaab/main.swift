@@ -41,35 +41,67 @@ func argPair(_ name: String) -> (String, String)? {
     return (args[i + 1], args[i + 2])
 }
 
-/// Parse an `--at HH:MM` value into (hour, minute), defaulting to 12:00 when
-/// absent or malformed. Used by the launchd timer install.
-func parseAtTime(_ s: String?) -> (hour: Int, minute: Int) {
-    guard let s = s, let colon = s.firstIndex(of: ":"),
+/// A numeric flag that must be a positive integer when present. Returns
+/// `fallback` when the flag is absent; exits with an actionable error when it is
+/// present but not a positive integer — so a typo or a negative/zero value fails
+/// loudly instead of silently degrading the run (e.g. `--max-bytes -1` collapsing
+/// a sample to one file). `unit` is woven into the error, e.g. "KiB/s".
+func positiveIntArg(_ name: String, default fallback: Int, unit: String? = nil) -> Int {
+    guard let raw = argValue(name) else { return fallback }
+    guard let n = Int(raw), n > 0 else {
+        let u = unit.map { " (\($0))" } ?? ""
+        Console.error("\(name) needs a positive integer\(u) — got '\(raw)'")
+        exit(1)
+    }
+    return n
+}
+
+/// Parse an `--at HH:MM` value (24-hour) into (hour, minute). nil when malformed,
+/// so the caller can reject an explicitly-supplied bad value rather than silently
+/// substituting a wrong time. A wholly absent `--at` is handled by parseSchedule.
+func parseAtTime(_ s: String) -> (hour: Int, minute: Int)? {
+    guard let colon = s.firstIndex(of: ":"),
           let h = Int(s[s.startIndex..<colon]),
           let m = Int(s[s.index(after: colon)...]),
-          (0...23).contains(h), (0...59).contains(m) else { return (12, 0) }
+          (0...23).contains(h), (0...59).contains(m) else { return nil }
     return (h, m)
 }
 
 /// Parse a `--days` csv ("mon,wed,fri") into launchd weekday numbers
-/// (Sun=0 … Sat=6). Unknown tokens are ignored; an empty/absent value yields []
-/// (which means "every day").
-func parseDays(_ csv: String?) -> [Int] {
-    guard let csv, !csv.isEmpty else { return [] }
+/// (Sun=0 … Sat=6), plus any tokens that did not resolve to a weekday. An
+/// empty/absent value yields ([], []) (which means "every day"). Unrecognized
+/// tokens are returned so the caller can reject them instead of silently
+/// dropping them (a typo'd `--days saturdy` must not become a daily timer).
+func parseDays(_ csv: String?) -> (days: [Int], unknown: [String]) {
+    guard let csv, !csv.isEmpty else { return ([], []) }
     let map: [String: Int] = ["sun": 0, "mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6]
     var days = Set<Int>()
+    var unknown: [String] = []
     for tok in csv.lowercased().split(whereSeparator: { $0 == "," || $0 == " " }) {
-        if let d = map[String(tok.prefix(3))] { days.insert(d) }
+        if let d = map[String(tok.prefix(3))] { days.insert(d) } else { unknown.append(String(tok)) }
     }
-    return days.sorted()
+    return (days.sorted(), unknown)
 }
 
-/// Build the timer Schedule from `--at` (repeatable; default 12:00) and `--days`
-/// (csv of weekdays; absent = every day).
+/// Build the timer Schedule from `--at` (repeatable; default 12:00 when absent)
+/// and `--days` (csv of weekdays; absent = every day). Exits with an actionable
+/// error on any malformed `--at` or unrecognized `--days` token, so an
+/// install never silently lands on the wrong time or the wrong (daily) cadence.
 func parseSchedule() -> Schedule {
-    let times = argValues("--at").map(parseAtTime)
-    return Schedule(times: times.isEmpty ? [(hour: 12, minute: 0)] : times,
-                    weekdays: parseDays(argValue("--days")))
+    var times: [(hour: Int, minute: Int)] = []
+    for raw in argValues("--at") {
+        guard let t = parseAtTime(raw) else {
+            Console.error("--at needs HH:MM in 24-hour form — got '\(raw)' (e.g. --at 09:00 --at 18:30)")
+            exit(1)
+        }
+        times.append(t)
+    }
+    let (days, unknown) = parseDays(argValue("--days"))
+    if !unknown.isEmpty {
+        Console.error("--days has unrecognized weekday(s): \(unknown.joined(separator: ", ")) — use mon,tue,wed,thu,fri,sat,sun")
+        exit(1)
+    }
+    return Schedule(times: times.isEmpty ? [(hour: 12, minute: 0)] : times, weekdays: days)
 }
 
 /// Usage / help screen. Printed on `--help`/`-h` and when invoked with no
@@ -663,8 +695,8 @@ func restoreCommand() {
 func testRestoreCommand() {
     Console.banner("baaackaaab", tagline: "test-restore — prove a backup is restorable")
     let snapshot = argValue("--snapshot") ?? "latest"
-    let sampleCount = max(1, argValue("--sample").flatMap { Int($0) } ?? 10)
-    let budget = argValue("--max-bytes").flatMap { Int($0) } ?? 1_000_000_000
+    let sampleCount = positiveIntArg("--sample", default: 10)
+    let budget = positiveIntArg("--max-bytes", default: 1_000_000_000, unit: "bytes")
 
     let picked = destinationsForCommand()
     guard picked.count == 1 else {
@@ -1409,14 +1441,28 @@ let stagingURL: URL = {
     return FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Caches/baaackaaab/staging", isDirectory: true)
 }()
-let photoBatchBytes = argValue("--photo-batch-bytes").flatMap { Int($0) } ?? 3_000_000_000
+let photoBatchBytes = positiveIntArg("--photo-batch-bytes", default: 3_000_000_000, unit: "bytes")
 let host = argValue("--host") ?? ProcessInfo.processInfo.hostName
 // Optional remote-quota pre-flight. The rest-server's `--max-size` is a hard
 // server-side stop; this is a soft client-side gauge that warns BEFORE a run
 // when the repo is filling up, so the cap can be raised in time. We can't query
 // the server's configured quota, so it comes from --repo-quota-bytes or the set.
-let repoQuotaBytes = argValue("--repo-quota-bytes").flatMap { Int($0) } ?? configQuotaBytes
-let quotaWarnFraction = argValue("--quota-warn-fraction").flatMap { Double($0) } ?? 0.85
+let repoQuotaBytes: Int? = {
+    guard let raw = argValue("--repo-quota-bytes") else { return configQuotaBytes }
+    guard let n = Int(raw), n > 0 else {
+        Console.error("--repo-quota-bytes needs a positive integer (bytes) — got '\(raw)'")
+        exit(1)
+    }
+    return n
+}()
+let quotaWarnFraction: Double = {
+    guard let raw = argValue("--quota-warn-fraction") else { return 0.85 }
+    guard let f = Double(raw), f > 0, f <= 1 else {
+        Console.error("--quota-warn-fraction needs a number in (0, 1] — got '\(raw)' (e.g. 0.85)")
+        exit(1)
+    }
+    return f
+}()
 
 // Resolve the destination set (already enabled + primary-first). We back up to
 // every one of them: each is an independent repo, so this yields N full copies.
