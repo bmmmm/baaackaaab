@@ -51,6 +51,27 @@ func parseAtTime(_ s: String?) -> (hour: Int, minute: Int) {
     return (h, m)
 }
 
+/// Parse a `--days` csv ("mon,wed,fri") into launchd weekday numbers
+/// (Sun=0 … Sat=6). Unknown tokens are ignored; an empty/absent value yields []
+/// (which means "every day").
+func parseDays(_ csv: String?) -> [Int] {
+    guard let csv, !csv.isEmpty else { return [] }
+    let map: [String: Int] = ["sun": 0, "mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6]
+    var days = Set<Int>()
+    for tok in csv.lowercased().split(whereSeparator: { $0 == "," || $0 == " " }) {
+        if let d = map[String(tok.prefix(3))] { days.insert(d) }
+    }
+    return days.sorted()
+}
+
+/// Build the timer Schedule from `--at` (repeatable; default 12:00) and `--days`
+/// (csv of weekdays; absent = every day).
+func parseSchedule() -> Schedule {
+    let times = argValues("--at").map(parseAtTime)
+    return Schedule(times: times.isEmpty ? [(hour: 12, minute: 0)] : times,
+                    weekdays: parseDays(argValue("--days")))
+}
+
 /// Usage / help screen. Printed on `--help`/`-h` and when invoked with no
 /// arguments at all. Styled through Console so it matches the run output.
 func printUsage() {
@@ -140,8 +161,9 @@ func printUsage() {
 
     Console.section("Schedule (launchd timer)")
     Console.info([
-        ("--install-timer", "install a daily LaunchAgent that backs up the set, then exit"),
-        ("--at <HH:MM>", "time of day for the timer (default 12:00)"),
+        ("--install-timer", "install a LaunchAgent that backs up the set on a schedule, then exit"),
+        ("--at <HH:MM>", "time of day (repeatable for several runs/day; default 12:00)"),
+        ("--days <list>", "restrict to weekdays, e.g. mon,wed,fri (default: every day)"),
         ("--uninstall-timer", "remove the LaunchAgent, then exit"),
         ("--timer-status", "show whether the timer is installed + loaded, then exit"),
     ])
@@ -1294,8 +1316,7 @@ let configPath: URL = argValue("--config").map {
 // runs `baaackaaab --run-tag scheduled` (non-bare, so it backs up the set under
 // launchd without a TTY). These touch the user's launchd, not the repo.
 if CommandLine.arguments.contains("--install-timer") {
-    let at = parseAtTime(argValue("--at"))
-    do { try LaunchdTimer.install(hour: at.hour, minute: at.minute, configPath: configPath); exit(0) }
+    do { try LaunchdTimer.install(schedule: parseSchedule(), configPath: configPath); exit(0) }
     catch { Console.error("\(error)"); exit(1) }
 }
 if CommandLine.arguments.contains("--uninstall-timer") {

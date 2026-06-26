@@ -14,6 +14,34 @@ enum TimerError: Error, CustomStringConvertible {
     }
 }
 
+/// A backup schedule: one or more times of day, optionally restricted to specific
+/// weekdays. An empty `weekdays` means every day. Weekday numbers follow launchd's
+/// StartCalendarInterval convention: 0 (or 7) = Sunday, 1 = Monday … 6 = Saturday.
+/// The launchd job fires once per (weekday × time) combination.
+struct Schedule {
+    var times: [(hour: Int, minute: Int)]
+    var weekdays: [Int]   // empty = daily
+
+    /// The historical default: a single time, every day.
+    static func daily(hour: Int, minute: Int) -> Schedule {
+        Schedule(times: [(hour, minute)], weekdays: [])
+    }
+
+    /// Short three-letter weekday name (Sun…Sat) for a launchd weekday number.
+    static func weekdayName(_ wd: Int) -> String {
+        let names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+        return names[((wd % 7) + 7) % 7]
+    }
+
+    /// Human-readable summary, e.g. "daily at 12:00" or "Mon, Wed, Fri at 09:00, 18:00".
+    func describe() -> String {
+        let t = times.map { String(format: "%02d:%02d", $0.hour, $0.minute) }.joined(separator: ", ")
+        if weekdays.isEmpty { return "daily at \(t)" }
+        let days = weekdays.sorted().map { Self.weekdayName($0) }.joined(separator: ", ")
+        return "\(days) at \(t)"
+    }
+}
+
 /// The scheduled-backup LaunchAgent. Installs a per-user launchd job that runs
 /// this binary daily with `--run-tag scheduled` — which is non-bare, so under
 /// launchd (no TTY) it goes straight to the backup of the declarative set
@@ -39,8 +67,9 @@ enum LaunchdTimer {
 
     /// Write (or rewrite) the LaunchAgent and load it. `configPath` is passed to
     /// the scheduled run only when it differs from the default, so the timer backs
-    /// up the same set the user edits.
-    static func install(hour: Int, minute: Int, configPath: URL) throws {
+    /// up the same set the user edits. `schedule` carries one or more times and an
+    /// optional weekday restriction; launchd fires once per (weekday × time).
+    static func install(schedule: Schedule, configPath: URL) throws {
         Console.banner("baaackaaab", tagline: "scheduled backup")
 
         let exe = executablePath()
@@ -52,13 +81,13 @@ enum LaunchdTimer {
             program += ["--config", configPath.path]
         }
 
-        let xml = plistXML(program: program, hour: hour, minute: minute, log: logURL.path)
+        let xml = plistXML(program: program, schedule: schedule, log: logURL.path)
         try xml.write(to: plistURL, atomically: true, encoding: .utf8)
 
         Console.section("LaunchAgent", detail: plistURL.path)
         Console.info([
             ("binary", exe),
-            ("schedule", String(format: "daily at %02d:%02d (runs at next wake if asleep)", hour, minute)),
+            ("schedule", "\(schedule.describe()) (runs at next wake if asleep)"),
             ("run-tag", "scheduled"),
             ("log", logURL.path),
         ])
@@ -153,7 +182,57 @@ enum LaunchdTimer {
         return proc.terminationStatus
     }
 
-    private static func plistXML(program: [String], hour: Int, minute: Int, log: String) -> String {
+    /// The StartCalendarInterval value for a schedule: a single `<dict>` for one
+    /// (weekday × time) entry, an `<array>` of dicts for several. launchd fires the
+    /// job once per entry.
+    private static func calendarIntervalXML(_ schedule: Schedule) -> String {
+        let days: [Int?] = schedule.weekdays.isEmpty ? [nil] : schedule.weekdays.sorted().map { Optional($0) }
+        var entries: [(weekday: Int?, hour: Int, minute: Int)] = []
+        for d in days { for t in schedule.times { entries.append((d, t.hour, t.minute)) } }
+        if entries.isEmpty { entries = [(nil, 12, 0)] }   // never emit an empty interval
+
+        func dict(_ e: (weekday: Int?, hour: Int, minute: Int), indent: String) -> String {
+            var body = ""
+            if let wd = e.weekday {
+                body += "\(indent)    <key>Weekday</key>\n\(indent)    <integer>\(wd)</integer>\n"
+            }
+            body += "\(indent)    <key>Hour</key>\n\(indent)    <integer>\(e.hour)</integer>\n"
+            body += "\(indent)    <key>Minute</key>\n\(indent)    <integer>\(e.minute)</integer>"
+            return "\(indent)<dict>\n\(body)\n\(indent)</dict>"
+        }
+
+        if entries.count == 1 {
+            return dict(entries[0], indent: "    ")
+        }
+        let dicts = entries.map { dict($0, indent: "        ") }.joined(separator: "\n")
+        return "    <array>\n\(dicts)\n    </array>"
+    }
+
+    /// Read the installed plist's schedule back (times + weekdays), for the TUI to
+    /// show the current state. nil when no plist is present or it can't be parsed.
+    static func installedSchedule() -> Schedule? {
+        guard let data = try? Data(contentsOf: plistURL),
+              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
+        else { return nil }
+        var raw: [[String: Any]] = []
+        if let arr = plist["StartCalendarInterval"] as? [[String: Any]] { raw = arr }
+        else if let one = plist["StartCalendarInterval"] as? [String: Any] { raw = [one] }
+        else { return nil }
+
+        var timeKeys = [String]()
+        var times = [(hour: Int, minute: Int)]()
+        var weekdays = Set<Int>()
+        for e in raw {
+            let h = (e["Hour"] as? NSNumber)?.intValue ?? 0
+            let m = (e["Minute"] as? NSNumber)?.intValue ?? 0
+            let key = "\(h):\(m)"
+            if !timeKeys.contains(key) { timeKeys.append(key); times.append((h, m)) }
+            if let wd = (e["Weekday"] as? NSNumber)?.intValue { weekdays.insert(wd % 7) }
+        }
+        return Schedule(times: times, weekdays: weekdays.sorted())
+    }
+
+    private static func plistXML(program: [String], schedule: Schedule, log: String) -> String {
         let args = program.map { "        <string>\(xmlEscape($0))</string>" }.joined(separator: "\n")
         return """
         <?xml version="1.0" encoding="UTF-8"?>
@@ -167,12 +246,7 @@ enum LaunchdTimer {
         \(args)
             </array>
             <key>StartCalendarInterval</key>
-            <dict>
-                <key>Hour</key>
-                <integer>\(hour)</integer>
-                <key>Minute</key>
-                <integer>\(minute)</integer>
-            </dict>
+        \(calendarIntervalXML(schedule))
             <key>StandardOutPath</key>
             <string>\(xmlEscape(log))</string>
             <key>StandardErrorPath</key>
