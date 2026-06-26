@@ -1192,6 +1192,50 @@ func manageBackupSet(configPath: URL) {
     listBackupSet(set, path: configPath, existed: existed || changed)
 }
 
+/// Reject an unrecognized `--flag` before it can fall through to a backup. The
+/// dispatch below matches specific flags and, finding none, backs up the set — so
+/// a typo'd command (e.g. `--restoree`, `--snapshtos`) would otherwise silently
+/// start a full backup instead of failing. Every accepted flag is listed here; a
+/// token that looks like a flag but is not known exits with an actionable error.
+/// Flag VALUES are skipped (a value may legitimately start with '-', e.g.
+/// `--find -x`), so only genuine flag tokens are checked.
+func rejectUnknownFlags() {
+    // Flags that consume the FOLLOWING token as their value — that token is a
+    // value, never checked as a flag. `--diff` consumes two (a snapshot pair).
+    let valueFlags: Set<String> = [
+        "--drive-folder", "--photo-album", "--photo-batch-bytes", "--staging",
+        "--add-folder", "--remove-folder", "--add-album", "--remove-album",
+        "--limit-upload", "--config", "--restic-repo", "--host", "--run-tag",
+        "--add-destination", "--repo-url", "--repo-password-file", "--link",
+        "--order", "--remove-destination", "--ls", "--find", "--snapshot",
+        "--target", "--include", "--sample", "--max-bytes", "--destination",
+        "--read-data-subset", "--at", "--days", "--repo-quota-bytes",
+        "--quota-warn-fraction", "--materialize-test", "--evict-test",
+    ]
+    // Flags that stand alone (no value).
+    let boolFlags: Set<String> = [
+        "--init-credentials", "--migrate-credentials", "--force", "--check",
+        "--list", "--configure", "--clear-limit-upload", "--list-destinations",
+        "--disabled", "--snapshots", "--restore", "--test-restore", "--dry-run",
+        "--yes", "--no-verify", "--verify-repo", "--unlock", "--remove-all",
+        "--install-timer", "--uninstall-timer", "--timer-status", "--doctor",
+        "--center", "--help", "-h",
+    ]
+    let args = CommandLine.arguments
+    var i = 1   // skip argv[0]
+    while i < args.count {
+        let tok = args[i]
+        if tok == "--diff" { i += 3; continue }           // flag + two snapshot ids
+        if valueFlags.contains(tok) { i += 2; continue }  // flag + its value
+        if boolFlags.contains(tok) { i += 1; continue }
+        if tok.hasPrefix("-") && tok != "-" {
+            Console.error("unknown flag '\(tok)' — see `baaackaaab --help` for the accepted flags. (Refusing to continue: an unrecognized flag would otherwise fall through to a full backup of the set.)")
+            exit(1)
+        }
+        i += 1   // a bare positional, or a value already accounted for above
+    }
+}
+
 // Line-buffer stdout so our logs interleave in the right order with restic's
 // child-process output. Without this, our print() output buffers and surfaces
 // only after the subprocess has already written (and a file redirect would be
@@ -1210,6 +1254,10 @@ if CommandLine.arguments.contains("--help") || CommandLine.arguments.contains("-
     printUsage()
     exit(0)
 }
+
+// Reject an unknown flag up front, before any dispatch — a typo must fail loudly,
+// never fall through to a backup of the set.
+rejectUnknownFlags()
 
 // Standalone diagnostic: prove the evict/dataless round-trip on one file.
 // Runs in isolation and exits — never touches staging or the normal flow.
