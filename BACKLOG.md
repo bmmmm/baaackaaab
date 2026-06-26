@@ -40,7 +40,7 @@ the closest to the safety core and is worth doing first.
 
 ## CLI strictness / UX
 
-- [ ] **Unknown flags fall through to a real backup.** `Med`
+- [x] **Unknown flags fall through to a real backup.** `Med` — done (10637a4)
   - No unknown-flag rejection. A typo'd subcommand (e.g. `--restoree`,
     `--snapshot s` without a real command) matches none of the dispatch `if`s
     (main.swift:1206-1388) and falls through to the backup path (main.swift:1390+)
@@ -58,8 +58,8 @@ the closest to the safety core and is worth doing first.
     in (stat the dataless flag, don't coordinate-read), or document the cost
     loudly in the dry-run banner.
 
-- [ ] **`--limit-upload` collides with source flags → silently diverts to
-  set-management.** `Med`
+- [x] **`--limit-upload` collides with source flags → silently diverts to
+  set-management.** `Med` — done (4398d0b)
   - `--limit-upload` is in the set-management trigger list (main.swift:1383-1388),
     so `baaackaaab --drive-folder ~/X --limit-upload 2048` runs `manageBackupSet`
     and exits — the ad-hoc backup never happens and `--drive-folder` is ignored.
