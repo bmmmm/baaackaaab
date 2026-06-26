@@ -1377,6 +1377,20 @@ if CommandLine.arguments.contains("--configure") {
     exit(0)
 }
 
+// --limit-upload / --clear-limit-upload change the backup set's PERSISTENT
+// upload throttle (the launchd timer and a bare run read it from the set); they
+// are NOT per-run flags — there is no ad-hoc throttle. Combined with the ad-hoc
+// source flags they would silently win the set-management dispatch below (edit
+// the set and exit), so a user expecting a throttled one-off backup would get
+// none. Reject the ambiguous combination loudly instead of quietly skipping it.
+if CommandLine.arguments.contains("--limit-upload")
+    || CommandLine.arguments.contains("--clear-limit-upload") {
+    if !argValues("--drive-folder").isEmpty || !argValues("--photo-album").isEmpty {
+        Console.error("--limit-upload / --clear-limit-upload change the backup set's PERSISTENT upload throttle; they are not per-run flags (a run reads the throttle from the set — there is no ad-hoc throttle). Set it on its own first (`baaackaaab --limit-upload <KiB/s>`), then run the backup separately. Combined with --drive-folder/--photo-album it would silently edit the set and skip the backup.")
+        exit(1)
+    }
+}
+
 // Backup-set management (--list / --add-* / --remove-* / --limit-upload): edit
 // the set and exit. --limit-upload is a PERSISTENT knob (like --add-folder), not
 // a per-run flag — a backup reads the throttle from the set, never from argv.
