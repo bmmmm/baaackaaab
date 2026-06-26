@@ -528,6 +528,90 @@ final class ResticBackend {
         return found
     }
 
+    /// One entry from `restic ls`: a file or directory inside a snapshot, with its
+    /// full snapshot path and (for files) size. The path is exactly what
+    /// `--restore --include` takes, so the browser doubles as restore discovery.
+    struct LsEntry {
+        let name: String
+        let path: String
+        let type: String   // "file" / "dir"
+        let size: Int?
+    }
+
+    /// List the contents of `snapshot` via `restic ls --json`, optionally limited
+    /// to the subtree under `path`. Read-only. restic emits a snapshot header line
+    /// then one node line per entry (depth-first); we keep the nodes in that order.
+    func ls(snapshot: String, path: String?) throws -> [LsEntry] {
+        var args = ["ls", snapshot, "--json"]
+        if let path, !path.isEmpty { args.append(path) }
+        let out = try runCapturing(args, command: "ls")
+        var entries: [LsEntry] = []
+        for line in out.split(separator: "\n") {
+            guard let data = line.data(using: .utf8),
+                  let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  (o["struct_type"] as? String) == "node" || (o["message_type"] as? String) == "node"
+            else { continue }
+            entries.append(LsEntry(
+                name: (o["name"] as? String) ?? "",
+                path: (o["path"] as? String) ?? "",
+                type: (o["type"] as? String) ?? "",
+                size: (o["size"] as? NSNumber)?.intValue))
+        }
+        return entries
+    }
+
+    /// One changed path from `restic diff`. `modifier` is restic's single-char
+    /// code: `+` added, `-` removed, `M` content changed, `T` type changed,
+    /// `U` metadata-only.
+    struct DiffChange {
+        let path: String
+        let modifier: String
+    }
+
+    /// The result of diffing two snapshots: the per-path changes plus the
+    /// added/removed/changed totals restic reports in its statistics line.
+    struct DiffResult {
+        let changes: [DiffChange]
+        let addedFiles: Int
+        let removedFiles: Int
+        let changedFiles: Int
+        let addedBytes: Int
+        let removedBytes: Int
+    }
+
+    /// Diff two snapshots via `restic diff --json` (read-only): what changed going
+    /// from `snapshotA` to `snapshotB`. Returns the changed paths and the summary
+    /// statistics. Never modifies either snapshot.
+    func diff(snapshotA: String, snapshotB: String) throws -> DiffResult {
+        let out = try runCapturing(["diff", snapshotA, snapshotB, "--json"], command: "diff")
+        var changes: [DiffChange] = []
+        var addedFiles = 0, removedFiles = 0, changedFiles = 0, addedBytes = 0, removedBytes = 0
+        for line in out.split(separator: "\n") {
+            guard let data = line.data(using: .utf8),
+                  let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let type = o["message_type"] as? String else { continue }
+            switch type {
+            case "change":
+                changes.append(DiffChange(path: (o["path"] as? String) ?? "",
+                                          modifier: (o["modifier"] as? String) ?? "?"))
+            case "statistics":
+                changedFiles = (o["changed_files"] as? NSNumber)?.intValue ?? 0
+                if let added = o["added"] as? [String: Any] {
+                    addedFiles = (added["files"] as? NSNumber)?.intValue ?? 0
+                    addedBytes = (added["bytes"] as? NSNumber)?.intValue ?? 0
+                }
+                if let removed = o["removed"] as? [String: Any] {
+                    removedFiles = (removed["files"] as? NSNumber)?.intValue ?? 0
+                    removedBytes = (removed["bytes"] as? NSNumber)?.intValue ?? 0
+                }
+            default:
+                break
+            }
+        }
+        return DiffResult(changes: changes, addedFiles: addedFiles, removedFiles: removedFiles,
+                          changedFiles: changedFiles, addedBytes: addedBytes, removedBytes: removedBytes)
+    }
+
     /// The destination's snapshots, NEWEST FIRST (restic emits oldest→newest).
     /// Strictly read-only. Throws on a transport/auth failure so the caller can
     /// report it per destination rather than treating the repo as empty.

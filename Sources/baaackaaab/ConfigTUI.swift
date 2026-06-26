@@ -671,6 +671,27 @@ final class ConfigTUI {
         statusMsg = code == 0 ? "dry run complete \u{2014} nothing uploaded" : "dry run failed (code \(code))"
     }
 
+    /// Shell out to a read-only browse command (`--ls` / `--diff`) and page its
+    /// output, then wait for a key and return to the restore browser. Same screen
+    /// dance as dryRunNow(); these commands only READ the repository. `label` names
+    /// the action in the "press any key" footer and any non-zero status line.
+    private func runBrowseChild(_ args: [String], label: String) {
+        emit("\u{1B}[?25h\u{1B}[?1049l")   // show cursor, leave the alternate screen
+        term.restore()
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: selfPath())
+        proc.arguments = args
+        var code: Int32 = -1
+        do { try proc.run(); proc.waitUntilExit(); code = proc.terminationStatus }
+        catch { FileHandle.standardOutput.write(Data("could not launch \(label): \(error)\n".utf8)) }
+        FileHandle.standardOutput.write(Data("\n\(label) done \u{2014} press any key to return\n".utf8))
+        term.enable()
+        _ = readKey()
+        reclaimForeground()
+        emit("\u{1B}[?1049h\u{1B}[?25l")   // back into the alternate screen
+        statusMsg = code == 0 ? "" : "\(label) exited with code \(code)"
+    }
+
     /// Read-only refresh of the remote panel: query EVERY enabled destination so
     /// the dashboard shows one row per (source × destination). Resolves the
     /// destinations lazily on first use. A destination missing its key is reported
@@ -843,7 +864,7 @@ final class ConfigTUI {
     }
 
     private func restoreHelpLine() -> String {
-        "up/dn move \u{2022} enter restore (full \u{2192} fresh dir) \u{2022} d switch dest \u{2022} esc back \u{2022} q quit"
+        "up/dn move \u{2022} enter restore (full \u{2192} fresh dir) \u{2022} v contents \u{2022} c diff prev \u{2022} d switch dest \u{2022} esc back \u{2022} q quit"
     }
 
     private func handleRestore(_ key: Key) -> Bool {
@@ -859,6 +880,23 @@ final class ConfigTUI {
         case .enter, .right, .char("l"):
             if let snaps = restoreSnaps, restoreCursor < snaps.count {
                 restoreSelected(snaps[restoreCursor])
+            }
+        case .char("v"):   // view this snapshot's contents (restic ls), read-only
+            if let snaps = restoreSnaps, restoreCursor < snaps.count, let dest = restoreDest {
+                var args = ["--ls", snaps[restoreCursor].shortID, "--destination", dest.name]
+                if let r = argValue("--restic-repo") { args += ["--restic-repo", r] }
+                runBrowseChild(args, label: "ls")
+            }
+        case .char("c"):   // compare with the next-older snapshot (restic diff), read-only
+            if let snaps = restoreSnaps, restoreCursor < snaps.count, let dest = restoreDest {
+                // snaps is newest-first, so the next-older sits at cursor + 1.
+                guard restoreCursor + 1 < snaps.count else {
+                    statusMsg = "no older snapshot to compare against (this is the oldest)"; break
+                }
+                var args = ["--diff", snaps[restoreCursor + 1].shortID, snaps[restoreCursor].shortID,
+                            "--destination", dest.name]
+                if let r = argValue("--restic-repo") { args += ["--restic-repo", r] }
+                runBrowseChild(args, label: "diff")
             }
         case .esc, .left, .char("h"): screen = .home
         case .char("q"), .ctrlC: if confirmQuit() { return false }

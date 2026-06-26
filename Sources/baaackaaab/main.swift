@@ -33,6 +33,14 @@ func argValues(_ name: String) -> [String] {
     return out
 }
 
+/// The two tokens after a flag, e.g. `--diff <a> <b>`. nil if fewer than two
+/// follow it. Used by the two-argument snapshot diff.
+func argPair(_ name: String) -> (String, String)? {
+    let args = CommandLine.arguments
+    guard let i = args.firstIndex(of: name), i + 2 < args.count else { return nil }
+    return (args[i + 1], args[i + 2])
+}
+
 /// Parse an `--at HH:MM` value into (hour, minute), defaulting to 12:00 when
 /// absent or malformed. Used by the launchd timer install.
 func parseAtTime(_ s: String?) -> (hour: Int, minute: Int) {
@@ -104,6 +112,8 @@ func printUsage() {
     Console.section("Restore (read-only browse; restore writes only to a fresh dir)")
     Console.info([
         ("--snapshots", "list snapshots newest-first per destination, then exit"),
+        ("--ls <id>", "list a snapshot's files (browse / restore discovery); --include limits the subtree"),
+        ("--diff <a> <b>", "show what changed between two snapshots (needs one --destination), then exit"),
         ("--find <pattern>", "locate a file in a snapshot (single-file restore discovery), then exit"),
         ("--restore", "restore a snapshot into a fresh directory (preview → confirm → verify)"),
         ("--destination <name>", "source destination (required when several are configured)"),
@@ -395,6 +405,98 @@ func findCommand() {
     }
     if failures > 0 {
         Console.error("\(failures)/\(dests.count) destination(s) could not be searched — see above")
+        exit(1)
+    }
+}
+
+/// Browse a snapshot's contents with `restic ls` (read-only), per destination
+/// (or just `--destination <name>`). `--ls <id>` picks the snapshot (default
+/// 'latest'); `--include <subpath>` limits to a subtree. The printed path is
+/// exactly what `--restore --include` takes, so this doubles as restore discovery.
+func lsCommand() {
+    Console.banner("baaackaaab", tagline: "ls — browse a snapshot")
+    let snapshot = argValue("--ls") ?? "latest"
+    let subpath = argValue("--include")
+    let dests = destinationsForCommand()
+    var failures = 0
+    for dest in dests {
+        Console.section("Destination", detail: "\(dest.name) [\(dest.link)]")
+        guard dest.passwordAvailable else {
+            Console.failure("no encryption password — the credential files are missing or unreadable")
+            failures += 1
+            continue
+        }
+        do {
+            let entries = try ResticBackend(destination: dest).ls(snapshot: snapshot, path: subpath)
+            if entries.isEmpty {
+                Console.note("nothing in snapshot \(snapshot)\(subpath.map { " under \($0)" } ?? "")")
+                continue
+            }
+            // Cap the dump so a huge snapshot doesn't flood the terminal; say so
+            // explicitly (never a silent truncation) and point at how to narrow it.
+            let cap = 500
+            for e in entries.prefix(cap) {
+                let kind = e.type == "dir" ? "/" : ""
+                let size = e.size.map { " (" + ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .file) + ")" } ?? ""
+                Console.detail("\(e.path)\(kind)\(size)")
+            }
+            if entries.count > cap {
+                Console.note("… and \(entries.count - cap) more (\(entries.count) entries total) — narrow with --include <subpath>")
+            }
+        } catch {
+            Console.failure("\(error)")
+            failures += 1
+        }
+    }
+    if failures > 0 {
+        Console.error("\(failures)/\(dests.count) destination(s) could not be listed — see above")
+        exit(1)
+    }
+}
+
+/// Compare two snapshots with `restic diff` (read-only): what changed going from
+/// the first id to the second. Acts on ONE repository, so it requires a single
+/// `--destination <name>` when several are configured. Prints the changed paths
+/// (+ added, - removed, M content, T type, U metadata) and the byte/file totals.
+func diffCommand() {
+    Console.banner("baaackaaab", tagline: "diff — compare two snapshots")
+    guard let (a, b) = argPair("--diff"), !a.isEmpty, !b.isEmpty,
+          !a.hasPrefix("-"), !b.hasPrefix("-") else {
+        Console.error("--diff needs two snapshot ids: baaackaaab --diff <olderID> <newerID> (list ids with --snapshots)")
+        exit(1)
+    }
+    let picked = destinationsForCommand()
+    guard picked.count == 1 else {
+        Console.error("choose ONE destination with --destination <name> — diff compares two snapshots in a single repository (configured: \(picked.map { $0.name }.joined(separator: ", ")))")
+        exit(1)
+    }
+    let dest = picked[0]
+    Console.section("Destination", detail: "\(dest.name) [\(dest.link)]")
+    guard dest.passwordAvailable else {
+        Console.error("no encryption password for '\(dest.name)' — the credential files are missing or unreadable")
+        exit(1)
+    }
+    do {
+        let r = try ResticBackend(destination: dest).diff(snapshotA: a, snapshotB: b)
+        Console.step("\(a) → \(b)")
+        if r.changes.isEmpty {
+            Console.note("no path-level changes between these snapshots")
+        } else {
+            let cap = 1000
+            for c in r.changes.prefix(cap) { Console.detail("\(c.modifier)  \(c.path)") }
+            if r.changes.count > cap {
+                Console.note("… and \(r.changes.count - cap) more (\(r.changes.count) changes total)")
+            }
+        }
+        let added = ByteCountFormatter.string(fromByteCount: Int64(r.addedBytes), countStyle: .file)
+        let removed = ByteCountFormatter.string(fromByteCount: Int64(r.removedBytes), countStyle: .file)
+        Console.info([
+            ("added", "\(r.addedFiles) file(s), \(added)"),
+            ("removed", "\(r.removedFiles) file(s), \(removed)"),
+            ("changed", "\(r.changedFiles) file(s)"),
+        ])
+    } catch {
+        Console.error("\(error)")
         exit(1)
     }
 }
@@ -1039,6 +1141,18 @@ if CommandLine.arguments.contains("--snapshots") {
 // Locate a file inside a snapshot by name/glob (single-file restore discovery).
 if argValue("--find") != nil {
     findCommand()
+    exit(0)
+}
+
+// Browse a snapshot's contents (read-only). The listed paths feed --restore --include.
+if argValue("--ls") != nil {
+    lsCommand()
+    exit(0)
+}
+
+// Compare two snapshots (read-only): what changed between them.
+if CommandLine.arguments.contains("--diff") {
+    diffCommand()
     exit(0)
 }
 
