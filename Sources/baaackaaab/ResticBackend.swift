@@ -17,6 +17,8 @@ enum ResticError: Error, CustomStringConvertible {
     }
 }
 
+private final class DataCapture { var data = Data() }
+
 /// Thin wrapper around the `restic` CLI.
 ///
 /// The Mac stays strictly write-only towards the store: this only ever runs
@@ -307,10 +309,10 @@ final class ResticBackend {
     /// Returns nil if stats can't be read (e.g. a fresh repo with no snapshots,
     /// or the query failed), so the caller treats usage as unknown rather than
     /// failing the run over a missing gauge reading.
-    func repoSizeBytes() -> Int? {
+    func repoSizeBytes(timeout: TimeInterval? = nil) -> Int? {
         // `--quiet` suppresses restic's progress counter, which it otherwise
         // prints on stdout *before* the JSON (e.g. "[0:00] 100.00% 1/1 ...").
-        guard let out = try? runCapturing(["stats", "--quiet", "--mode", "raw-data", "--json"], command: "stats")
+        guard let out = try? runCapturing(["stats", "--quiet", "--mode", "raw-data", "--json"], command: "stats", timeout: timeout)
         else { return nil }
         // Belt and braces: even if a stray line slips onto stdout, the JSON is a
         // single object on its own line — take the last line that starts with
@@ -369,7 +371,7 @@ final class ResticBackend {
     func remoteStatus() -> RemoteStatus {
         var status = RemoteStatus()
         do {
-            let snaps = try snapshotsJSON()
+            let snaps = try snapshotsJSON(timeout: Self.probeTimeout)
             status.reachable = true
             status.snapshotCount = snaps.count
             // restic lists snapshots oldest → newest, so the last one is latest.
@@ -378,7 +380,7 @@ final class ResticBackend {
                 status.latestTags = (latest["tags"] as? [String]) ?? []
             }
             status.sources = Self.sourceBreakdown(snaps)
-            status.sizeBytes = repoSizeBytes()
+            status.sizeBytes = repoSizeBytes(timeout: Self.probeTimeout)
         } catch {
             status.error = "\(error)"
         }
@@ -438,7 +440,7 @@ final class ResticBackend {
     /// Strictly read-only. Throws on a transport/auth failure so the caller can
     /// report it per destination rather than treating the repo as empty.
     func listSnapshots() throws -> [Snapshot] {
-        let arr = try snapshotsJSON()
+        let arr = try snapshotsJSON(timeout: Self.probeTimeout)
         let snaps = arr.map { o -> Snapshot in
             let id = (o["id"] as? String) ?? ""
             return Snapshot(
@@ -456,8 +458,8 @@ final class ResticBackend {
     /// Parse `restic snapshots --json` into an array of dictionaries. In --json
     /// mode restic emits a single JSON array; we still slice from the first '['
     /// in case a stray line precedes it.
-    private func snapshotsJSON() throws -> [[String: Any]] {
-        let out = try runCapturing(["snapshots", "--json"], command: "snapshots")
+    private func snapshotsJSON(timeout: TimeInterval? = nil) throws -> [[String: Any]] {
+        let out = try runCapturing(["snapshots", "--json"], command: "snapshots", timeout: timeout)
         guard let start = out.firstIndex(of: "[") else { return [] }
         let json = String(out[start...])
         guard let data = json.data(using: .utf8),
@@ -470,8 +472,10 @@ final class ResticBackend {
     /// non-zero exit, labelled with `command` so the caller's subcommand surfaces
     /// in the error (not a generic one). Used for the small JSON-emitting queries,
     /// not for streaming commands. Reads the pipe to EOF before waiting so a large
-    /// payload can't deadlock on a full pipe buffer.
-    private func runCapturing(_ args: [String], command: String) throws -> String {
+    /// payload can't deadlock on a full pipe buffer. `timeout`, when set, caps the
+    /// wall clock — on expiry the child is terminated and `timedOut` is thrown;
+    /// only ever used for read-only queries, never for writes.
+    private func runCapturing(_ args: [String], command: String, timeout: TimeInterval? = nil) throws -> String {
         guard let exe = executablePath else { throw ResticError.notFound }
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: exe)
@@ -482,12 +486,30 @@ final class ResticBackend {
         proc.standardError = FileHandle.nullDevice
         proc.standardInput = FileHandle.nullDevice   // never block on a password prompt
         do { try proc.run() } catch { throw ResticError.notFound }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        proc.waitUntilExit()
+        guard let timeout else {
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            proc.waitUntilExit()
+            if proc.terminationStatus != 0 {
+                throw ResticError.failed(command: command, code: proc.terminationStatus)
+            }
+            return String(data: data, encoding: .utf8) ?? ""
+        }
+        let capture = DataCapture()
+        let sem = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .userInitiated).async {
+            capture.data = pipe.fileHandleForReading.readDataToEndOfFile()
+            proc.waitUntilExit()
+            sem.signal()
+        }
+        if sem.wait(timeout: .now() + timeout) == .timedOut {
+            proc.terminate()
+            _ = sem.wait(timeout: .now() + 5)
+            throw ResticError.timedOut(command: args.first ?? "restic", seconds: Int(timeout))
+        }
         if proc.terminationStatus != 0 {
             throw ResticError.failed(command: command, code: proc.terminationStatus)
         }
-        return String(data: data, encoding: .utf8) ?? ""
+        return String(data: capture.data, encoding: .utf8) ?? ""
     }
 
     /// Run restic capturing stdout AND stderr together, returning the exit code and

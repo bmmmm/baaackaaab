@@ -152,6 +152,7 @@ final class ConfigTUI {
     // anything is picked. Navigation stays on the folder browser by default;
     // `v` moves focus DOWN into the panel to prune entries, esc/v hands it back.
     private var panelFocused = false
+    private var showHelp = false
     // The album picker (a) takes over the content area with the user's Photos
     // albums. It's loaded lazily on first open (triggers the Photos prompt).
     private var pickAlbums = false
@@ -271,10 +272,12 @@ final class ConfigTUI {
     /// quit the whole app.
     private func handleHome(_ key: Key) -> Bool {
         switch key {
-        case .char("e"), .enter, .right, .tab: screen = .editor
+        case .char("e"), .enter, .right, .tab: screen = .editor; showHelp = false
         case .char("s"): syncNow()
+        case .char("p"): dryRunNow()
         case .char("r"): refreshRemote()
         case .char("R"): enterRestore()
+        case .char("?"): showHelp.toggle()
         case .char("q"), .esc, .ctrlC: if confirmQuit() { return false }
         case .eof: return false
         default: break
@@ -503,8 +506,9 @@ final class ConfigTUI {
             for rec in runs { body.append(homeRunLine(rec, cols)) }
         }
 
-        if body.count < contentH { body += Array(repeating: "", count: contentH - body.count) }
-        else if body.count > contentH { body = Array(body.prefix(contentH)) }
+        if showHelp { body = helpOverlayLines(contentH, cols) }
+        else if body.count < contentH { body += Array(repeating: "", count: contentH - body.count) }
+        if body.count > contentH { body = Array(body.prefix(contentH)) }
         lines += body
 
         lines.append("")
@@ -529,6 +533,9 @@ final class ConfigTUI {
             out.append(yellow(fit("    \u{2717} " + err, cols)))
         } else {
             out.append(green(fit("    \u{2713} " + homeStatusSummary(status), cols)))
+            if let used = status.sizeBytes, let quota = set.quotaBytes {
+                out.append(quotaBar(usedBytes: used, quotaBytes: quota, cols: cols))
+            }
         }
         return out
     }
@@ -559,7 +566,7 @@ final class ConfigTUI {
     /// and the count of unhappy destinations if any. Green when clean, yellow not.
     private func homeRunLine(_ r: RunRecord, _ cols: Int) -> String {
         let mark = r.clean ? "\u{2713}" : "\u{2717}"
-        let when = runStampFmt.string(from: r.end)
+        let when = relativeTime(from: r.end)
         var parts = ["\(r.verified)/\(r.total)"]
         let bad = r.destinations.filter { !$0.ok }.count
         if bad > 0 { parts.append("\(bad) dest failed") }
@@ -570,7 +577,39 @@ final class ConfigTUI {
     }
 
     private func homeHelpLine() -> String {
-        "e edit set \u{2022} s sync now \u{2022} r remote \u{2022} R restore \u{2022} q quit"
+        "e edit \u{2022} s sync \u{2022} p preview \u{2022} r remote \u{2022} R restore \u{2022} ? help \u{2022} q quit"
+    }
+
+    /// Help overlay content: replaces the body area when showHelp is toggled.
+    private func helpOverlayLines(_ height: Int, _ cols: Int) -> [String] {
+        let entries: [(String, String)] = [
+            ("e", "open backup-set editor"),
+            ("s", "run backup now"),
+            ("p", "dry-run preview (reads repo, uploads nothing)"),
+            ("r", "refresh remote status"),
+            ("R", "open restore browser"),
+            ("?", "toggle this overlay"),
+            ("q / esc", "quit"),
+        ]
+        var lines: [String] = [dim(fit("  keyboard shortcuts", cols))]
+        for (key, desc) in entries {
+            let pad = String(repeating: " ", count: max(0, 9 - key.count))
+            lines.append(fit("  \(key)\(pad)\(desc)", cols))
+        }
+        while lines.count < height { lines.append("") }
+        return Array(lines.prefix(height))
+    }
+
+    /// Visual quota bar: `[████████░░] 4.2/5.0 GB (84%)`.
+    private func quotaBar(usedBytes: Int, quotaBytes: Int, cols: Int) -> String {
+        let ratio = min(1.0, Double(usedBytes) / Double(quotaBytes))
+        let trackW = max(4, min(20, cols - 32))
+        let filled = Int(ratio * Double(trackW))
+        let track = String(repeating: "\u{2588}", count: filled)
+                  + String(repeating: "\u{2591}", count: trackW - filled)
+        let usedGB  = Double(usedBytes)  / 1_000_000_000
+        let quotaGB = Double(quotaBytes) / 1_000_000_000
+        return dim(fit(String(format: "    [%@] %.1f/%.1f GB (%d%%)", track, usedGB, quotaGB, Int(ratio * 100)), cols))
     }
 
     // MARK: - Home actions
@@ -602,16 +641,34 @@ final class ConfigTUI {
         statusMsg = code == 0 ? "sync finished \u{2014} press r to refresh remote" : "sync failed (code \(code))"
     }
 
-    private func runSyncChild() -> Int32 {
+    private func runSyncChild(extraArgs: [String] = []) -> Int32 {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: selfPath())
-        proc.arguments = syncArgs()
+        proc.arguments = syncArgs() + extraArgs
         do { try proc.run() } catch {
             FileHandle.standardOutput.write(Data("could not launch backup: \(error)\n".utf8))
             return -1
         }
         proc.waitUntilExit()
         return proc.terminationStatus
+    }
+
+    /// Dry-run preview: re-execs this binary with --dry-run so restic reports what
+    /// would be uploaded without writing anything. Same shell-out / re-enter pattern
+    /// as syncNow(); the repo is read-only during a dry run.
+    private func dryRunNow() {
+        guard !set.isEmpty else { statusMsg = "backup set is empty \u{2014} press e to add folders / albums"; return }
+        ensureRepoResolved()
+        emit("\u{1B}[?25h\u{1B}[?1049l")
+        term.restore()
+        let code = runSyncChild(extraArgs: ["--dry-run"])
+        let tail = code == 0 ? "dry run finished" : "dry run exited with code \(code)"
+        FileHandle.standardOutput.write(Data("\n\(tail) \u{2014} press any key to return\n".utf8))
+        term.enable()
+        _ = readKey()
+        reclaimForeground()
+        emit("\u{1B}[?1049h\u{1B}[?25l")
+        statusMsg = code == 0 ? "dry run complete \u{2014} nothing uploaded" : "dry run failed (code \(code))"
     }
 
     /// Read-only refresh of the remote panel: query EVERY enabled destination so
@@ -677,6 +734,17 @@ final class ConfigTUI {
     /// "2026-06-24T17:30:32.1+02:00" -> "2026-06-24 17:30".
     private func shortTime(_ iso: String) -> String {
         String(iso.prefix(16)).replacingOccurrences(of: "T", with: " ")
+    }
+
+    /// Human-friendly age: "just now", "5m ago", "3h ago", "2d ago";
+    /// falls back to the absolute stamp for dates older than a week.
+    private func relativeTime(from date: Date) -> String {
+        let secs = Int(-date.timeIntervalSinceNow)
+        if secs < 60 { return "just now" }
+        if secs < 3600 { return "\(secs / 60)m ago" }
+        if secs < 86400 { return "\(secs / 3600)h ago" }
+        if secs < 7 * 86400 { return "\(secs / 86400)d ago" }
+        return runStampFmt.string(from: date)
     }
 
     // MARK: - Restore screen (snapshot browser → safe CLI restore)
