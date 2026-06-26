@@ -556,7 +556,7 @@ final class ResticBackend {
     func ls(snapshot: String, path: String?) throws -> [LsEntry] {
         var args = ["ls", snapshot, "--json"]
         if let path, !path.isEmpty { args.append(path) }
-        let out = try runCapturing(args, command: "ls")
+        let out = try runCapturing(args, command: "ls", timeout: Self.probeTimeout)
         var entries: [LsEntry] = []
         for line in out.split(separator: "\n") {
             guard let data = line.data(using: .utf8),

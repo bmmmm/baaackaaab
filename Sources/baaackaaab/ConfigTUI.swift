@@ -99,7 +99,7 @@ private final class RawTerminal {
     func restore() { var o = original; tcsetattr(STDIN_FILENO, TCSAFLUSH, &o) }
 }
 
-private enum Screen { case home, editor, restore }
+private enum Screen { case home, editor, restore, fileBrowser }
 
 final class ConfigTUI {
     private let configPath: URL
@@ -147,6 +147,15 @@ final class ConfigTUI {
     private var restoreSnaps: [ResticBackend.Snapshot]?
     private var restoreLoadError: String?
     private var restoreCursor = 0, restoreTop = 0
+
+    // File browser screen: in-TUI navigation of a snapshot's directory tree.
+    // `lsEntries` holds ALL entries from `restic ls` (flat depth-first list), loaded
+    // once on enter; navigation filters by parent path so browsing is instant.
+    private var lsSnap: ResticBackend.Snapshot?
+    private var lsEntries: [ResticBackend.LsEntry]?
+    private var lsLoadError: String?
+    private var lsCursor = 0, lsTop = 0
+    private var lsCurrentPath = "/"
 
     // The selected-set panel is always visible under the folder browser once
     // anything is picked. Navigation stays on the folder browser by default;
@@ -213,6 +222,7 @@ final class ConfigTUI {
             switch screen {
             case .home: renderHome()
             case .restore: renderRestore()
+            case .fileBrowser: renderFileBrowser()
             case .editor: render()
             }
             let key = readKey()
@@ -220,6 +230,7 @@ final class ConfigTUI {
             let keepGoing: Bool
             if screen == .home { keepGoing = handleHome(key) }
             else if screen == .restore { keepGoing = handleRestore(key) }
+            else if screen == .fileBrowser { keepGoing = handleFileBrowser(key) }
             else if pickAlbums { keepGoing = handleAlbumPicker(key) }
             else if panelFocused && !setRows().isEmpty { keepGoing = handleReview(key) }
             else { keepGoing = handleBrowse(key) }
@@ -864,7 +875,7 @@ final class ConfigTUI {
     }
 
     private func restoreHelpLine() -> String {
-        "up/dn move \u{2022} enter restore (full \u{2192} fresh dir) \u{2022} v contents \u{2022} c diff prev \u{2022} d switch dest \u{2022} esc back \u{2022} q quit"
+        "up/dn move \u{2022} enter restore (full) \u{2022} v browse files \u{2022} c diff prev \u{2022} d switch dest \u{2022} esc back \u{2022} q quit"
     }
 
     private func handleRestore(_ key: Key) -> Bool {
@@ -881,11 +892,9 @@ final class ConfigTUI {
             if let snaps = restoreSnaps, restoreCursor < snaps.count {
                 restoreSelected(snaps[restoreCursor])
             }
-        case .char("v"):   // view this snapshot's contents (restic ls), read-only
-            if let snaps = restoreSnaps, restoreCursor < snaps.count, let dest = restoreDest {
-                var args = ["--ls", snaps[restoreCursor].shortID, "--destination", dest.name]
-                if let r = argValue("--restic-repo") { args += ["--restic-repo", r] }
-                runBrowseChild(args, label: "ls")
+        case .char("v"):
+            if let snaps = restoreSnaps, restoreCursor < snaps.count {
+                enterFileBrowser(snap: snaps[restoreCursor])
             }
         case .char("c"):   // compare with the next-older snapshot (restic diff), read-only
             if let snaps = restoreSnaps, restoreCursor < snaps.count, let dest = restoreDest {
@@ -942,9 +951,10 @@ final class ConfigTUI {
         statusMsg = code == 0 ? "restored into \(target.path)" : "restore failed (code \(code))"
     }
 
-    private func runRestoreChild(dest: Destination, snapshot: String, target: URL) -> Int32 {
+    private func runRestoreChild(dest: Destination, snapshot: String, target: URL, include: String? = nil) -> Int32 {
         var args = ["--restore", "--destination", dest.name, "--snapshot", snapshot,
                     "--target", target.path, "--yes"]
+        if let include { args += ["--include", include] }
         // Forward an explicit ad-hoc target repo so the child resolves the same one.
         if let r = argValue("--restic-repo") { args += ["--restic-repo", r] }
         let proc = Process()
@@ -965,6 +975,183 @@ final class ConfigTUI {
         p.arguments = [url.path]
         try? p.run()
         p.waitUntilExit()
+    }
+
+    // MARK: - File browser (in-TUI snapshot content navigation + targeted restore)
+
+    /// Enter the file browser for `snap`: load all its entries via `restic ls`
+    /// (one network call, then all navigation is local), then switch to the
+    /// fileBrowser screen. Shows a loading frame while the call is in flight.
+    private func enterFileBrowser(snap: ResticBackend.Snapshot) {
+        guard let dest = restoreDest else { return }
+        lsSnap = snap
+        lsEntries = nil
+        lsLoadError = nil
+        lsCurrentPath = "/"
+        lsCursor = 0; lsTop = 0
+        screen = .fileBrowser
+        statusMsg = "loading snapshot \(snap.shortID)\u{2026}"; renderFileBrowser()
+        do {
+            lsEntries = try ResticBackend(destination: dest).ls(snapshot: snap.shortID, path: nil)
+            lsLoadError = nil
+        } catch {
+            lsEntries = []; lsLoadError = "\(error)"
+        }
+        reclaimForeground()
+        statusMsg = ""
+    }
+
+    /// Direct children of `lsCurrentPath`, sorted dirs-first then alphabetically.
+    private func lsCurrentChildren() -> [ResticBackend.LsEntry] {
+        guard let entries = lsEntries else { return [] }
+        return entries
+            .filter { URL(fileURLWithPath: $0.path).deletingLastPathComponent().path == lsCurrentPath }
+            .sorted {
+                if $0.type != $1.type { return $0.type == "dir" }
+                return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+            }
+    }
+
+    private func renderFileBrowser() {
+        let (rows, cols) = terminalSize()
+        var lines: [String] = []
+        let snapLabel = lsSnap.map { "\($0.shortID)  \(shortTime($0.time))" } ?? "?"
+        lines.append(bold(fit("baaackaaab \u{2014} snapshot \(snapLabel)", cols)))
+        let tags = lsSnap?.tags.joined(separator: ",") ?? ""
+        lines.append(cyan(fit(tags.isEmpty ? "(no tags)" : tags, cols)))
+        lines.append("")
+
+        let helpLines = wrapHelp(fileBrowserHelpLine(), cols)
+        let footerH = 2 + helpLines.count
+        let contentH = max(1, rows - 3 - footerH)
+
+        var body: [String] = []
+        body.append(divider(lsCurrentPath, cols))
+        let listH = max(1, contentH - 1)
+
+        if let err = lsLoadError {
+            body.append(yellow(fit("  error: " + err, cols)))
+        } else if lsEntries == nil {
+            body.append(dim(fit("  loading\u{2026}", cols)))
+        } else {
+            let children = lsCurrentChildren()
+            if children.isEmpty {
+                body.append(dim(fit("  (empty)", cols)))
+            } else {
+                clamp(&lsCursor, children.count)
+                adjustTop(&lsTop, cursor: lsCursor, height: listH, count: children.count)
+                for r in 0..<listH {
+                    let idx = lsTop + r
+                    if idx < children.count {
+                        body.append(renderLsRow(children[idx], cursor: idx == lsCursor, cols: cols))
+                    } else { body.append("") }
+                }
+            }
+        }
+        if body.count < contentH { body += Array(repeating: "", count: contentH - body.count) }
+        else if body.count > contentH { body = Array(body.prefix(contentH)) }
+        lines += body
+
+        lines.append("")
+        lines.append(dim(fit(lsBrowserStatusLine(), cols)))
+        for hl in helpLines { lines.append(dim(fit(hl, cols))) }
+        draw(lines)
+    }
+
+    private func renderLsRow(_ e: ResticBackend.LsEntry, cursor: Bool, cols: Int) -> String {
+        let tag = e.type == "dir" ? "[dir] " : "[file]"
+        let name = e.type == "dir" ? e.name + "/" : e.name
+        let sizeStr = e.type == "file" ? "  " + formatBytes(e.size) : ""
+        let text = "  \(tag) \(name)\(sizeStr)"
+        var plain = fit(text, cols)
+        if cursor {
+            plain = plain.padding(toLength: cols, withPad: " ", startingAt: 0)
+            return rev(plain)
+        }
+        return e.type == "dir" ? cyan(plain) : plain
+    }
+
+    private func lsBrowserStatusLine() -> String {
+        var parts: [String] = []
+        if let snap = lsSnap { parts.append("snap \(snap.shortID)") }
+        parts.append(lsCurrentPath)
+        if let entries = lsEntries { parts.append("\(lsCurrentChildren().count)/\(entries.count)") }
+        if !statusMsg.isEmpty { parts.append(statusMsg) }
+        return parts.joined(separator: "  \u{2022}  ")
+    }
+
+    private func fileBrowserHelpLine() -> String {
+        "up/dn move \u{2022} enter/right browse dir \u{2022} r restore \u{2022} left/esc back \u{2022} q quit"
+    }
+
+    private func handleFileBrowser(_ key: Key) -> Bool {
+        let children = lsCurrentChildren()
+        switch key {
+        case .up, .char("k"): lsCursor = max(0, lsCursor - 1)
+        case .down, .char("j"): lsCursor = min(max(0, children.count - 1), lsCursor + 1)
+        case .enter, .right, .char("l"):
+            if lsCursor < children.count {
+                let entry = children[lsCursor]
+                if entry.type == "dir" {
+                    lsCurrentPath = entry.path
+                    lsCursor = 0; lsTop = 0
+                } else if let snap = lsSnap {
+                    lsRestoreTargeted(snap: snap, includePath: entry.path)
+                }
+            }
+        case .char("r"):
+            if lsCursor < children.count, let snap = lsSnap {
+                lsRestoreTargeted(snap: snap, includePath: children[lsCursor].path)
+            }
+        case .left, .backspace, .char("h"), .esc:
+            if lsCurrentPath == "/" {
+                screen = .restore
+            } else {
+                let parent = URL(fileURLWithPath: lsCurrentPath).deletingLastPathComponent().path
+                lsCurrentPath = parent.isEmpty ? "/" : parent
+                lsCursor = 0; lsTop = 0
+            }
+        case .char("q"), .ctrlC: if confirmQuit() { return false }
+        case .eof: return false
+        default: break
+        }
+        return true
+    }
+
+    /// Targeted restore: re-exec the CLI with `--include <path>` so only the
+    /// selected file or subtree is written; same safe shell-out/re-enter pattern
+    /// as `restoreSelected`. `includePath` is the full snapshot path, which is
+    /// exactly what `--restore --include` expects.
+    private func lsRestoreTargeted(snap: ResticBackend.Snapshot, includePath: String) {
+        guard let dest = restoreDest else { return }
+        let fmt = DateFormatter()
+        fmt.locale = Locale(identifier: "en_US_POSIX")
+        fmt.dateFormat = "yyyyMMdd-HHmmss"
+        let target = RestoreEngine.defaultTarget(snapshot: snap.shortID, stamp: fmt.string(from: Date()))
+
+        drawPrompt("restore \(fit(includePath, 40)) from \(snap.shortID)?   y: yes   n: cancel")
+        var go = false
+        confirm: while true {
+            switch readKey() {
+            case .char("y"), .char("Y"): go = true; break confirm
+            case .char("n"), .char("N"), .esc, .ctrlC: go = false; break confirm
+            case .eof: go = false; break confirm
+            default: break
+            }
+        }
+        guard go else { statusMsg = "restore cancelled"; return }
+
+        emit("\u{1B}[?25h\u{1B}[?1049l")
+        term.restore()
+        let code = runRestoreChild(dest: dest, snapshot: snap.shortID, target: target, include: includePath)
+        if code == 0 { revealInFinder(target) }
+        let tail = code == 0 ? "restore finished \u{2014} revealed in Finder" : "restore exited with code \(code)"
+        FileHandle.standardOutput.write(Data("\n\(tail) \u{2014} press any key to return\n".utf8))
+        term.enable()
+        _ = readKey()
+        reclaimForeground()
+        emit("\u{1B}[?1049h\u{1B}[?25l")
+        statusMsg = code == 0 ? "restored into \(target.path)" : "restore failed (code \(code))"
     }
 
     // MARK: - Directory listing (cached per cwd)
@@ -1259,6 +1446,14 @@ final class ConfigTUI {
     }
 
     // MARK: - Small helpers
+
+    private func formatBytes(_ bytes: Int?) -> String {
+        guard let b = bytes, b > 0 else { return "" }
+        if b < 1024 { return "\(b) B" }
+        if b < 1_048_576 { return String(format: "%.1f KB", Double(b) / 1024) }
+        if b < 1_073_741_824 { return String(format: "%.1f MB", Double(b) / 1_048_576) }
+        return String(format: "%.1f GB", Double(b) / 1_073_741_824)
+    }
 
     private func fit(_ s: String, _ width: Int) -> String {
         if s.count <= width { return s }
