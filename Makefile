@@ -9,11 +9,18 @@
 # Then:            make             (debug build + sign)
 #                  make release     (release build + sign)
 
-.PHONY: build release sign sign-init clean
+.PHONY: build release test sign sign-init clean
 
 build:
 	swift build
 	./scripts/sign.sh
+
+# Pure-logic unit tests (headless: argument parsing, backup-set model, restore
+# path-safety, secret redaction, the destination + run-history stores). They run
+# against a throwaway store via BAAACKAAAB_SUPPORT_DIR and never touch the TTY
+# TUI, live restic, Photos/TCC or launchd — those stay operator-verified.
+test:
+	swift test
 
 release:
 	swift build -c release

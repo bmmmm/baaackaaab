@@ -24,7 +24,18 @@ let package = Package(
                     "-Xlinker", "Resources/Info.plist",
                 ])
             ]
-        )
+        ),
+        // Pure-logic unit tests. They exercise the headless-testable surface only
+        // (argument parsing, the backup-set model, restore path-safety, secret
+        // redaction, the on-disk destination + run-history stores) — never the
+        // TTY TUI, live restic, Photos/TCC or launchd, which can only be verified
+        // on real hardware. The store tests relocate to a throwaway directory via
+        // BAAACKAAAB_SUPPORT_DIR, so they never touch the real credential store.
+        .testTarget(
+            name: "baaackaaabTests",
+            dependencies: ["baaackaaab"],
+            path: "Tests/baaackaaabTests"
+        ),
     ],
     swiftLanguageModes: [.v6]
 )
