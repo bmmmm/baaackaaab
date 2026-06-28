@@ -1,0 +1,218 @@
+# baaackaaab
+
+One-way backup for iCloud Drive and iCloud Photos into an immutable
+[restic](https://restic.net) repository, built to survive ransomware: the Mac can
+only ever **add** to the backup store, never delete or overwrite it.
+
+It is a single Swift command-line tool for macOS. A bare run backs up a declarative
+*backup set*; an interactive terminal UI edits that set and shows a remote
+dashboard; a launchd timer runs it unattended.
+
+## Why this exists
+
+A normal backup tool with delete/prune rights is a liability: malware (or a bug)
+that controls your Mac can wipe the backups along with the originals. baaackaaab is
+built around one rule — **the Mac is read + append only toward the backup store** —
+so a compromised Mac can add new snapshots but can never destroy old ones.
+
+### The safety model
+
+```
+iCloud  ──materialize──▶  verify real bytes  ──backup──▶  immutable store  ──verify──▶  (optional) evict
+(source)                  (SF_DATALESS off,                (restic, append-                          from iCloud
+                           size > 0)                        only server)
+```
+
+- **iCloud is the source and the evict target, never a backup target.** Data only
+  flows *out* of iCloud into the store.
+- **Nothing is evicted from iCloud before its backup is verified.**
+- **Restore is manual, into a fresh directory** — never back over iCloud. The
+  restore engine hard-rejects any target inside live iCloud Drive or Photos.
+- The store runs a restic REST server in **`--append-only`** mode: the Mac holds no
+  delete/prune right at all. Pruning happens server-side. The single delete
+  operation the Mac may perform is `restic unlock` (lock files only, never data).
+
+## Requirements
+
+- macOS 13 (Ventura) or later — iCloud Drive is FileProvider-backed from Ventura on.
+- A Swift 6 toolchain (Xcode or the Swift toolchain).
+- [`restic`](https://restic.net) on `PATH` (developed against restic 0.19).
+- A backup store. The intended Tier-1 target is a
+  [restic REST server](https://github.com/restic/rest-server) running with
+  `--append-only --private-repos`, but any restic backend works for ad-hoc use
+  (a local path, `sftp:`, etc.).
+
+## Build & install
+
+```sh
+make sign-init      # one-time: create / pick a stable code-signing identity
+make release        # release build + sign  →  .build/release/baaackaaab
+
+# put it on PATH (the launchd timer resolves the absolute path it is installed at)
+ln -sf "$PWD/.build/release/baaackaaab" ~/.local/bin/baaackaaab
+```
+
+`make` (debug) and `make release` both re-sign the binary. Stable signing matters:
+an ad-hoc signature changes on every rebuild, which resets the Photos (TCC) grant
+and would make the unattended timer stall on a permission prompt.
+
+> If you change the code, rebuild **both** `make` and `make release` — the PATH
+> symlink points at the release binary, but `swift build` alone only rebuilds debug.
+
+## First-run setup
+
+The two secrets — the endpoint (htpasswd) password embedded in the repo URL and the
+restic repository encryption password — live in two `0600` files under
+`~/Library/Application Support/baaackaaab/`. They never reach a process argument
+list or this tool's environment; restic reads the files directly via
+`RESTIC_REPOSITORY_FILE` / `RESTIC_PASSWORD_FILE`.
+
+The real server host is private infrastructure and is **not** in the source. Supply
+it at setup time via environment variables (e.g. from `~/.env`):
+
+```sh
+export BAAACKAAAB_ENDPOINT_HOST=restic.example.com   # your rest-server host
+export BAAACKAAAB_ENDPOINT_USER=macbook              # htpasswd user = repo subpath
+
+baaackaaab --init-credentials   # generates both secrets, writes the 0600 files,
+                                # and prints the htpasswd line to add on the server
+```
+
+Add the printed `user:$2y$…` line to the server's htpasswd file, then:
+
+```sh
+baaackaaab --check              # reach the server, init the repo, exit
+```
+
+Migrating from an older Keychain-based install instead? `baaackaaab
+--migrate-credentials` moves the existing secrets into the files (one last Keychain
+prompt) without regenerating them, so the existing repo stays readable.
+
+## Usage
+
+`baaackaaab --help` lists every flag. The essentials:
+
+### The backup set
+
+What a bare run backs up lives in `~/.config/baaackaaab/backup-set.json` — a plain,
+hand-editable file that is the single source of truth. Every front-end just edits it.
+
+```sh
+baaackaaab --add-folder ~/Documents      # add an iCloud Drive folder
+baaackaaab --add-album "Camera Roll"     # add an iCloud Photos album
+baaackaaab --list                        # show the set
+baaackaaab --configure                   # interactive TUI editor (browse + toggle)
+```
+
+### Running a backup
+
+```sh
+baaackaaab                 # back up the set (this is what the timer runs)
+baaackaaab --dry-run       # preview what would upload; writes nothing
+```
+
+On a terminal a real backup shows a live progress bar; piped or under the timer it
+logs restic's plain output. Explicit `--drive-folder` / `--photo-album` flags
+override the set for one-off runs. Run `baaackaaab` with no arguments in a terminal
+to open the **command center** — the set plus a remote dashboard, with keys to edit,
+sync now, and refresh remote status.
+
+Because the Mac can only stage a fraction of the data set at once, Photos are
+exported and uploaded in byte-budgeted batches (each backed up, then deleted), so
+one run produces several restic snapshots that share a `run-<timestamp>` tag.
+
+### Restoring
+
+Restore is safe by construction: it always writes to a **fresh** directory (never
+back into iCloud), previews with `--dry-run`, and re-reads every file with
+`--verify` afterward.
+
+```sh
+baaackaaab --snapshots                              # browse snapshots, newest first
+baaackaaab --find report.pdf --snapshot latest      # locate a single file
+baaackaaab --restore --include path/to/report.pdf   # single-file restore
+baaackaaab --restore --include some/folder          # subtree restore
+baaackaaab --restore                                # full restore (latest)
+baaackaaab --test-restore                           # restore a random sample + verify
+```
+
+Photos restore to their **original files** (import them back via Photos > File >
+Import), not a rebuilt `.photoslibrary`.
+
+### Multiple destinations
+
+Back up to several independent restic repositories at once — each a full copy with
+its own encryption key, for blast-radius isolation (no cross-repo dedup).
+
+```sh
+baaackaaab --add-destination offsite --repo-url rest:https://other/repo --order 1
+baaackaaab --list-destinations
+```
+
+A run backs up to every enabled destination, primary-first. The Mac stays read +
+append only toward all of them.
+
+### Scheduling
+
+```sh
+baaackaaab --install-timer --at 12:00        # daily LaunchAgent
+baaackaaab --install-timer --at 02:00 --days mon,wed,fri
+baaackaaab --timer-status
+baaackaaab --uninstall-timer
+```
+
+The timer runs `baaackaaab --run-tag scheduled`. It needs no Keychain prompt (the
+credential files are read directly); it needs a one-time Photos grant, which a
+stable signature then keeps alive across rebuilds.
+
+### Maintenance & diagnostics
+
+```sh
+baaackaaab --doctor          # restic, destinations, disk, Photos, timer — read-only
+baaackaaab --verify-repo     # restic check per destination (read-only)
+baaackaaab --unlock --destination offsite   # remove STALE locks (the only delete op)
+```
+
+## Tests
+
+```sh
+make test     # or: swift test
+```
+
+The suite covers the headless pure-logic surface — argument parsing, the backup-set
+model, restore path-safety, secret redaction, and the on-disk destination and
+run-history stores. Store tests relocate to a throwaway directory via
+`BAAACKAAAB_SUPPORT_DIR`, so they never touch the real credential store.
+
+The TTY TUI, live restic against a real server, Photos/TCC, and the launchd timer
+are verified on real hardware, not in the test suite.
+
+## Layout
+
+| File | Role |
+|---|---|
+| `BackupSet.swift` | the declarative source list (the JSON model) |
+| `DriveAcquirer.swift` | materialize + verify iCloud Drive folders in place |
+| `PhotosAcquirer.swift` | export iCloud Photos albums in batches (PhotoKit) |
+| `Destination.swift` | the multi-destination model + on-disk store |
+| `ResticBackend.swift` | the restic shell-out (per-process env, secrets off argv) |
+| `BackupRun.swift` | one run: quota → Drive → Photos → manifest → history |
+| `RestoreEngine.swift` | safe restore (fresh-target gate, forbidden roots) |
+| `Secrets.swift` | the 0600 credential files + Keychain legacy read |
+| `ConfigTUI.swift` | the raw-mode terminal UI (command center + editor) |
+| `Timer.swift` | the launchd LaunchAgent |
+
+## Security notes
+
+- Secrets live in `0600` files; only their **paths** are ever passed to restic. No
+  secret reaches argv (world-readable via `ps`) or this tool's environment.
+- The repo URL embeds the endpoint password; it is redacted (masking the whole
+  userinfo) wherever it is logged or shown.
+- Tracked source ships placeholder infrastructure values
+  (`restic.example.com`, …); real values come from the environment at setup time
+  and otherwise live only in the local credential files.
+- The store is `--append-only`: a compromised Mac cannot delete or rewrite history.
+
+## License
+
+GPL-3.0. See [LICENSE](LICENSE).
