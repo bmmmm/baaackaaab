@@ -95,4 +95,46 @@ final class CLIArgumentsTests: XCTestCase {
         XCTAssertEqual(days, [1, 5])
         XCTAssertEqual(unknown, ["xyzzy"])
     }
+
+    // MARK: - unknownArgument (the typo guard before the backup dispatch)
+
+    /// argv[0] is always present and ignored; a bare invocation is accepted.
+    func testUnknownArgumentAcceptsBareAndKnownFlags() {
+        XCTAssertNil(CLIArguments.unknownArgument(in: ["baaackaaab"]))
+        XCTAssertNil(CLIArguments.unknownArgument(in: ["baaackaaab", "--check"]))
+        XCTAssertNil(CLIArguments.unknownArgument(in: ["baaackaaab", "--snapshots"]))
+        XCTAssertNil(CLIArguments.unknownArgument(in: ["baaackaaab", "--doctor"]))
+    }
+
+    /// The regression: a bare word (e.g. `check` typed for `--check`) must be
+    /// rejected, not silently fall through the dispatch to a full backup.
+    func testUnknownArgumentRejectsBarePositional() {
+        let msg = CLIArguments.unknownArgument(in: ["baaackaaab", "check"])
+        XCTAssertNotNil(msg)
+        XCTAssertTrue(msg?.contains("--check") ?? false, "should suggest the flag form")
+        XCTAssertNotNil(CLIArguments.unknownArgument(in: ["baaackaaab", "snapshots"]))
+        XCTAssertNotNil(CLIArguments.unknownArgument(in: ["baaackaaab", "doctor"]))
+    }
+
+    /// A bare word with no matching flag is still rejected, just without a suggestion.
+    func testUnknownArgumentRejectsBareWordWithoutSuggestion() {
+        let msg = CLIArguments.unknownArgument(in: ["baaackaaab", "wat"])
+        XCTAssertNotNil(msg)
+        XCTAssertFalse(msg?.contains("did you mean") ?? true)
+    }
+
+    func testUnknownArgumentRejectsMistypedFlag() {
+        XCTAssertNotNil(CLIArguments.unknownArgument(in: ["baaackaaab", "--snapshtos"]))
+        XCTAssertNotNil(CLIArguments.unknownArgument(in: ["baaackaaab", "--docktor"]))
+    }
+
+    /// A flag value may legitimately start with '-' or look like a bare word — it
+    /// is consumed by its flag, never checked. `--diff` consumes two.
+    func testUnknownArgumentSkipsFlagValues() {
+        XCTAssertNil(CLIArguments.unknownArgument(in: ["baaackaaab", "--find", "-x"]))
+        XCTAssertNil(CLIArguments.unknownArgument(in: ["baaackaaab", "--restic-repo", "rest:https://h/r/"]))
+        XCTAssertNil(CLIArguments.unknownArgument(in: ["baaackaaab", "--diff", "aaaa", "bbbb"]))
+        // The value after --include can be any path word; it must not be read as a positional.
+        XCTAssertNil(CLIArguments.unknownArgument(in: ["baaackaaab", "--restore", "--include", "report.pdf"]))
+    }
 }

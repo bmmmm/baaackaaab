@@ -117,6 +117,59 @@ struct CLIArguments {
         }
         return (days.sorted(), unknown)
     }
+
+    /// Flags that consume the FOLLOWING token as their value (that token is a
+    /// value, never checked as a flag — a value may legitimately start with '-',
+    /// e.g. `--find -x`). `--diff` consumes two (a snapshot pair).
+    static let valueFlags: Set<String> = [
+        "--drive-folder", "--photo-album", "--photo-batch-bytes", "--staging",
+        "--add-folder", "--remove-folder", "--add-album", "--remove-album",
+        "--limit-upload", "--config", "--restic-repo", "--host", "--run-tag",
+        "--add-destination", "--repo-url", "--repo-password-file", "--link",
+        "--order", "--remove-destination", "--ls", "--find", "--snapshot",
+        "--target", "--include", "--sample", "--max-bytes", "--destination",
+        "--read-data-subset", "--at", "--days", "--repo-quota-bytes",
+        "--quota-warn-fraction", "--materialize-test", "--evict-test",
+    ]
+    /// Flags that stand alone (no value).
+    static let boolFlags: Set<String> = [
+        "--init-credentials", "--migrate-credentials", "--force", "--check",
+        "--list", "--configure", "--clear-limit-upload", "--list-destinations",
+        "--disabled", "--snapshots", "--restore", "--test-restore", "--dry-run",
+        "--yes", "--no-verify", "--verify-repo", "--unlock", "--remove-all",
+        "--install-timer", "--uninstall-timer", "--timer-status", "--doctor",
+        "--center", "--help", "-h",
+    ]
+
+    /// Find the first token that is neither a known flag nor a consumed flag
+    /// value, returning an actionable error message for it (or nil when every
+    /// token is accounted for). The dispatch matches specific flags and, finding
+    /// none, backs up the set — so any unrecognized token must be caught here or
+    /// it falls through to a full backup. Two failure modes:
+    ///   * a `--flag` typo (`--snapshtos`) — an unknown flag;
+    ///   * a bare word (`check` for `--check`) — baaackaaab has NO positional
+    ///     commands, every operation is a flag, so a stray positional is always a
+    ///     mistyped command and must fail loudly too.
+    /// Pure (no argv access, no exit/IO) — directly unit-testable; the process
+    /// wrapper `rejectUnknownFlags()` adds the exit.
+    static func unknownArgument(in tokens: [String]) -> String? {
+        var i = 1   // skip argv[0]
+        while i < tokens.count {
+            let tok = tokens[i]
+            if tok == "--diff" { i += 3; continue }           // flag + two snapshot ids
+            if valueFlags.contains(tok) { i += 2; continue }  // flag + its value
+            if boolFlags.contains(tok) { i += 1; continue }
+            if tok.hasPrefix("-") && tok != "-" {
+                return "unknown flag '\(tok)' — see `baaackaaab --help` for the accepted flags. (Refusing to continue: an unrecognized flag would otherwise fall through to a full backup of the set.)"
+            }
+            // A token that is neither a known flag nor a consumed flag value is a
+            // stray positional argument. Suggest the flag form when one exists.
+            let suggestion = boolFlags.contains("--\(tok)") || valueFlags.contains("--\(tok)")
+                ? " (did you mean '--\(tok)'?)" : ""
+            return "unexpected argument '\(tok)'\(suggestion) — baaackaaab has no positional commands; every operation is a flag. See `baaackaaab --help`. (Refusing to continue: it would otherwise fall through to a full backup of the set.)"
+        }
+        return nil
+    }
 }
 
 /// The process command line, parsed once. Module-global so the dispatch script

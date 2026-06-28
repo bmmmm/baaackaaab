@@ -9,47 +9,16 @@ import Darwin
 // bytes landed, stage them. Never writes back to the user's data. A separate
 // shell step then hands the verified staging tree to restic.
 
-/// Reject an unrecognized `--flag` before it can fall through to a backup. The
+/// Reject an unrecognized token before it can fall through to a backup. The
 /// dispatch below matches specific flags and, finding none, backs up the set — so
-/// a typo'd command (e.g. `--restoree`, `--snapshtos`) would otherwise silently
-/// start a full backup instead of failing. Every accepted flag is listed here; a
-/// token that looks like a flag but is not known exits with an actionable error.
-/// Flag VALUES are skipped (a value may legitimately start with '-', e.g.
-/// `--find -x`), so only genuine flag tokens are checked.
+/// a typo'd command (`--snapshtos`, or a bare `check` for `--check`) would
+/// otherwise silently start a full backup instead of failing. The classification
+/// is in `CLIArguments.unknownArgument` (pure + unit-tested); this wraps it with
+/// the process exit.
 func rejectUnknownFlags() {
-    // Flags that consume the FOLLOWING token as their value — that token is a
-    // value, never checked as a flag. `--diff` consumes two (a snapshot pair).
-    let valueFlags: Set<String> = [
-        "--drive-folder", "--photo-album", "--photo-batch-bytes", "--staging",
-        "--add-folder", "--remove-folder", "--add-album", "--remove-album",
-        "--limit-upload", "--config", "--restic-repo", "--host", "--run-tag",
-        "--add-destination", "--repo-url", "--repo-password-file", "--link",
-        "--order", "--remove-destination", "--ls", "--find", "--snapshot",
-        "--target", "--include", "--sample", "--max-bytes", "--destination",
-        "--read-data-subset", "--at", "--days", "--repo-quota-bytes",
-        "--quota-warn-fraction", "--materialize-test", "--evict-test",
-    ]
-    // Flags that stand alone (no value).
-    let boolFlags: Set<String> = [
-        "--init-credentials", "--migrate-credentials", "--force", "--check",
-        "--list", "--configure", "--clear-limit-upload", "--list-destinations",
-        "--disabled", "--snapshots", "--restore", "--test-restore", "--dry-run",
-        "--yes", "--no-verify", "--verify-repo", "--unlock", "--remove-all",
-        "--install-timer", "--uninstall-timer", "--timer-status", "--doctor",
-        "--center", "--help", "-h",
-    ]
-    let args = cli.tokens
-    var i = 1   // skip argv[0]
-    while i < args.count {
-        let tok = args[i]
-        if tok == "--diff" { i += 3; continue }           // flag + two snapshot ids
-        if valueFlags.contains(tok) { i += 2; continue }  // flag + its value
-        if boolFlags.contains(tok) { i += 1; continue }
-        if tok.hasPrefix("-") && tok != "-" {
-            Console.error("unknown flag '\(tok)' — see `baaackaaab --help` for the accepted flags. (Refusing to continue: an unrecognized flag would otherwise fall through to a full backup of the set.)")
-            exit(1)
-        }
-        i += 1   // a bare positional, or a value already accounted for above
+    if let err = CLIArguments.unknownArgument(in: cli.tokens) {
+        Console.error(err)
+        exit(1)
     }
 }
 
