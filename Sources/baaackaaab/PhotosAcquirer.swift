@@ -63,13 +63,25 @@ final class PhotosAcquirer {
             throw PhotosError.notAuthorized(describe(status))
         }
 
-        guard let album = findAlbum(title: albumTitle) else {
+        // Resolve EVERY album with this title, not just the first. Photos lets two
+        // albums share a name; backing up only one would silently drop the other's
+        // photos. A one-way backup never deletes, so backing up all same-named
+        // albums is always safe — and it spares the user a forced rename in
+        // Photos.app. A photo that is in several of them is exported once per
+        // membership; restic dedups the bytes, so the repo does not grow.
+        let albums = findAlbums(title: albumTitle)
+        guard !albums.isEmpty else {
             throw PhotosError.albumNotFound(albumTitle)
         }
+        if albums.count > 1 {
+            Console.step("\(albums.count) albums are titled '\(albumTitle)' — backing up all of them")
+        }
 
-        let assets = PHAsset.fetchAssets(in: album, options: nil)
-        Console.step("album '\(albumTitle)' contains \(assets.count) asset(s)")
-        guard assets.count > 0 else { throw PhotosError.albumEmpty(albumTitle) }
+        let assetLists = albums.map { PHAsset.fetchAssets(in: $0, options: nil) }
+        let totalAssets = assetLists.reduce(0) { $0 + $1.count }
+        let spread = albums.count > 1 ? " across \(albums.count) albums" : ""
+        Console.step("album '\(albumTitle)' contains \(totalAssets) asset(s)\(spread)")
+        guard totalAssets > 0 else { throw PhotosError.albumEmpty(albumTitle) }
 
         let photosRoot = try staging.subdir("photos")
         let manager = PHAssetResourceManager.default()
@@ -96,20 +108,28 @@ final class PhotosAcquirer {
             assetsInBatch = 0
         }
 
-        for i in 0..<assets.count {
-            let asset = assets.object(at: i)
-            let assetDir = try batchDir().appendingPathComponent(
-                String(format: "%04d_%@", i + 1, Staging.sanitize(asset.localIdentifier)),
-                isDirectory: true
-            )
-            try? FileManager.default.createDirectory(at: assetDir, withIntermediateDirectories: true)
+        // Flatten the albums into one asset stream. `ordinal` counts globally
+        // across albums so each staged asset dir is unique (the localIdentifier is
+        // in the name too) and the "asset N/total" log stays monotonic; batches
+        // also flow across album boundaries, keeping each batch full to budget.
+        var ordinal = 0
+        for assets in assetLists {
+            for i in 0..<assets.count {
+                let asset = assets.object(at: i)
+                ordinal += 1
+                let assetDir = try batchDir().appendingPathComponent(
+                    String(format: "%04d_%@", ordinal, Staging.sanitize(asset.localIdentifier)),
+                    isDirectory: true
+                )
+                try? FileManager.default.createDirectory(at: assetDir, withIntermediateDirectories: true)
 
-            batchBytes += exportResources(
-                of: asset, index: i + 1, count: assets.count,
-                into: assetDir, manager: manager, staging: staging
-            )
-            assetsInBatch += 1
-            if batchBytes >= byteBudget { try flush() }
+                batchBytes += exportResources(
+                    of: asset, index: ordinal, count: totalAssets,
+                    into: assetDir, manager: manager, staging: staging
+                )
+                assetsInBatch += 1
+                if batchBytes >= byteBudget { try flush() }
+            }
         }
         try flush()   // final partial batch
     }
@@ -221,16 +241,17 @@ final class PhotosAcquirer {
         return result.value
     }
 
-    private func findAlbum(title: String) -> PHAssetCollection? {
+    /// Every user album with this exact title (Photos allows duplicates). Sorted
+    /// by localIdentifier so the backup order is stable across runs — it does not
+    /// affect the result (all are backed up) but keeps the staging layout and the
+    /// "asset N/total" numbering reproducible.
+    private func findAlbums(title: String) -> [PHAssetCollection] {
         let collections = PHAssetCollection.fetchAssetCollections(with: .album, subtype: .any, options: nil)
         var matches: [PHAssetCollection] = []
         collections.enumerateObjects { collection, _, _ in
             if collection.localizedTitle == title { matches.append(collection) }
         }
-        if matches.count > 1 {
-            Console.warn("\(matches.count) albums are titled '\(title)' — backing up the first one; rename them in Photos.app to disambiguate")
-        }
-        return matches.first
+        return matches.sorted { $0.localIdentifier < $1.localIdentifier }
     }
 
     private func describe(_ status: PHAuthorizationStatus) -> String {
