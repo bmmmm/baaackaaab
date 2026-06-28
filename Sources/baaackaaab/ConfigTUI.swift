@@ -325,14 +325,27 @@ final class ConfigTUI {
     /// Home screen (the command center). Routes the action keys; returns false to
     /// quit the whole app.
     private func handleHome(_ key: Key) -> Bool {
+        // The help overlay is modal: while it is up, esc / ? just dismiss it (no
+        // quit prompt), and any action key dismisses it BEFORE acting — otherwise
+        // the overlay stays painted over the dashboard and the user appears stuck
+        // in help. Only q / Ctrl-C still quit (with confirmation), as the overlay
+        // itself advertises.
+        if showHelp {
+            switch key {
+            case .char("?"), .esc: showHelp = false; return true
+            case .char("q"), .ctrlC: return confirmQuit() ? false : true
+            case .eof: return false
+            default: showHelp = false   // fall through to run the action below
+            }
+        }
         switch key {
-        case .char("e"), .enter, .right, .tab: screen = .editor; showHelp = false
+        case .char("e"), .enter, .right, .tab: screen = .editor
         case .char("s"): syncNow()
         case .char("p"): dryRunNow()
         case .char("r"): refreshRemote()
         case .char("R"): enterRestore()
         case .char("t"): enterTimer()
-        case .char("?"): showHelp.toggle()
+        case .char("?"): showHelp = true
         case .char("q"), .esc, .ctrlC: if confirmQuit() { return false }
         case .eof: return false
         default: break
@@ -645,8 +658,8 @@ final class ConfigTUI {
             ("r", "refresh remote status"),
             ("R", "open restore browser"),
             ("t", "edit the scheduled-backup timer"),
-            ("?", "toggle this overlay"),
-            ("q / esc", "quit"),
+            ("esc / ?", "close this help"),
+            ("q", "quit"),
         ]
         var lines: [String] = [dim(fit("  keyboard shortcuts", cols))]
         for (key, desc) in entries {
