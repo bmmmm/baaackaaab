@@ -99,7 +99,7 @@ enum UpdateCheck {
     /// — comparing against these needs no network. (restic: README "developed
     /// against restic 0.19"; rest-server: the current stable line.)
     static let resticBaseline = SemVer(0, 19, 0)
-    static let restServerBaseline = SemVer(0, 13, 0)
+    static let restServerBaseline = SemVer(0, 14, 0)
 
     /// GitHub repos queried for the newest release on the opt-in online path.
     static let resticRepo = "restic/restic"
