@@ -151,6 +151,24 @@ the closest to the safety core and is worth doing first.
     main.swift's head is byte-identical to the prior commit. Compile + exit-code
     smoke green. Runtime under launchd / Photos / restic is operator-verified.
 
+## Ops (operational — not a code change)
+
+- [ ] **Update the rest-server on the store host to 0.14.0.** `Security` — pending
+  - The tested baseline was bumped to 0.14.0 (`UpdateCheck.swift:restServerBaseline`),
+    but the actual running rest-server on the store host is likely still on an older
+    line. The tool cannot read the server's version (rest-server doesn't advertise
+    it), so this is not remotely verifiable — `baaackaaab --check-updates` only shows
+    the latest *available* release (0.14.0) for manual comparison.
+  - Why it matters: 0.14.0 fixes world-readable permissions on newly created
+    `.htpasswd` files (the endpoint password hash was readable by other local users
+    on the server) and prints the append-only mode status at startup — both central
+    to this tool's append-only threat model.
+  - Steps: swap the rest-server binary on the store host for the
+    [v0.14.0 release](https://github.com/restic/rest-server/releases/tag/v0.14.0),
+    keep `--append-only --private-repos`, restart the service, confirm the startup
+    log now prints the append-only status. The `.htpasswd` perms fix only applies to
+    *newly created* files, so also `chmod 600` the existing htpasswd file by hand.
+
 ## Decisions — do NOT re-investigate
 
 - **`--config` forwarding to the restore/read children is a no-op (dead code).**
@@ -165,5 +183,3 @@ the closest to the safety core and is worth doing first.
   access level: `PHAccessLevel` is `.addOnly` (write-only) or `.readWrite`.
   Reading the library requires `.readWrite`, so it is the minimum, not an
   over-grant (PhotosAcquirer.swift:171-172, 192, 209).
-</content>
-</invoke>
