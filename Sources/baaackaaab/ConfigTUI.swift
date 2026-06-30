@@ -140,6 +140,12 @@ final class ConfigTUI {
     private var remotes: [ResticBackend.RemoteStatus] = []
     private var remoteQueried = false
 
+    // restic + REST-server currency, shown on the home dashboard. Lazy like the
+    // remote status: nothing is checked until the user presses `u`, so opening the
+    // dashboard never contacts GitHub or the server (the offline-by-default rule).
+    private var updateFindings: [UpdateCheck.Finding] = []
+    private var updatesChecked = false
+
     // The tail of the run history (no credentials — just tags/times/counts), shown
     // on the home dashboard. Loaded lazily and dropped after a sync so a fresh run
     // shows up on return.
@@ -343,6 +349,7 @@ final class ConfigTUI {
         case .char("s"): syncNow()
         case .char("p"): dryRunNow()
         case .char("r"): refreshRemote()
+        case .char("u"): checkUpdatesNow()
         case .char("R"): enterRestore()
         case .char("t"): enterTimer()
         case .char("?"): showHelp = true
@@ -575,6 +582,14 @@ final class ConfigTUI {
             for rec in runs { body.append(homeRunLine(rec, cols)) }
         }
 
+        body.append("")
+        body.append(divider("updates", cols))
+        if !updatesChecked {
+            body.append(dim(fit("  press u to check restic + the REST server against the latest releases", cols)))
+        } else {
+            for f in updateFindings { body.append(homeUpdateLine(f, cols)) }
+        }
+
         if showHelp { body = helpOverlayLines(contentH, cols) }
         else if body.count < contentH { body += Array(repeating: "", count: contentH - body.count) }
         if body.count > contentH { body = Array(body.prefix(contentH)) }
@@ -645,8 +660,29 @@ final class ConfigTUI {
         return r.clean ? green(plain) : yellow(plain)
     }
 
+    /// One update finding on the dashboard, coloured like the run lines: green when
+    /// current, yellow when behind, dim when a side is unreadable. Mirrors
+    /// Finding.emit() but renders into the TUI buffer instead of printing to stdout
+    /// (which would tear the alternate screen).
+    private func homeUpdateLine(_ f: UpdateCheck.Finding, _ cols: Int) -> String {
+        let refLabel = f.referenceKind == .latest ? "latest" : "baseline"
+        switch f.verdict {
+        case .upToDate:
+            return green(fit("  \u{2713} \(f.component) \(f.installed!) \u{2014} current (\(refLabel) \(f.reference!))", cols))
+        case .behind(let inst, let ref):
+            return yellow(fit("  \u{2717} \(f.component) \(inst) \u{2014} update available: \(ref) (\(refLabel))", cols))
+        case .unknownInstalled:
+            var s = "  \(f.component): \(f.unavailableNote)"
+            if let ref = f.reference { s += " (\(refLabel) \(ref))" }
+            return dim(fit(s, cols))
+        case .unknownReference:
+            let inst = f.installed.map { "\($0)" } ?? "?"
+            return dim(fit("  \(f.component) \(inst): \(refLabel) version unknown (offline?)", cols))
+        }
+    }
+
     private func homeHelpLine() -> String {
-        "e edit \u{2022} s sync \u{2022} p preview \u{2022} r remote \u{2022} R restore \u{2022} t timer \u{2022} ? help \u{2022} q quit"
+        "e edit \u{2022} s sync \u{2022} p preview \u{2022} r remote \u{2022} u updates \u{2022} R restore \u{2022} t timer \u{2022} ? help \u{2022} q quit"
     }
 
     /// Help overlay content: replaces the body area when showHelp is toggled.
@@ -656,6 +692,7 @@ final class ConfigTUI {
             ("s", "run backup now"),
             ("p", "dry-run preview (reads repo, uploads nothing)"),
             ("r", "refresh remote status"),
+            ("u", "check restic / server updates (contacts GitHub)"),
             ("R", "open restore browser"),
             ("t", "edit the scheduled-backup timer"),
             ("esc / ?", "close this help"),
@@ -921,6 +958,21 @@ final class ConfigTUI {
         remoteQueried = true
         reclaimForeground()   // a restic child may have grabbed the tty foreground
         statusMsg = ""
+    }
+
+    /// Check restic + the REST server against the latest upstream releases. Online
+    /// (contacts GitHub) — the opt-in network path, run only on demand like the
+    /// remote query. `resticInstalled()` shells out to `restic version`, so reclaim
+    /// the tty foreground afterwards just as refreshRemote does.
+    private func checkUpdatesNow() {
+        statusMsg = "checking restic + the REST server against the latest releases\u{2026}"; renderHome()
+        ensureRepoResolved()
+        updateFindings = UpdateCheck.findings(primaryRepoURL: destinations.first?.displayURL, online: true)
+        updatesChecked = true
+        reclaimForeground()
+        let behind = updateFindings.contains { if case .behind = $0.verdict { return true } else { return false } }
+        statusMsg = behind ? "update(s) available \u{2014} see the updates panel"
+                           : "restic + the REST server are up to date"
     }
 
     /// Resolve every enabled destination for the in-process remote query and the
