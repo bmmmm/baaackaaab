@@ -138,7 +138,7 @@ struct CLIArguments {
         "--disabled", "--snapshots", "--restore", "--test-restore", "--dry-run",
         "--yes", "--no-verify", "--verify-repo", "--unlock", "--remove-all",
         "--install-timer", "--uninstall-timer", "--timer-status", "--doctor",
-        "--center", "--help", "-h",
+        "--check-updates", "--center", "--help", "-h",
     ]
 
     /// Find the first token that is neither a known flag nor a consumed flag

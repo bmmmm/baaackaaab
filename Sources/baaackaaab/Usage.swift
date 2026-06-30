@@ -108,11 +108,13 @@ func printUsage() {
 
     Console.section("Diagnostics")
     Console.info([
-        ("--doctor", "consolidated health check: restic, destinations, disk, Photos, timer"),
+        ("--doctor", "consolidated health check: restic, destinations, disk, Photos, timer, updates"),
+        ("--check-updates", "compare restic + the REST server against the latest releases (contacts GitHub), then exit"),
         ("--materialize-test <file>", "prove a dataless stub re-materializes, then exit"),
         ("--evict-test <file>", "prove the evict/re-download round-trip, then exit"),
         ("-h, --help", "show this help and exit"),
     ])
+    Console.note("--doctor also checks restic + the REST server against the versions baaackaaab is tested against (offline, no GitHub); --check-updates additionally asks GitHub for the newest releases. The unattended timer posts a banner when restic / the server has fallen behind the tested baseline.")
 
     Console.section("Examples")
     Console.note("baaackaaab --restic-repo rest:https://host/repo \\\n             --drive-folder ~/Documents --photo-album \"Backup\"")

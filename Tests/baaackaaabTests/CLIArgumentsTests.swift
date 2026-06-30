@@ -104,6 +104,7 @@ final class CLIArgumentsTests: XCTestCase {
         XCTAssertNil(CLIArguments.unknownArgument(in: ["baaackaaab", "--check"]))
         XCTAssertNil(CLIArguments.unknownArgument(in: ["baaackaaab", "--snapshots"]))
         XCTAssertNil(CLIArguments.unknownArgument(in: ["baaackaaab", "--doctor"]))
+        XCTAssertNil(CLIArguments.unknownArgument(in: ["baaackaaab", "--check-updates"]))
     }
 
     /// The regression: a bare word (e.g. `check` typed for `--check`) must be

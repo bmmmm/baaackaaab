@@ -112,6 +112,14 @@ if cli.has("--doctor") {
     exit(0)
 }
 
+// Compare the installed restic CLI + REST server against the latest upstream
+// releases (the one path that contacts GitHub; falls back to the pinned baseline
+// when offline). Read-only, never writes; always exits 0.
+if cli.has("--check-updates") {
+    updateCheckCommand()
+    exit(0)
+}
+
 // Read-only snapshot browser (restore starts here: pick a snapshot's short id).
 if cli.has("--snapshots") {
     listSnapshotsCommand()

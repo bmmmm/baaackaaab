@@ -380,6 +380,16 @@ struct BackupRun {
                 details: details
             )
             recordRun(exitCode: 0, verified: verified, total: total, sourceFailures: sourceFailures)
+            // Unattended (log-only) path: nudge once per clean run when restic or the
+            // server has fallen behind the tested baseline — the scheduled log goes
+            // unread, so a banner is the only signal. Offline for restic; best-effort
+            // probe for the server (we just reached it). Silent when everything is
+            // current, and never on an interactive run (the summary is on screen).
+            if isatty(STDERR_FILENO) == 0,
+               let stale = UpdateCheck.staleBaselineBanner(primaryRepoURL: primaryRepo) {
+                Notifier.notify(title: "baaackaaab \u{2014} update available",
+                                message: stale, subtitle: "run \(runTag)")
+            }
         } catch {
             Console.error("\(error)")
             // The throw happened before/around acquisition (e.g. staging init): `runs` is

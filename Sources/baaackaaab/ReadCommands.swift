@@ -614,6 +614,15 @@ func doctorCommand() {
         Console.note("not installed (optional) — `--install-timer` schedules a daily backup of the set")
     }
 
+    Console.section("Updates")
+    // Offline baseline only: restic is read locally, the server via the best-effort
+    // header probe against the host we already contacted above. No GitHub here —
+    // `--check-updates` is the explicit online comparison.
+    for finding in UpdateCheck.findings(primaryRepoURL: dests.first?.displayURL, online: false) {
+        if finding.emit() { warnings += 1 }
+    }
+    Console.note("run `baaackaaab --check-updates` to compare against the latest upstream releases (contacts GitHub)")
+
     Console.section("Verdict")
     if problems > 0 {
         Console.failure("\(problems) problem(s), \(warnings) warning(s) — fix the problems above before relying on the backup")

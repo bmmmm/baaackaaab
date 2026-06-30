@@ -168,10 +168,34 @@ stable signature then keeps alive across rebuilds.
 ### Maintenance & diagnostics
 
 ```sh
-baaackaaab --doctor          # restic, destinations, disk, Photos, timer — read-only
+baaackaaab --doctor          # restic, destinations, disk, Photos, timer, updates — read-only
 baaackaaab --verify-repo     # restic check per destination (read-only)
+baaackaaab --check-updates   # compare restic + the REST server against the latest releases
 baaackaaab --unlock --destination offsite   # remove STALE locks (the only delete op)
 ```
+
+### Staying current
+
+baaackaaab tracks two moving parts — the local `restic` CLI and the remote restic
+REST server — against the versions it is **developed and tested against** (pinned in
+`UpdateCheck.swift`). Two layers, so the default path never touches the public
+internet:
+
+- **Offline baseline** (`--doctor`, and every unattended timer run): the installed
+  versions are compared against the pinned baselines. No GitHub. The scheduled run
+  posts a macOS banner when restic or the server has fallen behind — the only signal
+  you'd otherwise miss, since the scheduled log goes unread.
+- **Online latest** (`--check-updates`, opt-in): additionally asks the GitHub
+  releases API for the newest upstream release and compares. This is the only
+  command that contacts `api.github.com`; if GitHub is unreachable it degrades to
+  the offline baseline rather than failing.
+
+The restic version is read locally (`restic version`). The REST server does not
+advertise its version in the normal case, so the server check is best-effort — it
+probes the HTTP `Server` header (a reverse proxy sometimes exposes it) and otherwise
+reports the latest release for you to compare against your server yourself. The
+header probe sends only `scheme://host`, never the repository password. Being behind
+is informational; it never fails a backup or a check.
 
 ## Tests
 
@@ -180,9 +204,12 @@ make test     # or: swift test
 ```
 
 The suite covers the headless pure-logic surface — argument parsing, the backup-set
-model, restore path-safety, secret redaction, and the on-disk destination and
+model, restore path-safety, secret redaction, version parsing/comparison and the
+server-endpoint extraction behind the update check, and the on-disk destination and
 run-history stores. Store tests relocate to a throwaway directory via
-`BAAACKAAAB_SUPPORT_DIR`, so they never touch the real credential store.
+`BAAACKAAAB_SUPPORT_DIR`, so they never touch the real credential store. The live
+GitHub query and HTTP header probe touch the network, so they are not unit-tested —
+both degrade to nil/baseline by construction.
 
 The TTY TUI, live restic against a real server, Photos/TCC, and the launchd timer
 are verified on real hardware, not in the test suite.
@@ -201,6 +228,7 @@ are verified on real hardware, not in the test suite.
 | `Secrets.swift` | the 0600 credential files + Keychain legacy read |
 | `ConfigTUI.swift` | the raw-mode terminal UI (command center + editor) |
 | `Timer.swift` | the launchd LaunchAgent |
+| `UpdateCheck.swift` | restic + REST-server version checks (offline baseline / online latest) |
 
 ## Security notes
 
