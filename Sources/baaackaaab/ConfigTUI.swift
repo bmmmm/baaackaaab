@@ -974,9 +974,14 @@ final class ConfigTUI {
         updateFindings = UpdateCheck.findings(primaryRepoURL: destinations.first?.displayURL, online: true)
         updatesChecked = true
         reclaimForeground()
+        // Don't claim "up to date" when a component's installed version was
+        // unreadable (the usual rest-server case) — we only verified what we could
+        // actually read. Honest summary over a reassuring one.
         let behind = updateFindings.contains { if case .behind = $0.verdict { return true } else { return false } }
+        let unreadable = updateFindings.contains { if case .unknownInstalled = $0.verdict { return true } else { return false } }
         statusMsg = behind ? "update(s) available \u{2014} see the updates panel"
-                           : "restic + the REST server are up to date"
+                  : unreadable ? "checked \u{2014} some installed versions couldn't be read (see the panel)"
+                  : "restic + the REST server are up to date"
     }
 
     /// Resolve every enabled destination for the in-process remote query and the
