@@ -115,7 +115,7 @@ On a terminal a real backup shows a live progress bar; piped or under the timer 
 logs restic's plain output. Explicit `--drive-folder` / `--photo-album` flags
 override the set for one-off runs. Run `baaackaaab` with no arguments in a terminal
 to open the **command center** — the set plus a remote dashboard, with keys to edit,
-sync now, and refresh remote status.
+sync now, refresh remote status, and check restic / server updates (`u`, contacts GitHub).
 
 Because the Mac can only stage a fraction of the data set at once, Photos are
 exported and uploaded in byte-budgeted batches (each backed up, then deleted), so
