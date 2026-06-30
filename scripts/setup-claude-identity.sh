@@ -19,7 +19,9 @@
 #
 # What this script sets, scoped to this repo only:
 #   - user.name, user.email   → $GIT_NAME / $GIT_EMAIL from the identity config
-#   - remote.origin.url       → https://$FORGEJO_HOST/<owner>/<repo>.git
+#   - remote.origin.url       → https://<owner>@$FORGEJO_HOST/<owner>/<repo>.git
+#                               (the <owner>@ lets git's credential store pick the
+#                               right token when one host carries several accounts)
 #   - credential.helper       → store --file=~/.config/claudii/git-credentials
 #                               (created if missing, mode 600, token from tea)
 #
@@ -96,10 +98,17 @@ TEA_USER="$OWNER"
 mkdir -p "$(dirname "$CRED_FILE")"
 chmod 700 "$(dirname "$CRED_FILE")"
 # Always write the current token — ensures rotation takes effect immediately.
-# Other hosts in the file are preserved; only the Forgejo line is replaced.
+# Replace ONLY this user's line for this host. Other accounts on the SAME host
+# must survive: one Forgejo host can carry more than one identity, and a host-wide
+# wipe would let whichever repo ran setup last clobber the other account's push
+# credential — the push would then auth as the wrong user, and Forgejo answers 404
+# (it hides private repos from accounts without access). The match is anchored on
+# the "<user>:" prefix and the "@host" suffix so a token containing '@' can't widen
+# it; the host's dots are escaped to stay literal in the regex.
 CRED_LINE="https://${TEA_USER}:${TOKEN}@${FORGEJO_HOST}"
+HOST_RE="${FORGEJO_HOST//./\\.}"
 if [[ -f "$CRED_FILE" ]]; then
-  grep -v "@${FORGEJO_HOST}" "$CRED_FILE" > "${CRED_FILE}.tmp" || true
+  grep -vE "^https://${TEA_USER}:.*@${HOST_RE}\$" "$CRED_FILE" > "${CRED_FILE}.tmp" || true
   echo "$CRED_LINE" >> "${CRED_FILE}.tmp"
   mv "${CRED_FILE}.tmp" "$CRED_FILE"
 else
@@ -120,7 +129,9 @@ git config --local --add credential.helper ""
 git config --local --add credential.helper "store --file=${CRED_FILE}"
 git config --local --unset core.sshCommand 2>/dev/null || true
 
-NEW_URL="https://${FORGEJO_HOST}/${OWNER}/${REPO_FROM_URL}.git"
+# Embed the owner as the URL username so git's credential store returns THIS
+# account's token (not just the first line matching the host).
+NEW_URL="https://${TEA_USER}@${FORGEJO_HOST}/${OWNER}/${REPO_FROM_URL}.git"
 if [[ "$CURRENT_URL" != "$NEW_URL" ]]; then
   # `set-url` requires an existing remote; a freshly `git init`ed repo has none.
   if git remote get-url origin >/dev/null 2>&1; then
