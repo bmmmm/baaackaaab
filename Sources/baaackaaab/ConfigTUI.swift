@@ -672,9 +672,13 @@ final class ConfigTUI {
         case .behind(let inst, let ref):
             return yellow(fit("  \u{2717} \(f.component) \(inst) \u{2014} update available: \(ref) (\(refLabel))", cols))
         case .unknownInstalled:
-            var s = "  \(f.component): \(f.unavailableNote)"
-            if let ref = f.reference { s += " (\(refLabel) \(ref))" }
-            return dim(fit(s, cols))
+            // The installed version is unreadable (the usual rest-server case), so the
+            // reference IS the line's value — lead with it so a narrow dashboard
+            // truncates the explanatory tail, not the version the user came to see.
+            if let ref = f.reference {
+                return dim(fit("  \(f.component): \(refLabel) \(ref) \u{2014} installed version not readable here", cols))
+            }
+            return dim(fit("  \(f.component): \(f.unavailableNote)", cols))
         case .unknownReference:
             let inst = f.installed.map { "\($0)" } ?? "?"
             return dim(fit("  \(f.component) \(inst): \(refLabel) version unknown (offline?)", cols))
