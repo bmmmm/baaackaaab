@@ -39,8 +39,10 @@ iCloud  ──materialize──▶  verify real bytes  ──backup──▶  im
 - [`restic`](https://restic.net) on `PATH` (developed against restic 0.19).
 - A backup store. The intended Tier-1 target is a
   [restic REST server](https://github.com/restic/rest-server) running with
-  `--append-only --private-repos`, but any restic backend works for ad-hoc use
-  (a local path, `sftp:`, etc.).
+  `--append-only --private-repos`, but any restic backend works (a local path,
+  `sftp:`, `s3:`, `b2:`, …) — see [Backends & the immutability
+  caveat](#backends--the-immutability-caveat) for what that does and doesn't buy
+  you on non-REST stores.
 
 ## Build & install
 
@@ -152,6 +154,58 @@ baaackaaab --list-destinations
 A run backs up to every enabled destination, primary-first. The Mac stays read +
 append only toward all of them.
 
+### Backends & the immutability caveat
+
+A destination is just a restic repository URL plus its own encryption key, so
+baaackaaab is **backend-agnostic** — anything restic can address works:
+`rest:` (the Tier-1 target), a local path, `sftp:`, `s3:` (Amazon **and** any
+S3-compatible store — MinIO, Garage, Wasabi), `b2:`, `azure:`, `gs:`, or an
+`rclone:` remote (which opens dozens more). See restic's
+[preparing a repository](https://restic.readthedocs.io/en/stable/030_preparing_a_new_repo.html)
+for the exact URL forms.
+
+Two things do **not** come for free on those backends, though:
+
+- **Backend credentials.** S3/B2/Azure/GCS authenticate with their own env vars
+  (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, `B2_ACCOUNT_ID` /
+  `B2_ACCOUNT_KEY`, …). baaackaaab stores only the repo URL and the restic
+  encryption key per destination — it does **not** hold backend credentials — so
+  those vars must be in the process environment. An interactive run picks them up
+  from your shell (e.g. `~/.env`); the **launchd timer does not inherit them** (its
+  plist sets only `PATH`), so a scheduled S3/B2 backup needs them added to the
+  LaunchAgent's `EnvironmentVariables`, or restic can't authenticate.
+- **The append-only guarantee is REST-server-specific.** The ransomware defense —
+  the Mac *physically cannot delete* — is enforced by the rest-server's
+  `--append-only` mode at the protocol layer. Plain `s3:` / `b2:` / `sftp:` / a
+  local path have no such restic-level enforcement: a key that can write can
+  usually also delete. To approximate the guarantee there you must enforce
+  immutability at the **storage** layer — S3/B2 **Object Lock** (compliance mode)
+  plus an IAM policy without `DeleteObject`. Without that, such a destination is a
+  valid *extra copy* but does not carry the append-only safety property, so keep
+  the append-only REST server (or an object-locked bucket) as the Tier-1 store.
+
+### Tuning
+
+Two persistent knobs live in the backup set (so the unattended timer uses them too):
+
+```sh
+baaackaaab --limit-upload 2048    # cap upload at ~2 MiB/s (KiB/s); --clear-limit-upload lifts it
+baaackaaab --pack-size 64         # restic target pack size in MiB, 4…128; --clear-pack-size resets
+```
+
+`--pack-size` trades RAM and re-upload-on-interruption for **fewer, larger objects**
+on the backend — worth it for the many small Drive files over a network REST/S3
+store, pointless for already-large photo blobs (restic's default 16 MiB target is
+fine there). See restic's
+[tuning backup parameters](https://restic.readthedocs.io/en/stable/047_tuning_backup_parameters.html).
+
+Every backup also runs restic with `--skip-if-unchanged` automatically: a source
+byte-for-byte identical to its parent snapshot produces **no new snapshot**, so
+scheduled runs don't pile up identical snapshots on the append-only store (which
+only the server can ever prune). Repository-v2 zstd compression (`--compression
+auto`) is likewise always on — it helps text/PDF, leaves already-compressed media
+untouched.
+
 ### Scheduling
 
 ```sh
@@ -240,6 +294,19 @@ are verified on real hardware, not in the test suite.
   (`restic.example.com`, …); real values come from the environment at setup time
   and otherwise live only in the local credential files.
 - The store is `--append-only`: a compromised Mac cannot delete or rewrite history.
+
+## Further reading (restic)
+
+The behaviour of the store itself is restic's, not this tool's. The pages that map
+directly onto how baaackaaab drives it:
+
+- [Preparing a new repository](https://restic.readthedocs.io/en/stable/030_preparing_a_new_repo.html) — every backend URL form (`rest:`, `s3:`, `b2:`, `sftp:`, `rclone:`, …).
+- [Backing up](https://restic.readthedocs.io/en/stable/040_backup.html) — tags, `--skip-if-unchanged`, exclude rules, exit code 3 (partial snapshot).
+- [Tuning backup parameters](https://restic.readthedocs.io/en/stable/047_tuning_backup_parameters.html) — `--pack-size`, compression, read concurrency, and the local cache.
+- [Working with repositories](https://restic.readthedocs.io/en/stable/045_working_with_repos.html) — `restic check --read-data-subset` (what `--verify-repo` runs) and lock handling (`unlock` only ever touches lock files, never data).
+- [Restoring from backup](https://restic.readthedocs.io/en/stable/050_restore.html) — `restore --target` / `--include` / `--verify`, the primitives behind the safe-restore engine.
+- [Removing backup snapshots](https://restic.readthedocs.io/en/stable/060_forget.html) — `forget`/`prune`, which run **server-side only**; the Mac never holds this right.
+- [Scripting restic](https://restic.readthedocs.io/en/stable/075_scripting.html) — the typed exit codes (10 absent, 11 locked, 12 wrong password) baaackaaab keys its init/probe/check logic off.
 
 ## License
 

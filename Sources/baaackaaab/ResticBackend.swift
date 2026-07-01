@@ -4,6 +4,8 @@ enum ResticError: Error, CustomStringConvertible {
     case notFound
     case failed(command: String, code: Int32)
     case timedOut(command: String, seconds: Int)
+    case locked
+    case wrongPassword
 
     var description: String {
         switch self {
@@ -13,8 +15,24 @@ enum ResticError: Error, CustomStringConvertible {
             return "restic \(cmd) exited with code \(code) — see restic output above"
         case .timedOut(let cmd, let secs):
             return "restic \(cmd) did not respond within \(secs)s — the destination is unreachable or wedged. It is skipped this run; it is NOT treated as a missing repo, so nothing is re-initialized."
+        case .locked:
+            return "repository is locked by another restic operation (a backup/prune is running) — retry once it finishes, or clear a stale lock with `--unlock`. The repo is NOT re-initialized."
+        case .wrongPassword:
+            return "repository password is wrong — this destination's stored key cannot decrypt the repo. Check the key; the repo is NOT re-initialized."
         }
     }
+}
+
+/// The outcome of the read-only `cat config` existence probe, mapped from restic's
+/// typed exit codes (restic 0.17+): 0 present, 10 absent, 11 locked, 12 wrong
+/// password. Anything else (a transport error, a timeout, or an older restic that
+/// only returns 1) is `.unreachable` — a state we can't classify further.
+enum RepoProbe: Equatable {
+    case present
+    case absent
+    case locked
+    case wrongPassword
+    case unreachable
 }
 
 /// Thin wrapper around the `restic` CLI.
@@ -143,10 +161,24 @@ final class ResticBackend {
         // which can stall for minutes. With several destinations that would make
         // one dead repo hold up the whole run, so we cap the probe — a timeout
         // throws `timedOut` (destination skipped), never a false "repo absent".
-        if try run(["cat", "config"], quiet: true, timeout: Self.probeTimeout) == 0 { return }
+        let code = try run(["cat", "config"], quiet: true, timeout: Self.probeTimeout)
+        switch code {
+        case 0:
+            return                              // repo present and readable
+        case 11:
+            throw ResticError.locked            // repo EXISTS but is locked — never init
+        case 12:
+            throw ResticError.wrongPassword     // repo EXISTS, key is wrong — never init
+        default:
+            break                               // 10 (absent) / 1 (older restic) / other → init
+        }
+        // Reached only for exit 10 (repo absent, restic 0.17+) or a generic
+        // non-zero from an older restic. `init` refuses to clobber an existing
+        // repo, so even a misclassified probe cannot destroy data — it just
+        // surfaces init's own "already initialized" error.
         Console.step("restic: initializing repository (format v2) at \(Credentials.redact(repository))")
-        let code = try run(["init", "--repository-version", "2"])
-        if code != 0 { throw ResticError.failed(command: "init", code: code) }
+        let initCode = try run(["init", "--repository-version", "2"])
+        if initCode != 0 { throw ResticError.failed(command: "init", code: initCode) }
     }
 
     /// Back up the given paths into a single snapshot. `dryRun` passes
@@ -162,10 +194,23 @@ final class ResticBackend {
     /// off a TTY (launchd / a pipe) we never use --json so the log stays readable.
     func backup(paths: [URL], tags: [String], host: String?,
                 dryRun: Bool = false, limitUploadKiBps: Int? = nil,
+                packSizeMiB: Int? = nil,
                 showProgress: Bool = false) throws {
-        var args = ["backup", "--compression", "auto"]
+        // `--skip-if-unchanged`: when a source is byte-for-byte identical to its
+        // parent snapshot, restic creates NO new snapshot. On the append-only
+        // store — which the Mac can never prune — this stops every scheduled run
+        // from piling up an identical snapshot per unchanged folder. Data is never
+        // lost: an unchanged tree is already fully captured by the parent.
+        var args = ["backup", "--compression", "auto", "--skip-if-unchanged"]
         if let limitUploadKiBps, limitUploadKiBps > 0, !dryRun {
             args += ["--limit-upload", String(limitUploadKiBps)]
+        }
+        // Larger target pack size ⇒ fewer, bigger objects on the backend ⇒ fewer
+        // round-trips over a network REST/S3 store (at the cost of more RAM and
+        // more re-upload on an interrupted transfer). Optional; restic's default
+        // target is 16 MiB when unset.
+        if let packSizeMiB, packSizeMiB > 0 {
+            args += ["--pack-size", String(packSizeMiB)]
         }
         if dryRun { args += ["--dry-run", "--verbose"] }
         if let host { args += ["--host", host] }
@@ -285,12 +330,27 @@ final class ResticBackend {
     }
 
     /// Read-only existence probe: true when the repository is present and
-    /// reachable (`cat config` exits 0), WITHOUT ever initializing it. The dry-run
-    /// preview uses this in place of `ensureInitialized` so a preview never writes
-    /// (creates) a repository. Bounded like the init probe so a dead destination
-    /// is skipped quickly rather than stalling on restic's backend retries.
-    func exists() -> Bool {
-        ((try? run(["cat", "config"], quiet: true, timeout: Self.probeTimeout)) ?? 1) == 0
+    /// reachable (`cat config` exits 0), WITHOUT ever initializing it.
+    func exists() -> Bool { probe() == .present }
+
+    /// Classify the repository with a single read-only `cat config`, WITHOUT ever
+    /// initializing it. Maps restic's typed exit codes (0.17+) to a `RepoProbe` so
+    /// the dry-run preview can tell "not created yet" from "locked" / "wrong key" /
+    /// "unreachable" and give a precise skip reason instead of one catch-all. A
+    /// timeout or an older restic that only returns 1 lands in `.unreachable`.
+    /// Bounded like the init probe so a dead destination is skipped quickly rather
+    /// than stalling on restic's backend retries.
+    func probe() -> RepoProbe {
+        let code: Int32
+        do { code = try run(["cat", "config"], quiet: true, timeout: Self.probeTimeout) }
+        catch { return .unreachable }   // timedOut / notFound → can't classify
+        switch code {
+        case 0:  return .present
+        case 10: return .absent
+        case 11: return .locked
+        case 12: return .wrongPassword
+        default: return .unreachable
+        }
     }
 
     /// Restore a snapshot into `target`. `dryRun` previews (writes nothing);
@@ -379,8 +439,11 @@ final class ResticBackend {
         let lower = out.lowercased()
         // A non-zero exit because the repo is locked (a concurrent backup/prune
         // holds it) is NOT damage — distinguish it so the operator isn't told to
-        // repair a healthy repo.
-        let lockedOut = !clean && (lower.contains("unable to create lock")
+        // repair a healthy repo. restic 0.17+ returns exit 11 specifically for a
+        // lock failure; prefer that stable signal and keep the string match as a
+        // fallback for older restic (whose message wording could still drift).
+        let lockedOut = !clean && (code == 11
+            || lower.contains("unable to create lock")
             || lower.contains("already locked")
             || lower.contains("unable to acquire"))
         let errorLines = out.split(separator: "\n").map(String.init).filter {

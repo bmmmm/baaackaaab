@@ -36,6 +36,8 @@ func printUsage() {
         ("--remove-album <name>", "remove a Photos album from the set (repeatable)"),
         ("--limit-upload <n>", "persist an upload throttle of n KiB/s (applies to the timer too)"),
         ("--clear-limit-upload", "remove the upload throttle"),
+        ("--pack-size <mib>", "persist a restic target pack size in MiB (4…128; fewer round-trips on a network store)"),
+        ("--clear-pack-size", "restore restic's default pack size (16 MiB target)"),
         ("--config <path>", "backup-set file (default ~/.config/baaackaaab/backup-set.json)"),
     ])
     Console.note("A bare `baaackaaab` (no source flags) backs up the set; the launchd timer runs exactly that. Explicit --drive-folder/--photo-album override the set for ad-hoc runs. Add --dry-run to preview a backup (reports what would upload, writes nothing; Photos are skipped in a dry run). On a terminal a real backup shows a live progress bar (percent, bytes, ETA); piped or under the timer it logs restic's plain output.")

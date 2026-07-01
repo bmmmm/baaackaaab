@@ -13,6 +13,7 @@ struct BackupRun {
     let host: String
     let backupDryRun: Bool
     let configLimitUploadKiBps: Int?
+    let configPackSizeMiB: Int?
     let repoQuotaBytes: Int?
     let quotaWarnFraction: Double
     let driveFolders: [String]
@@ -71,6 +72,9 @@ struct BackupRun {
             if let lim = configLimitUploadKiBps, lim > 0, !backupDryRun {
                 info.append(("limit-upload", "\(lim) KiB/s"))
             }
+            if let ps = configPackSizeMiB, ps > 0, !backupDryRun {
+                info.append(("pack-size", "\(ps) MiB"))
+            }
             Console.info(info)
 
             // Initialize every destination, best-effort. A destination that can't be
@@ -81,16 +85,22 @@ struct BackupRun {
             for run in runs {
                 if backupDryRun {
                     // A dry run must write NOTHING, so probe for the repo instead of
-                    // initializing it. A not-yet-created repo can't be previewed against —
-                    // record that as this destination's skip reason, don't init it.
-                    if run.backend.exists() {
+                    // initializing it. restic's typed exit codes let us name the exact
+                    // reason a repo can't be previewed, instead of one catch-all.
+                    switch run.backend.probe() {
+                    case .present:
                         Console.success("\(run.destination.name): reachable (dry run — not initialized)  \(Credentials.redact(run.backend.repository))")
-                    } else {
-                        // exists() is false for BOTH "repo absent" and "repo unreachable"
-                        // (a probe timeout / auth blip), so don't assert one cause — point
-                        // at --check, which both creates a missing repo and diagnoses a
-                        // reachability problem. A dry run never initializes either way.
-                        run.initError = "repository not reachable or not created yet — run `--check` (it verifies reachability and initializes a missing repo); a dry run never initializes"
+                    case .absent:
+                        run.initError = "repository not created yet — run `--check` to create it; a dry run never initializes"
+                        Console.failure("\(run.destination.name): \(run.initError!)")
+                    case .locked:
+                        run.initError = "repository is locked by another restic operation — retry, or clear a stale lock with `--unlock`"
+                        Console.failure("\(run.destination.name): \(run.initError!)")
+                    case .wrongPassword:
+                        run.initError = "repository password is wrong — this destination's stored key cannot decrypt the repo"
+                        Console.failure("\(run.destination.name): \(run.initError!)")
+                    case .unreachable:
+                        run.initError = "repository not reachable (timeout / transport / auth) — run `--check` to diagnose; a dry run never initializes"
                         Console.failure("\(run.destination.name): \(run.initError!)")
                     }
                     continue
@@ -146,6 +156,7 @@ struct BackupRun {
                     do {
                         try run.backend.backup(paths: paths, tags: tags, host: host,
                                                dryRun: backupDryRun, limitUploadKiBps: configLimitUploadKiBps,
+                                               packSizeMiB: configPackSizeMiB,
                                                showProgress: showProgress)
                     } catch {
                         // A cancel interrupts restic into a non-zero (130) exit; treat that

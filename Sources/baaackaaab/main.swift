@@ -242,18 +242,20 @@ if cli.has("--configure") {
 // the set and exit), so a user expecting a throttled one-off backup would get
 // none. Reject the ambiguous combination loudly instead of quietly skipping it.
 if cli.has("--limit-upload")
-    || cli.has("--clear-limit-upload") {
+    || cli.has("--clear-limit-upload")
+    || cli.has("--pack-size")
+    || cli.has("--clear-pack-size") {
     if !cli.values("--drive-folder").isEmpty || !cli.values("--photo-album").isEmpty {
-        Console.error("--limit-upload / --clear-limit-upload change the backup set's PERSISTENT upload throttle; they are not per-run flags (a run reads the throttle from the set — there is no ad-hoc throttle). Set it on its own first (`baaackaaab --limit-upload <KiB/s>`), then run the backup separately. Combined with --drive-folder/--photo-album it would silently edit the set and skip the backup.")
+        Console.error("--limit-upload / --pack-size (and their --clear-* forms) change the backup set's PERSISTENT tuning; they are not per-run flags (a run reads them from the set — there is no ad-hoc form). Set them on their own first (e.g. `baaackaaab --pack-size 64`), then run the backup separately. Combined with --drive-folder/--photo-album they would silently edit the set and skip the backup.")
         exit(1)
     }
 }
 
-// Backup-set management (--list / --add-* / --remove-* / --limit-upload): edit
-// the set and exit. --limit-upload is a PERSISTENT knob (like --add-folder), not
-// a per-run flag — a backup reads the throttle from the set, never from argv.
+// Backup-set management (--list / --add-* / --remove-* / --limit-upload /
+// --pack-size): edit the set and exit. These are PERSISTENT knobs (like
+// --add-folder), not per-run flags — a backup reads them from the set, never argv.
 if cli.hasAny(["--list", "--add-folder", "--remove-folder", "--add-album", "--remove-album",
-               "--limit-upload", "--clear-limit-upload"]) {
+               "--limit-upload", "--clear-limit-upload", "--pack-size", "--clear-pack-size"]) {
     manageBackupSet(configPath: configPath)
     exit(0)
 }
@@ -265,6 +267,7 @@ var driveFolders = cli.values("--drive-folder")
 var photoAlbums = cli.values("--photo-album")
 var configQuotaBytes: Int? = nil
 var configLimitUploadKiBps: Int? = nil
+var configPackSizeMiB: Int? = nil
 if driveFolders.isEmpty && photoAlbums.isEmpty
     && FileManager.default.fileExists(atPath: configPath.path) {
     do {
@@ -273,6 +276,7 @@ if driveFolders.isEmpty && photoAlbums.isEmpty
         photoAlbums = set.photoAlbums
         configQuotaBytes = set.quotaBytes
         configLimitUploadKiBps = set.limitUploadKiBps
+        configPackSizeMiB = set.packSizeMiB
     } catch {
         Console.error("backup set at \(configPath.path) is unreadable — fix or delete it: \(error)")
         exit(1)
@@ -343,6 +347,7 @@ BackupRun(
     host: host,
     backupDryRun: backupDryRun,
     configLimitUploadKiBps: configLimitUploadKiBps,
+    configPackSizeMiB: configPackSizeMiB,
     repoQuotaBytes: repoQuotaBytes,
     quotaWarnFraction: quotaWarnFraction,
     driveFolders: driveFolders,

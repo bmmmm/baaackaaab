@@ -24,6 +24,9 @@ func listBackupSet(_ set: BackupSet, path: URL, existed: Bool) {
     if let l = set.limitUploadKiBps {
         pairs.append(("limit-upload", "\(l) KiB/s (\(String(format: "%.1f", Double(l) / 1024)) MiB/s)"))
     }
+    if let p = set.packSizeMiB {
+        pairs.append(("pack-size", "\(p) MiB"))
+    }
     Console.info(pairs)
 }
 
@@ -74,6 +77,20 @@ func manageBackupSet(configPath: URL) {
     if cli.has("--clear-limit-upload") {
         if set.limitUploadKiBps != nil { set.limitUploadKiBps = nil; changed = true; Console.success("upload limit cleared (unthrottled)") }
         else { Console.note("no upload limit was set") }
+    }
+    // Pack-size knob: persisted in the set (like the throttle) so the timer uses
+    // it too. restic accepts 4…128 MiB; `--clear-pack-size` restores the default.
+    if let raw = cli.value("--pack-size") {
+        guard let n = Int(raw), (4...128).contains(n) else {
+            Console.error("--pack-size needs an integer MiB in 4…128 (restic's range), e.g. --pack-size 64")
+            exit(1)
+        }
+        if set.packSizeMiB != n { set.packSizeMiB = n; changed = true; Console.success("pack size set to \(n) MiB") }
+        else { Console.note("pack size already \(n) MiB") }
+    }
+    if cli.has("--clear-pack-size") {
+        if set.packSizeMiB != nil { set.packSizeMiB = nil; changed = true; Console.success("pack size cleared (restic default, 16 MiB target)") }
+        else { Console.note("no pack size was set") }
     }
 
     if changed {

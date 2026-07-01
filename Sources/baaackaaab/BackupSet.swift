@@ -20,13 +20,21 @@ struct BackupSet: Codable, Equatable {
     /// Persisted here so the unattended timer (which runs a bare `baaackaaab`) is
     /// throttled too — an overnight backup can be capped without touching the timer.
     var limitUploadKiBps: Int?
+    /// Optional restic target pack size in MiB, passed to `restic backup
+    /// --pack-size`. Persisted here so the unattended timer uses it too. Larger
+    /// packs mean fewer, bigger objects on a network REST/S3 backend (fewer
+    /// round-trips) at the cost of RAM and re-upload on interruption. restic's
+    /// own default target is 16 MiB when this is unset; valid range 4…128.
+    var packSizeMiB: Int?
 
     init(driveFolders: [String] = [], photoAlbums: [String] = [],
-         quotaBytes: Int? = nil, limitUploadKiBps: Int? = nil) {
+         quotaBytes: Int? = nil, limitUploadKiBps: Int? = nil,
+         packSizeMiB: Int? = nil) {
         self.driveFolders = driveFolders
         self.photoAlbums = photoAlbums
         self.quotaBytes = quotaBytes
         self.limitUploadKiBps = limitUploadKiBps
+        self.packSizeMiB = packSizeMiB
     }
 
     // Stable snake_case keys, written explicitly so the on-disk file stays
@@ -36,6 +44,7 @@ struct BackupSet: Codable, Equatable {
         case photoAlbums = "photo_albums"
         case quotaBytes = "quota_bytes"
         case limitUploadKiBps = "limit_upload_kibps"
+        case packSizeMiB = "pack_size_mib"
     }
 
     // Tolerant decode: a hand-edited file may omit an array entirely (e.g. only
@@ -47,6 +56,7 @@ struct BackupSet: Codable, Equatable {
         photoAlbums = try c.decodeIfPresent([String].self, forKey: .photoAlbums) ?? []
         quotaBytes = try c.decodeIfPresent(Int.self, forKey: .quotaBytes)
         limitUploadKiBps = try c.decodeIfPresent(Int.self, forKey: .limitUploadKiBps)
+        packSizeMiB = try c.decodeIfPresent(Int.self, forKey: .packSizeMiB)
     }
 
     // A set with no sources contributes nothing to a run.
