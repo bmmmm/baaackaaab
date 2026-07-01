@@ -199,12 +199,16 @@ store, pointless for already-large photo blobs (restic's default 16 MiB target i
 fine there). See restic's
 [tuning backup parameters](https://restic.readthedocs.io/en/stable/047_tuning_backup_parameters.html).
 
-Every backup also runs restic with `--skip-if-unchanged` automatically: a source
-byte-for-byte identical to its parent snapshot produces **no new snapshot**, so
-scheduled runs don't pile up identical snapshots on the append-only store (which
-only the server can ever prune). Repository-v2 zstd compression (`--compression
-auto`) is likewise always on — it helps text/PDF, leaves already-compressed media
-untouched.
+Every backup also runs restic with `--skip-if-unchanged`: when a source is
+unchanged, restic creates **no new snapshot**. Treat this as a *best-effort*
+reduction of redundant snapshots, not a guarantee — restic compares the full
+absolute path *including its ancestor directories*, and an ancestor's mtime/ctime
+drifting from unrelated activity (e.g. anything touching `~/Library`) defeats the
+skip for that run. Reliable snapshot retention is the **server's** job (a
+`forget`/`prune` policy), since the Mac holds no prune right; the flag just trims
+some of what the server would otherwise have to prune. Repository-v2 zstd
+compression (`--compression auto`) is likewise always on — it helps text/PDF,
+leaves already-compressed media untouched.
 
 ### Scheduling
 
@@ -265,8 +269,15 @@ run-history stores. Store tests relocate to a throwaway directory via
 GitHub query and HTTP header probe touch the network, so they are not unit-tested —
 both degrade to nil/baseline by construction.
 
-The TTY TUI, live restic against a real server, Photos/TCC, and the launchd timer
-are verified on real hardware, not in the test suite.
+A second layer of **live restic integration tests** (`ResticIntegrationTests`)
+drives the real `restic` binary against a throwaway *local* repository — no
+server, no network — to verify the parts unit tests can't reach: the typed
+exit-code mapping (repo absent / locked / wrong password), `--skip-if-unchanged`,
+`--pack-size`, `check`, `unlock`, and snapshot/stats parsing. They are skipped
+automatically when `restic` isn't on `PATH`, so the suite still passes without it.
+
+The TTY TUI, live restic against a real *rest-server*, Photos/TCC, and the launchd
+timer are verified on real hardware, not in the test suite.
 
 ## Layout
 
