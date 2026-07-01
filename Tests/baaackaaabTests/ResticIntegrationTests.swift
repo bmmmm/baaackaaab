@@ -46,15 +46,33 @@ final class ResticIntegrationTests: XCTestCase {
         return ResticBackend(destination: dest)
     }
 
-    // Create a small source tree to back up.
+    // Create a small source tree to back up. Keys may contain "/" for nesting.
     @discardableResult
     private func makeSource(_ name: String, files: [String: String]) throws -> URL {
         let dir = tmp.appendingPathComponent(name, isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         for (f, contents) in files {
-            try contents.write(to: dir.appendingPathComponent(f), atomically: true, encoding: .utf8)
+            let fileURL = dir.appendingPathComponent(f)
+            try FileManager.default.createDirectory(
+                at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try contents.write(to: fileURL, atomically: true, encoding: .utf8)
         }
         return dir
+    }
+
+    // Locate the first file with a given name anywhere under `root` (restic
+    // restores the original absolute path under the restore target, so the exact
+    // depth is an implementation detail we don't want to hard-code).
+    private func firstFile(named name: String, under root: URL) throws -> URL {
+        let e = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)
+        while let url = e?.nextObject() as? URL {
+            if url.lastPathComponent == name { return url }
+        }
+        struct NotRestored: Error, CustomStringConvertible {
+            let name: String, root: String
+            var description: String { "no file named \(name) found under \(root)" }
+        }
+        throw NotRestored(name: name, root: root.path)
     }
 
     // MARK: - Exit-code mapping (probe / ensureInitialized)
@@ -170,6 +188,108 @@ final class ResticIntegrationTests: XCTestCase {
 
         let (unlockCode, _) = backend.unlock(removeAll: false)
         XCTAssertEqual(unlockCode, 0, "unlock on a lock-free repo should exit 0")
+    }
+
+    // MARK: - restore roundtrip (safety-critical)
+
+    /// A full backup → restore → verify roundtrip against real restic: the
+    /// restored bytes match the source, and restic's own `--verify` (re-reading
+    /// every restored file against the repo) exits clean. This exercises the
+    /// backend.restore path end-to-end, not just the RestoreEngine's path gate.
+    func testRestoreRoundtripVerifies() throws {
+        let backend = makeBackend()
+        try backend.ensureInitialized()
+        let src = try makeSource("src", files: ["a.txt": "hello", "sub/b.txt": "nested"])
+        try backend.backup(paths: [src], tags: ["t"], host: "testhost")
+
+        let target = tmp.appendingPathComponent("restore-out", isDirectory: true)
+        // verify: true makes restic re-read every restored file against the repo;
+        // a byte mismatch would make it exit non-zero and this call throw.
+        try backend.restore(snapshot: "latest", target: target, include: nil,
+                            dryRun: false, verify: true)
+
+        // And prove the file physically landed with the right content (restic
+        // recreates the original absolute path under the target).
+        let restoredA = try firstFile(named: "a.txt", under: target)
+        XCTAssertEqual(try String(contentsOf: restoredA, encoding: .utf8), "hello")
+        let restoredB = try firstFile(named: "b.txt", under: target)
+        XCTAssertEqual(try String(contentsOf: restoredB, encoding: .utf8), "nested")
+    }
+
+    /// A single-path restore via restoreVerify (the sampled test-restore path)
+    /// restores just the named file and re-verifies it — exit 0.
+    func testRestoreVerifySinglePath() throws {
+        let backend = makeBackend()
+        try backend.ensureInitialized()
+        let src = try makeSource("src", files: ["keep.txt": "data", "other.txt": "x"])
+        try backend.backup(paths: [src], tags: ["t"], host: "testhost")
+
+        let target = tmp.appendingPathComponent("verify-out", isDirectory: true)
+        let wanted = src.appendingPathComponent("keep.txt").path
+        let (code, output) = backend.restoreVerify(snapshot: "latest", target: target, includes: [wanted])
+        XCTAssertEqual(code, 0, "single-path restore+verify should exit 0:\n\(output)")
+        XCTAssertNoThrow(try firstFile(named: "keep.txt", under: target),
+                         "the requested file should have been restored")
+    }
+
+    // MARK: - find / ls / diff (read commands)
+
+    func testFindAndLsLocateFiles() throws {
+        let backend = makeBackend()
+        try backend.ensureInitialized()
+        let src = try makeSource("src", files: ["needle.txt": "x", "hay.txt": "y"])
+        try backend.backup(paths: [src], tags: ["t"], host: "testhost")
+
+        let found = try backend.find(pattern: "needle.txt", snapshot: nil)
+        XCTAssertTrue(found.contains { $0.path.hasSuffix("/needle.txt") },
+                      "find should locate needle.txt; got \(found.map(\.path))")
+
+        let snapID = try XCTUnwrap(try backend.listSnapshots().first).id
+        let entries = try backend.ls(snapshot: snapID, path: nil)
+        XCTAssertTrue(entries.contains { $0.name == "needle.txt" && $0.type == "file" })
+        XCTAssertTrue(entries.contains { $0.name == "hay.txt" })
+    }
+
+    /// diff between two snapshots reports the modified file with the "M" modifier
+    /// and non-zero changed-file statistics.
+    func testDiffReportsChange() throws {
+        let backend = makeBackend()
+        try backend.ensureInitialized()
+        let src = try makeSource("src", files: ["a.txt": "one"])
+        try backend.backup(paths: [src], tags: ["v1"], host: "testhost")
+        try "two-different".write(to: src.appendingPathComponent("a.txt"), atomically: true, encoding: .utf8)
+        try backend.backup(paths: [src], tags: ["v2"], host: "testhost")
+
+        let snaps = try backend.listSnapshots()   // newest first
+        XCTAssertEqual(snaps.count, 2)
+        let result = try backend.diff(snapshotA: snaps[1].id, snapshotB: snaps[0].id)
+        XCTAssertTrue(result.changes.contains { $0.path.hasSuffix("/a.txt") && $0.modifier == "M" },
+                      "diff should mark a.txt as modified; got \(result.changes.map { "\($0.modifier) \($0.path)" })")
+        XCTAssertGreaterThan(result.changedFiles, 0)
+    }
+
+    // MARK: - exit 3 (partial snapshot from an unreadable file)
+
+    /// An unreadable source file makes restic exit 3 — a VALID but partial
+    /// snapshot. finishBackup treats that as a warning (returns, doesn't throw),
+    /// so the backup still succeeds, the snapshot lands, and it contains the
+    /// readable file but not the unreadable one.
+    func testUnreadableFileYieldsPartialSnapshot() throws {
+        let backend = makeBackend()
+        try backend.ensureInitialized()
+        let src = try makeSource("src", files: ["readable.txt": "ok", "locked.txt": "secret"])
+        let locked = src.appendingPathComponent("locked.txt")
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: locked.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: locked.path) }
+
+        // Must NOT throw: exit 3 is a warning, not a destination failure.
+        XCTAssertNoThrow(try backend.backup(paths: [src], tags: ["t"], host: "testhost"))
+        let snaps = try backend.listSnapshots()
+        XCTAssertEqual(snaps.count, 1, "a partial snapshot must still be created")
+
+        let entries = try backend.ls(snapshot: snaps[0].id, path: nil)
+        XCTAssertTrue(entries.contains { $0.name == "readable.txt" }, "the readable file should be captured")
+        XCTAssertFalse(entries.contains { $0.name == "locked.txt" }, "the unreadable file should be absent")
     }
 
     // MARK: - snapshots / stats plumbing

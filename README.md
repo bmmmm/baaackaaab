@@ -273,8 +273,11 @@ A second layer of **live restic integration tests** (`ResticIntegrationTests`)
 drives the real `restic` binary against a throwaway *local* repository — no
 server, no network — to verify the parts unit tests can't reach: the typed
 exit-code mapping (repo absent / locked / wrong password), `--skip-if-unchanged`,
-`--pack-size`, `check`, `unlock`, and snapshot/stats parsing. They are skipped
-automatically when `restic` isn't on `PATH`, so the suite still passes without it.
+`--pack-size`, a full **backup → restore → verify roundtrip**, `find` / `ls` /
+`diff`, the exit-3 partial snapshot (an unreadable file still yields a valid
+snapshot of the rest), `check`, `unlock`, and snapshot/stats parsing. They are
+skipped automatically when `restic` isn't on `PATH`, so the suite still passes
+without it.
 
 The TTY TUI, live restic against a real *rest-server*, Photos/TCC, and the launchd
 timer are verified on real hardware, not in the test suite.
