@@ -192,9 +192,22 @@ final class ResticBackend {
     /// output streams straight to the terminal. The dry-run path always keeps the
     /// plain `--verbose` output — there its value is the file list, not a bar — and
     /// off a TTY (launchd / a pipe) we never use --json so the log stays readable.
+    /// macOS filesystem junk that appears in every iCloud Drive folder and carries
+    /// no user data — Finder/Spotlight indexes, trash + revision metadata, temp
+    /// scratch. Excluded on EVERY backup: on the append-only store the Mac can
+    /// never prune, so anything snapshotted is permanent. Keeping this junk out is
+    /// therefore not just tidiness — once in, it can never be removed. Slash-less
+    /// patterns match the base name at any depth (restic matches on path
+    /// components), so these catch the files/dirs wherever they appear in the tree.
+    static let junkExcludes = [
+        ".DS_Store", ".Trashes", ".Spotlight-V100",
+        ".fseventsd", ".DocumentRevisions-V100", ".TemporaryItems",
+    ]
+
     func backup(paths: [URL], tags: [String], host: String?,
                 dryRun: Bool = false, limitUploadKiBps: Int? = nil,
                 packSizeMiB: Int? = nil,
+                excludes: [String] = [], excludeFiles: [String] = [],
                 showProgress: Bool = false) throws {
         // `--skip-if-unchanged`: when a source is byte-for-byte identical to its
         // parent snapshot, restic creates NO new snapshot. On the append-only
@@ -202,6 +215,15 @@ final class ResticBackend {
         // from piling up an identical snapshot per unchanged folder. Data is never
         // lost: an unchanged tree is already fully captured by the parent.
         var args = ["backup", "--compression", "auto", "--skip-if-unchanged"]
+        // Excludes: the always-on macOS-junk defaults + `--exclude-caches` (drops
+        // any directory tagged with CACHEDIR.TAG), then the user's own set globs
+        // and exclude-files. Applied on every run so the un-prunable store never
+        // accumulates junk it can never shed. The caller has already dropped any
+        // missing exclude-file, so restic never fails the run over a stale path.
+        args += ["--exclude-caches"]
+        for pattern in Self.junkExcludes { args += ["--exclude", pattern] }
+        for pattern in excludes where !pattern.isEmpty { args += ["--exclude", pattern] }
+        for file in excludeFiles where !file.isEmpty { args += ["--exclude-file", file] }
         if let limitUploadKiBps, limitUploadKiBps > 0, !dryRun {
             args += ["--limit-upload", String(limitUploadKiBps)]
         }

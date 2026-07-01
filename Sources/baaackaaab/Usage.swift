@@ -34,6 +34,10 @@ func printUsage() {
         ("--remove-folder <dir>", "remove a Drive folder from the set (repeatable)"),
         ("--add-album <name>", "add a Photos album to the set (repeatable)"),
         ("--remove-album <name>", "remove a Photos album from the set (repeatable)"),
+        ("--add-exclude <glob>", "exclude a restic pattern on top of the macOS-junk defaults (repeatable)"),
+        ("--remove-exclude <glob>", "drop a previously-added exclude pattern (repeatable)"),
+        ("--add-exclude-file <path>", "add a restic exclude-file (one pattern per line; must exist; repeatable)"),
+        ("--remove-exclude-file <path>", "drop a previously-added exclude-file (repeatable)"),
         ("--limit-upload <n>", "persist an upload throttle of n KiB/s (applies to the timer too)"),
         ("--clear-limit-upload", "remove the upload throttle"),
         ("--pack-size <mib>", "persist a restic target pack size in MiB (4…128; fewer round-trips on a network store)"),
@@ -41,6 +45,7 @@ func printUsage() {
         ("--config <path>", "backup-set file (default ~/.config/baaackaaab/backup-set.json)"),
     ])
     Console.note("A bare `baaackaaab` (no source flags) backs up the set; the launchd timer runs exactly that. Explicit --drive-folder/--photo-album override the set for ad-hoc runs. Add --dry-run to preview a backup (reports what would upload, writes nothing; Photos are skipped in a dry run). On a terminal a real backup shows a live progress bar (percent, bytes, ETA); piped or under the timer it logs restic's plain output.")
+    Console.note("Every backup already excludes macOS junk (.DS_Store, .Trashes, .Spotlight-V100, …) and CACHEDIR.TAG-tagged caches — important on an append-only store the Mac can never prune. --add-exclude / --add-exclude-file add your own patterns on top.")
 
     Console.section("Restic target")
     Console.info([

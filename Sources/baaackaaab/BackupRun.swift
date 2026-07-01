@@ -14,6 +14,8 @@ struct BackupRun {
     let backupDryRun: Bool
     let configLimitUploadKiBps: Int?
     let configPackSizeMiB: Int?
+    let configExcludes: [String]
+    let configExcludeFiles: [String]
     let repoQuotaBytes: Int?
     let quotaWarnFraction: Double
     let driveFolders: [String]
@@ -56,6 +58,20 @@ struct BackupRun {
             // during repository init is handled too, not just one during a backup.
             BackupCancellation.shared.arm()
 
+            // Resolve exclude-files once for the whole run: expand the tilde (restic
+            // does NOT expand `~`, the shell would) and drop any that no longer exist
+            // or aren't readable — with a warning, not a failure. A missing
+            // --exclude-file would make restic exit non-zero and fail the WHOLE
+            // backup, which under the unattended timer means a silent no-backup; a
+            // stale path must never cost the run. The set globs need no such handling
+            // (they're matched against the tree, not opened).
+            let excludeFilesResolved: [String] = configExcludeFiles.compactMap { path in
+                let expanded = (path as NSString).expandingTildeInPath
+                if FileManager.default.isReadableFile(atPath: expanded) { return expanded }
+                Console.warn("exclude-file not found or unreadable, ignoring it this run: \(path)")
+                return nil
+            }
+
             Console.banner("baaackaaab", tagline: "one-way iCloud → restic backup")
             var info: [(String, String)] = [
                 ("host", host),
@@ -75,6 +91,13 @@ struct BackupRun {
             if let ps = configPackSizeMiB, ps > 0, !backupDryRun {
                 info.append(("pack-size", "\(ps) MiB"))
             }
+            // Excludes are always active (the macOS-junk defaults + caches), so this
+            // line shows on every run — plus any set globs / exclude-files, so it's
+            // visible exactly what is being kept out of the un-prunable store.
+            var excludeParts = ["macOS junk + caches"]
+            if !configExcludes.isEmpty { excludeParts.append("\(configExcludes.count) pattern(s)") }
+            if !excludeFilesResolved.isEmpty { excludeParts.append("\(excludeFilesResolved.count) exclude-file(s)") }
+            info.append(("excludes", excludeParts.joined(separator: ", ")))
             Console.info(info)
 
             // Initialize every destination, best-effort. A destination that can't be
@@ -157,6 +180,7 @@ struct BackupRun {
                         try run.backend.backup(paths: paths, tags: tags, host: host,
                                                dryRun: backupDryRun, limitUploadKiBps: configLimitUploadKiBps,
                                                packSizeMiB: configPackSizeMiB,
+                                               excludes: configExcludes, excludeFiles: excludeFilesResolved,
                                                showProgress: showProgress)
                     } catch {
                         // A cancel interrupts restic into a non-zero (130) exit; treat that

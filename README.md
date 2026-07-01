@@ -210,6 +210,25 @@ some of what the server would otherwise have to prune. Repository-v2 zstd
 compression (`--compression auto`) is likewise always on — it helps text/PDF,
 leaves already-compressed media untouched.
 
+**Excludes.** Every backup drops macOS filesystem junk — `.DS_Store`, `.Trashes`,
+`.Spotlight-V100`, `.fseventsd`, `.DocumentRevisions-V100`, `.TemporaryItems` — plus
+any directory tagged with `CACHEDIR.TAG` (`--exclude-caches`). This matters more here
+than in an ordinary restic setup: the Mac has no prune right, so **anything
+snapshotted is permanent** — junk that gets in can never be removed. Add your own
+patterns on top (persisted in the set, so the timer applies them too):
+
+```sh
+baaackaaab --add-exclude '*.tmp'                 # a restic exclude glob (repeatable)
+baaackaaab --add-exclude 'node_modules'          # matches that base name at any depth
+baaackaaab --add-exclude-file ~/my-excludes.txt  # a file of patterns (one per line; must exist)
+baaackaaab --list                                # shows your patterns + the always-on defaults
+```
+
+Patterns follow restic's [exclude rules](https://restic.readthedocs.io/en/stable/040_backup.html#excluding-files)
+(matched on path components; a slash-less pattern matches the base name anywhere). An
+`--add-exclude-file` must exist at add time; if it later vanishes it is dropped with a
+warning at run time rather than failing the backup.
+
 ### Scheduling
 
 ```sh
@@ -273,9 +292,11 @@ A second layer of **live restic integration tests** (`ResticIntegrationTests`)
 drives the real `restic` binary against a throwaway *local* repository — no
 server, no network — to verify the parts unit tests can't reach: the typed
 exit-code mapping (repo absent / locked / wrong password), `--skip-if-unchanged`,
-`--pack-size`, a full **backup → restore → verify roundtrip**, `find` / `ls` /
-`diff`, the exit-3 partial snapshot (an unreadable file still yields a valid
-snapshot of the rest), `check`, `unlock`, and snapshot/stats parsing. They are
+`--pack-size`, the **excludes** (macOS-junk defaults, `--exclude-caches`, and custom
+globs are all kept out of the snapshot), a full **backup → restore → verify
+roundtrip**, `find` / `ls` / `diff`, the exit-3 partial snapshot (an unreadable file
+still yields a valid snapshot of the rest), `check`, `unlock`, and snapshot/stats
+parsing. They are
 skipped automatically when `restic` isn't on `PATH`, so the suite still passes
 without it.
 

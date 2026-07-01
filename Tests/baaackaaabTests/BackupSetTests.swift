@@ -25,6 +25,20 @@ final class BackupSetTests: XCTestCase {
     func testDecodeEmptyObjectIsEmptySet() throws {
         let set = try decode("{}")
         XCTAssertTrue(set.isEmpty)
+        XCTAssertEqual(set.excludes, [])          // missing exclude lists read as empty
+        XCTAssertEqual(set.excludeFiles, [])
+    }
+
+    func testDecodeExcludeLists() throws {
+        let set = try decode(#"""
+        {
+          "drive_folders": ["~/Documents"],
+          "excludes": ["*.tmp", "node_modules"],
+          "exclude_files": ["~/my-excludes.txt"]
+        }
+        """#)
+        XCTAssertEqual(set.excludes, ["*.tmp", "node_modules"])
+        XCTAssertEqual(set.excludeFiles, ["~/my-excludes.txt"])
     }
 
     func testDecodeFullObject() throws {
@@ -50,7 +64,8 @@ final class BackupSetTests: XCTestCase {
             .appendingPathComponent("bset-\(UUID().uuidString)")
             .appendingPathComponent("backup-set.json")
         let original = BackupSet(driveFolders: ["~/a", "~/b"], photoAlbums: ["Album"],
-                                 quotaBytes: 42, limitUploadKiBps: 512)
+                                 quotaBytes: 42, limitUploadKiBps: 512,
+                                 excludes: ["*.tmp"], excludeFiles: ["~/ex.txt"])
         try original.save(to: url)
         XCTAssertEqual(try BackupSet.load(from: url), original)
     }
@@ -98,5 +113,25 @@ final class BackupSetTests: XCTestCase {
         XCTAssertFalse(set.addAlbum("Trip"))         // exact dup
         XCTAssertTrue(set.removeAlbum("Trip"))
         XCTAssertFalse(set.removeAlbum("Trip"))
+    }
+
+    func testExcludeAddTrimsRejectsEmptyAndDedups() {
+        var set = BackupSet()
+        XCTAssertTrue(set.addExclude("  *.tmp  "))
+        XCTAssertEqual(set.excludes, ["*.tmp"])       // trimmed
+        XCTAssertFalse(set.addExclude("*.tmp"))       // exact dup
+        XCTAssertFalse(set.addExclude("   "))         // empty rejected
+        XCTAssertEqual(set.excludes, ["*.tmp"])
+        XCTAssertTrue(set.removeExclude("*.tmp"))
+        XCTAssertFalse(set.removeExclude("*.tmp"))    // already gone
+    }
+
+    func testExcludeFileAddRemoveAndDedup() {
+        var set = BackupSet()
+        XCTAssertTrue(set.addExcludeFile("  ~/ex.txt  "))
+        XCTAssertEqual(set.excludeFiles, ["~/ex.txt"]) // trimmed, tilde kept
+        XCTAssertFalse(set.addExcludeFile("~/ex.txt"))
+        XCTAssertTrue(set.removeExcludeFile("~/ex.txt"))
+        XCTAssertFalse(set.removeExcludeFile("~/ex.txt"))
     }
 }

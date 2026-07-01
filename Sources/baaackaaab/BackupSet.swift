@@ -26,15 +26,28 @@ struct BackupSet: Codable, Equatable {
     /// round-trips) at the cost of RAM and re-upload on interruption. restic's
     /// own default target is 16 MiB when this is unset; valid range 4…128.
     var packSizeMiB: Int?
+    /// Extra restic exclude globs, on top of the always-on macOS-junk defaults
+    /// (see ResticBackend.junkExcludes). Persisted here so the unattended timer
+    /// applies them too. Each is a `restic backup --exclude` pattern — matched on
+    /// path components, so a slash-less pattern (`*.tmp`, `node_modules`) matches
+    /// that base name anywhere in the tree. On the append-only store, keeping junk
+    /// out matters more than usual: a snapshotted file can never be pruned away.
+    var excludes: [String]
+    /// Paths to restic `--exclude-file`s, persisted so the timer uses them too.
+    /// Stored as the user typed them (tilde kept); expanded + existence-checked at
+    /// run time (a missing file is dropped with a warning, never fails the backup).
+    var excludeFiles: [String]
 
     init(driveFolders: [String] = [], photoAlbums: [String] = [],
          quotaBytes: Int? = nil, limitUploadKiBps: Int? = nil,
-         packSizeMiB: Int? = nil) {
+         packSizeMiB: Int? = nil, excludes: [String] = [], excludeFiles: [String] = []) {
         self.driveFolders = driveFolders
         self.photoAlbums = photoAlbums
         self.quotaBytes = quotaBytes
         self.limitUploadKiBps = limitUploadKiBps
         self.packSizeMiB = packSizeMiB
+        self.excludes = excludes
+        self.excludeFiles = excludeFiles
     }
 
     // Stable snake_case keys, written explicitly so the on-disk file stays
@@ -45,6 +58,8 @@ struct BackupSet: Codable, Equatable {
         case quotaBytes = "quota_bytes"
         case limitUploadKiBps = "limit_upload_kibps"
         case packSizeMiB = "pack_size_mib"
+        case excludes
+        case excludeFiles = "exclude_files"
     }
 
     // Tolerant decode: a hand-edited file may omit an array entirely (e.g. only
@@ -57,6 +72,8 @@ struct BackupSet: Codable, Equatable {
         quotaBytes = try c.decodeIfPresent(Int.self, forKey: .quotaBytes)
         limitUploadKiBps = try c.decodeIfPresent(Int.self, forKey: .limitUploadKiBps)
         packSizeMiB = try c.decodeIfPresent(Int.self, forKey: .packSizeMiB)
+        excludes = try c.decodeIfPresent([String].self, forKey: .excludes) ?? []
+        excludeFiles = try c.decodeIfPresent([String].self, forKey: .excludeFiles) ?? []
     }
 
     // A set with no sources contributes nothing to a run.
@@ -130,6 +147,38 @@ struct BackupSet: Codable, Equatable {
         let a = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let i = photoAlbums.firstIndex(of: a) else { return false }
         photoAlbums.remove(at: i)
+        return true
+    }
+
+    // Exclude globs and exclude-file paths follow the same trim/dedup contract as
+    // folders. They are stored verbatim (no path normalization): a glob is not a
+    // path, and an exclude-file keeps its tilde like a drive folder does. Existence
+    // of an exclude-file is checked by the caller, not here (this stays pure).
+    mutating func addExclude(_ raw: String) -> Bool {
+        let e = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !e.isEmpty, !excludes.contains(e) else { return false }
+        excludes.append(e)
+        return true
+    }
+
+    mutating func removeExclude(_ raw: String) -> Bool {
+        let e = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let i = excludes.firstIndex(of: e) else { return false }
+        excludes.remove(at: i)
+        return true
+    }
+
+    mutating func addExcludeFile(_ raw: String) -> Bool {
+        let f = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !f.isEmpty, !excludeFiles.contains(f) else { return false }
+        excludeFiles.append(f)
+        return true
+    }
+
+    mutating func removeExcludeFile(_ raw: String) -> Bool {
+        let f = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let i = excludeFiles.firstIndex(of: f) else { return false }
+        excludeFiles.remove(at: i)
         return true
     }
 }

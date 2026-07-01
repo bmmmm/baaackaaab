@@ -27,7 +27,10 @@ func listBackupSet(_ set: BackupSet, path: URL, existed: Bool) {
     if let p = set.packSizeMiB {
         pairs.append(("pack-size", "\(p) MiB"))
     }
+    for e in set.excludes { pairs.append(("exclude", e)) }
+    for f in set.excludeFiles { pairs.append(("exclude-file", f)) }
     Console.info(pairs)
+    Console.note("Plus always-on defaults: macOS junk (\(ResticBackend.junkExcludes.joined(separator: ", "))) and CACHEDIR.TAG-tagged caches are excluded on every backup.")
 }
 
 /// Handle the backup-set management flags (--list / --add-* / --remove-*). Loads
@@ -91,6 +94,34 @@ func manageBackupSet(configPath: URL) {
     if cli.has("--clear-pack-size") {
         if set.packSizeMiB != nil { set.packSizeMiB = nil; changed = true; Console.success("pack size cleared (restic default, 16 MiB target)") }
         else { Console.note("no pack size was set") }
+    }
+    // Exclude globs: extra `restic backup --exclude` patterns on top of the
+    // always-on macOS-junk defaults. Persisted so the timer applies them too.
+    for e in cli.values("--add-exclude") {
+        if set.addExclude(e) { changed = true; Console.success("added exclude  \(e)") }
+        else { Console.note("exclude already in set (or empty): \(e)") }
+    }
+    for e in cli.values("--remove-exclude") {
+        if set.removeExclude(e) { changed = true; Console.success("removed exclude  \(e)") }
+        else { Console.note("exclude not in set: \(e)") }
+    }
+    // Exclude-files: paths to `restic backup --exclude-file` lists. Validated to
+    // exist + be readable at add time — the common failure is a typo, and a
+    // missing file would otherwise only surface as a warning at backup time. A
+    // path that vanishes later is dropped (with a warning) at run time, never
+    // failing the backup. Stored as typed (tilde kept); expanded only to check.
+    for raw in cli.values("--add-exclude-file") {
+        let expanded = (raw as NSString).expandingTildeInPath
+        guard FileManager.default.isReadableFile(atPath: expanded) else {
+            Console.error("exclude-file not found or unreadable: \(raw) — create it first (one restic exclude pattern per line), then add it")
+            exit(1)
+        }
+        if set.addExcludeFile(raw) { changed = true; Console.success("added exclude-file  \(raw)") }
+        else { Console.note("exclude-file already in set (or empty): \(raw)") }
+    }
+    for raw in cli.values("--remove-exclude-file") {
+        if set.removeExcludeFile(raw) { changed = true; Console.success("removed exclude-file  \(raw)") }
+        else { Console.note("exclude-file not in set: \(raw)") }
     }
 
     if changed {

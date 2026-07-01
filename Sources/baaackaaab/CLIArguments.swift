@@ -124,6 +124,7 @@ struct CLIArguments {
     static let valueFlags: Set<String> = [
         "--drive-folder", "--photo-album", "--photo-batch-bytes", "--staging",
         "--add-folder", "--remove-folder", "--add-album", "--remove-album",
+        "--add-exclude", "--remove-exclude", "--add-exclude-file", "--remove-exclude-file",
         "--limit-upload", "--pack-size", "--config", "--restic-repo", "--host", "--run-tag",
         "--add-destination", "--repo-url", "--repo-password-file", "--link",
         "--order", "--remove-destination", "--ls", "--find", "--snapshot",

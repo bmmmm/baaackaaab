@@ -5,7 +5,8 @@ import XCTest
 // filesystem repository in a throwaway temp dir — no server, no network, no
 // listen socket, so they run anywhere restic is installed. They exercise exactly
 // the paths that unit tests can't reach: the typed exit-code mapping
-// (probe/ensureInitialized), --skip-if-unchanged, --pack-size, check, and unlock.
+// (probe/ensureInitialized), --skip-if-unchanged, --pack-size, excludes (junk +
+// caches + custom globs), the restore/read commands, check, and unlock.
 //
 // Gated on restic being present (XCTSkipUnless), so `swift test` on a machine
 // without restic still passes — matching the suite's "degrades by construction"
@@ -290,6 +291,40 @@ final class ResticIntegrationTests: XCTestCase {
         let entries = try backend.ls(snapshot: snaps[0].id, path: nil)
         XCTAssertTrue(entries.contains { $0.name == "readable.txt" }, "the readable file should be captured")
         XCTAssertFalse(entries.contains { $0.name == "locked.txt" }, "the unreadable file should be absent")
+    }
+
+    // MARK: - excludes (junk defaults + caches + custom patterns)
+
+    /// A backup drops the always-on macOS-junk defaults (.DS_Store), any
+    /// CACHEDIR.TAG-tagged cache directory (`--exclude-caches`), and the caller's
+    /// own `--exclude` globs — while keeping the real files. Asserted against the
+    /// snapshot via `ls`, so it proves the excluded paths never entered the store
+    /// (which, being append-only, could never shed them afterwards).
+    func testExcludesDropJunkCachesAndCustomPatterns() throws {
+        let backend = makeBackend()
+        try backend.ensureInitialized()
+        let src = try makeSource("src", files: [
+            "keep.txt": "keep",
+            "sub/keep2.txt": "keep2",
+            ".DS_Store": "finder junk",                 // junk default
+            "sub/.DS_Store": "finder junk",             // junk default, nested
+            "debug.log": "noise",                       // custom exclude *.log
+            // A cache dir per the Cache Directory Tagging Standard — restic's
+            // --exclude-caches drops its contents (the signature must match exactly).
+            "cachedir/CACHEDIR.TAG": "Signature: 8a477f597d28d172789f06886806bc55\n",
+            "cachedir/blob.bin": "cached data that must not be backed up",
+        ])
+
+        try backend.backup(paths: [src], tags: ["t"], host: "testhost", excludes: ["*.log"])
+
+        let snap = try XCTUnwrap(try backend.listSnapshots().first)
+        let names = Set(try backend.ls(snapshot: snap.id, path: nil).map(\.name))
+
+        XCTAssertTrue(names.contains("keep.txt"), "real files must be backed up; got \(names.sorted())")
+        XCTAssertTrue(names.contains("keep2.txt"), "nested real files must be backed up")
+        XCTAssertFalse(names.contains(".DS_Store"), "the .DS_Store junk default must be excluded")
+        XCTAssertFalse(names.contains("debug.log"), "the custom *.log exclude must drop debug.log")
+        XCTAssertFalse(names.contains("blob.bin"), "--exclude-caches must drop CACHEDIR.TAG-tagged contents")
     }
 
     // MARK: - snapshots / stats plumbing

@@ -255,7 +255,8 @@ if cli.has("--limit-upload")
 // --pack-size): edit the set and exit. These are PERSISTENT knobs (like
 // --add-folder), not per-run flags — a backup reads them from the set, never argv.
 if cli.hasAny(["--list", "--add-folder", "--remove-folder", "--add-album", "--remove-album",
-               "--limit-upload", "--clear-limit-upload", "--pack-size", "--clear-pack-size"]) {
+               "--limit-upload", "--clear-limit-upload", "--pack-size", "--clear-pack-size",
+               "--add-exclude", "--remove-exclude", "--add-exclude-file", "--remove-exclude-file"]) {
     manageBackupSet(configPath: configPath)
     exit(0)
 }
@@ -268,6 +269,8 @@ var photoAlbums = cli.values("--photo-album")
 var configQuotaBytes: Int? = nil
 var configLimitUploadKiBps: Int? = nil
 var configPackSizeMiB: Int? = nil
+var configExcludes: [String] = []
+var configExcludeFiles: [String] = []
 if driveFolders.isEmpty && photoAlbums.isEmpty
     && FileManager.default.fileExists(atPath: configPath.path) {
     do {
@@ -277,6 +280,8 @@ if driveFolders.isEmpty && photoAlbums.isEmpty
         configQuotaBytes = set.quotaBytes
         configLimitUploadKiBps = set.limitUploadKiBps
         configPackSizeMiB = set.packSizeMiB
+        configExcludes = set.excludes
+        configExcludeFiles = set.excludeFiles
     } catch {
         Console.error("backup set at \(configPath.path) is unreadable — fix or delete it: \(error)")
         exit(1)
@@ -348,6 +353,8 @@ BackupRun(
     backupDryRun: backupDryRun,
     configLimitUploadKiBps: configLimitUploadKiBps,
     configPackSizeMiB: configPackSizeMiB,
+    configExcludes: configExcludes,
+    configExcludeFiles: configExcludeFiles,
     repoQuotaBytes: repoQuotaBytes,
     quotaWarnFraction: quotaWarnFraction,
     driveFolders: driveFolders,
