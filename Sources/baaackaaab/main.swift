@@ -244,9 +244,11 @@ if cli.has("--configure") {
 if cli.has("--limit-upload")
     || cli.has("--clear-limit-upload")
     || cli.has("--pack-size")
-    || cli.has("--clear-pack-size") {
+    || cli.has("--clear-pack-size")
+    || cli.has("--repo-quota")
+    || cli.has("--clear-repo-quota") {
     if !cli.values("--drive-folder").isEmpty || !cli.values("--photo-album").isEmpty {
-        Console.error("--limit-upload / --pack-size (and their --clear-* forms) change the backup set's PERSISTENT tuning; they are not per-run flags (a run reads them from the set — there is no ad-hoc form). Set them on their own first (e.g. `baaackaaab --pack-size 64`), then run the backup separately. Combined with --drive-folder/--photo-album they would silently edit the set and skip the backup.")
+        Console.error("--limit-upload / --pack-size / --repo-quota (and their --clear-* forms) change the backup set's PERSISTENT tuning; they are not per-run flags (a run reads them from the set — there is no ad-hoc form). Set them on their own first (e.g. `baaackaaab --pack-size 64`), then run the backup separately. Combined with --drive-folder/--photo-album they would silently edit the set and skip the backup.")
         exit(1)
     }
 }
@@ -256,6 +258,7 @@ if cli.has("--limit-upload")
 // --add-folder), not per-run flags — a backup reads them from the set, never argv.
 if cli.hasAny(["--list", "--add-folder", "--remove-folder", "--add-album", "--remove-album",
                "--limit-upload", "--clear-limit-upload", "--pack-size", "--clear-pack-size",
+               "--repo-quota", "--clear-repo-quota",
                "--add-exclude", "--remove-exclude", "--add-exclude-file", "--remove-exclude-file"]) {
     manageBackupSet(configPath: configPath)
     exit(0)

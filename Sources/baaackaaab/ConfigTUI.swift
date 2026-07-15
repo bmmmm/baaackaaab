@@ -713,6 +713,9 @@ final class ConfigTUI {
 
     /// Visual quota bar: `[████████░░] 4.2/5.0 GB (84%)`.
     private func quotaBar(usedBytes: Int, quotaBytes: Int, cols: Int) -> String {
+        // A hand-edited `quota_bytes: 0` would make 0/0 a NaN ratio (rendering
+        // a nonsense 100% bar); no quota means no bar.
+        guard quotaBytes > 0 else { return "" }
         let ratio = min(1.0, Double(usedBytes) / Double(quotaBytes))
         let trackW = max(4, min(20, cols - 32))
         let filled = Int(ratio * Double(trackW))

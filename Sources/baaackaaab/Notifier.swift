@@ -26,8 +26,13 @@ enum Notifier {
 
     /// Escape a string for embedding inside an AppleScript double-quoted literal:
     /// backslash first (so we don't double-escape the quote escapes), then quote.
-    private static func escape(_ s: String) -> String {
+    /// Raw newlines matter too: an AppleScript literal cannot span lines, so an
+    /// unescaped \n in a multi-line error message would fail the osascript
+    /// compile and silently drop the one banner an unattended failure gets.
+    static func escape(_ s: String) -> String {
         s.replacingOccurrences(of: "\\", with: "\\\\")
          .replacingOccurrences(of: "\"", with: "\\\"")
+         .replacingOccurrences(of: "\r", with: "\\r")
+         .replacingOccurrences(of: "\n", with: "\\n")
     }
 }

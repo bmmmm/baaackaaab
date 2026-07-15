@@ -388,6 +388,21 @@ struct BackupRun {
             }
 
             if total == 0 {
+                // "Acquired 0 items" has two very different shapes. A configured
+                // Drive folder that currently holds 0 regular files ran cleanly:
+                // materialize walked it, restic snapshotted it, nothing failed —
+                // under launchd that must NOT ring a failure banner every night.
+                // Only an empty SET (misconfiguration: the timer backs up
+                // nothing) or an actual source/destination failure is an error.
+                let sourcesConfigured = !(driveFolders.isEmpty && photoAlbums.isEmpty)
+                if sourcesConfigured && sourceFailures == 0
+                    && destInitFailures == 0 && destBackupFailures == 0 {
+                    Console.summary(
+                        headline: "nothing to back up — the configured source(s) hold 0 files right now; every source ran cleanly",
+                        state: .ok, details: details)
+                    recordRun(exitCode: 0, verified: 0, total: 0, sourceFailures: 0)
+                    exit(0)
+                }
                 let extra = sourceFailures > 0 ? " (\(sourceFailures) source(s) failed)" : ""
                 Console.summary(headline: "nothing was acquired\(extra)", state: .fail, details: details)
                 recordRun(exitCode: 2, verified: verified, total: total, sourceFailures: sourceFailures)

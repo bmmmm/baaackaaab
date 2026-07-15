@@ -42,6 +42,8 @@ func printUsage() {
         ("--clear-limit-upload", "remove the upload throttle"),
         ("--pack-size <mib>", "persist a restic target pack size in MiB (4…128; fewer round-trips on a network store)"),
         ("--clear-pack-size", "restore restic's default pack size (16 MiB target)"),
+        ("--repo-quota <bytes>", "persist the server quota for the pre-flight gauge (the timer warns too)"),
+        ("--clear-repo-quota", "remove the persisted quota gauge"),
         ("--config <path>", "backup-set file (default ~/.config/baaackaaab/backup-set.json)"),
     ])
     Console.note("A bare `baaackaaab` (no source flags) backs up the set; the launchd timer runs exactly that. Explicit --drive-folder/--photo-album override the set for ad-hoc runs. Add --dry-run to preview a backup (reports what would upload, writes nothing; Photos are skipped in a dry run). On a terminal a real backup shows a live progress bar (percent, bytes, ETA); piped or under the timer it logs restic's plain output.")
@@ -109,7 +111,7 @@ func printUsage() {
 
     Console.section("Quota (soft pre-flight gauge)")
     Console.info([
-        ("--repo-quota-bytes <n>", "configured server quota, to warn before it fills"),
+        ("--repo-quota-bytes <n>", "server quota for THIS run only — persist it with --repo-quota so the timer warns too"),
         ("--quota-warn-fraction <f>", "warn at this fraction of quota (default 0.85)"),
     ])
 

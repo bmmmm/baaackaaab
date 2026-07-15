@@ -95,6 +95,24 @@ func manageBackupSet(configPath: URL) {
         if set.packSizeMiB != nil { set.packSizeMiB = nil; changed = true; Console.success("pack size cleared (restic default, 16 MiB target)") }
         else { Console.note("no pack size was set") }
     }
+    // Repo-quota gauge: persisted in the set so the UNATTENDED timer warns too
+    // — that run is the whole point of the pre-flight gauge, and it reads only
+    // the set. (`--repo-quota-bytes` remains the per-run override.) This was
+    // previously a read-only field with no setter outside hand-editing the JSON.
+    if let raw = cli.value("--repo-quota") {
+        guard let n = Int(raw), n > 0 else {
+            Console.error("--repo-quota needs a positive integer (bytes), e.g. --repo-quota 50000000000 for a 50 GB server quota")
+            exit(1)
+        }
+        if set.quotaBytes != n {
+            set.quotaBytes = n; changed = true
+            Console.success(String(format: "repo quota set to %.2f GB — runs warn at the configured fraction before it fills", Double(n) / 1_000_000_000))
+        } else { Console.note("repo quota already set to that value") }
+    }
+    if cli.has("--clear-repo-quota") {
+        if set.quotaBytes != nil { set.quotaBytes = nil; changed = true; Console.success("repo quota cleared (no pre-flight gauge)") }
+        else { Console.note("no repo quota was set") }
+    }
     // Exclude globs: extra `restic backup --exclude` patterns on top of the
     // always-on macOS-junk defaults. Persisted so the timer applies them too.
     for e in cli.values("--add-exclude") {

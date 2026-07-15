@@ -125,7 +125,7 @@ struct CLIArguments {
         "--drive-folder", "--photo-album", "--photo-batch-bytes", "--staging",
         "--add-folder", "--remove-folder", "--add-album", "--remove-album",
         "--add-exclude", "--remove-exclude", "--add-exclude-file", "--remove-exclude-file",
-        "--limit-upload", "--pack-size", "--config", "--restic-repo", "--host", "--run-tag",
+        "--limit-upload", "--pack-size", "--repo-quota", "--config", "--restic-repo", "--host", "--run-tag",
         "--add-destination", "--repo-url", "--repo-password-file", "--link",
         "--order", "--remove-destination", "--ls", "--find", "--snapshot",
         "--target", "--include", "--sample", "--max-bytes", "--destination",
@@ -135,7 +135,8 @@ struct CLIArguments {
     /// Flags that stand alone (no value).
     static let boolFlags: Set<String> = [
         "--init-credentials", "--migrate-credentials", "--force", "--check",
-        "--list", "--configure", "--clear-limit-upload", "--clear-pack-size", "--list-destinations",
+        "--list", "--configure", "--clear-limit-upload", "--clear-pack-size", "--clear-repo-quota",
+        "--list-destinations",
         "--disabled", "--snapshots", "--restore", "--test-restore", "--dry-run",
         "--yes", "--no-verify", "--verify-repo", "--unlock", "--remove-all",
         "--install-timer", "--uninstall-timer", "--timer-status", "--doctor",
