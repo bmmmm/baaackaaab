@@ -334,17 +334,17 @@ struct BackupRun {
             // and never fall through to the "nothing acquired" failure path (a dry run
             // legitimately acquires nothing). Re-running without --dry-run does the work.
             if backupDryRun {
+                let outcome = RunOutcome.evaluate(
+                    verified: 0, total: 0, sourceFailures: 0, destInitFailures: 0, destBackupFailures: 0,
+                    runCancelled: runCancelled,
+                    sourcesConfigured: !(driveFolders.isEmpty && photoAlbums.isEmpty),
+                    dryRun: true, readyCount: ready.count, runTag: runTag)
                 var d: [(String, String)] = [("run-tag", runTag)]
                 let unavailable = runs.filter { $0.initError != nil }.count
                 if unavailable > 0 { d.append(("note", "\(unavailable) destination(s) not previewable (repo not created yet)")) }
                 if driveFailures > 0 { d.append(("drive", "\(driveFailures) folder(s) could not be previewed")) }
-                Console.summary(
-                    headline: runCancelled
-                        ? "dry run cancelled — nothing was written"
-                        : "dry run complete — \(ready.count) destination(s) reachable; Drive previewed by metadata (no download), nothing uploaded. Re-run without --dry-run to back up.",
-                    state: runCancelled ? .warn : .ok,
-                    details: d)
-                exit(runCancelled ? 130 : 0)
+                Console.summary(headline: outcome.headline, state: outcome.state, details: d)
+                exit(outcome.exitCode)
             }
 
             // The manifest is a local diagnostic, so writing it is best-effort: a failure
@@ -372,74 +372,28 @@ struct BackupRun {
                 details.append(("destinations", perDest))
             }
 
-            // Cancellation takes precedence over the failure paths: restic was interrupted
-            // on purpose, the data it already uploaded persists in the repo (dedup reuses
-            // it next run), and we exit 130 (the conventional SIGINT code). Recorded as a
-            // cancelled run — not a failure, so no notification banner (the user is right
-            // here doing this).
-            if runCancelled {
-                Console.summary(
-                    headline: "cancelled — \(verified)/\(total) acquired before interrupt; restic stopped, uploaded data kept for next run",
-                    state: .warn,
-                    details: details
-                )
-                recordRun(exitCode: 130, verified: verified, total: total, sourceFailures: sourceFailures)
-                exit(130)
-            }
-
-            if total == 0 {
-                // "Acquired 0 items" has two very different shapes. A configured
-                // Drive folder that currently holds 0 regular files ran cleanly:
-                // materialize walked it, restic snapshotted it, nothing failed —
-                // under launchd that must NOT ring a failure banner every night.
-                // Only an empty SET (misconfiguration: the timer backs up
-                // nothing) or an actual source/destination failure is an error.
-                let sourcesConfigured = !(driveFolders.isEmpty && photoAlbums.isEmpty)
-                if sourcesConfigured && sourceFailures == 0
-                    && destInitFailures == 0 && destBackupFailures == 0 {
-                    Console.summary(
-                        headline: "nothing to back up — the configured source(s) hold 0 files right now; every source ran cleanly",
-                        state: .ok, details: details)
-                    recordRun(exitCode: 0, verified: 0, total: 0, sourceFailures: 0)
-                    exit(0)
-                }
-                let extra = sourceFailures > 0 ? " (\(sourceFailures) source(s) failed)" : ""
-                Console.summary(headline: "nothing was acquired\(extra)", state: .fail, details: details)
-                recordRun(exitCode: 2, verified: verified, total: total, sourceFailures: sourceFailures)
-                notifyOnFailure("nothing was acquired\(extra)")
-                exit(2)
-            }
-            var problems: [String] = []
-            if verified != total { problems.append("\(total - verified) item(s) failed verification") }
-            if sourceFailures > 0 { problems.append("\(sourceFailures) source(s) skipped after errors") }
-            if destInitFailures > 0 { problems.append("\(destInitFailures) destination(s) unavailable") }
-            if destBackupFailures > 0 { problems.append("\(destBackupFailures) destination(s) had backup failures") }
-            if !problems.isEmpty {
-                Console.summary(
-                    headline: "\(verified)/\(total) verified — \(problems.joined(separator: "; ")); review the manifest",
-                    state: .warn,
-                    details: details
-                )
-                recordRun(exitCode: 2, verified: verified, total: total, sourceFailures: sourceFailures)
-                notifyOnFailure("\(verified)/\(total) verified — \(problems.joined(separator: "; "))")
-                exit(2)
-            }
-            Console.summary(
-                headline: "\(verified)/\(total) verified to \(ready.count) destination(s) — every acquired byte-stream backed up under tag \(runTag)",
-                state: .ok,
-                details: details
-            )
-            recordRun(exitCode: 0, verified: verified, total: total, sourceFailures: sourceFailures)
+            let outcome = RunOutcome.evaluate(
+                verified: verified, total: total, sourceFailures: sourceFailures,
+                destInitFailures: destInitFailures, destBackupFailures: destBackupFailures,
+                runCancelled: runCancelled,
+                sourcesConfigured: !(driveFolders.isEmpty && photoAlbums.isEmpty),
+                dryRun: false, readyCount: ready.count, runTag: runTag)
+            Console.summary(headline: outcome.headline, state: outcome.state, details: details)
+            recordRun(exitCode: Int(outcome.exitCode), verified: verified, total: total, sourceFailures: sourceFailures)
+            if outcome.notify, let message = outcome.notifyMessage { notifyOnFailure(message) }
             // Unattended (log-only) path: nudge once per clean run when restic or the
             // server has fallen behind the tested baseline — the scheduled log goes
             // unread, so a banner is the only signal. Offline for restic; best-effort
             // probe for the server (we just reached it). Silent when everything is
-            // current, and never on an interactive run (the summary is on screen).
-            if isatty(STDERR_FILENO) == 0,
+            // current, and never on an interactive run (the summary is on screen). Only
+            // on the full-success path (exit 0 with items actually acquired), matching
+            // the clean-empty branch's original exemption from this nudge too.
+            if outcome.exitCode == 0, total > 0, isatty(STDERR_FILENO) == 0,
                let stale = UpdateCheck.staleBaselineBanner(primaryRepoURL: primaryRepo) {
                 Notifier.notify(title: "baaackaaab \u{2014} update available",
                                 message: stale, subtitle: "run \(runTag)")
             }
+            exit(outcome.exitCode)
         } catch {
             Console.error("\(error)")
             // The throw happened before/around acquisition (e.g. staging init): `runs` is
