@@ -19,8 +19,14 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_ROOT"
 
-# Repeatable: pass several Drive folders. Defaults to one small test folder.
-DRIVE_FOLDERS=("${DRIVE_FOLDER:-$HOME/Documents/misc/Anleitungen}")
+# Repeatable: pass several Drive folders. No baked-in default — the folder is
+# machine-specific, so require it instead of failing on someone else's path.
+if [ -z "${DRIVE_FOLDER:-}" ]; then
+  echo "set DRIVE_FOLDER to a small iCloud Drive test folder, e.g.:" >&2
+  echo "  DRIVE_FOLDER=\"\$HOME/Documents/some-small-folder\" $0" >&2
+  exit 1
+fi
+DRIVE_FOLDERS=("$DRIVE_FOLDER")
 PHOTO_ALBUM="${PHOTO_ALBUM:-baaackaaab-test}"
 STAGING="${STAGING:-$REPO_ROOT/tmp/staging}"
 # Small batch budget for the test so the batching actually triggers (50 MB).

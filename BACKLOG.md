@@ -169,6 +169,60 @@ the closest to the safety core and is worth doing first.
     log now prints the append-only status. The `.htpasswd` perms fix only applies to
     *newly created* files, so also `chmod 600` the existing htpasswd file by hand.
 
+## Review round 2 (2026-07-15) — four-perspective sweep
+
+A second full review (core backup path / restic+security / CLI+TUI / tests+docs),
+executed in five commits. Fixed:
+
+- [x] **Photos: timed-out download could reappear in the batch dir and be backed
+  up unverified** — resources now download into `photos/.inflight` (outside every
+  batch dir) and are renamed in only after verification; fully-failed assets no
+  longer leave empty dirs, all-failed batches flush as a no-op. `Med-High`
+- [x] **Drive: enumerator had no errorHandler** — a silently skipped subtree could
+  hold stubs restic still reads; both walks now fail the folder/recheck instead
+  of under-verifying. `Med`
+- [x] **`.limited` Photos grant backed up a subset silently** — loud warning on
+  the backup path. `Med`
+- [x] **Empty-but-clean source exited 2 + failure banner nightly** — clean 0-file
+  sources are now exit 0; an empty SET still fails. `Med`
+- [x] **Notifier dropped banners containing newlines** (AppleScript literal can't
+  span lines) — `\n`/`\r` escaped; unit-tested. `Low-Med`
+- [x] **`quota_bytes` had no setter** — persistent `--repo-quota` /
+  `--clear-repo-quota`; the timer's pre-flight gauge now actually works. `Med`
+- [x] **Redaction defeated by `/` in the password** (URL returned unchanged,
+  cleartext in logs) — shared `Credentials.userinfoDelimiter` for redact +
+  restEndpoint; deliberately over-masks the ambiguous no-userinfo-`@`-in-path
+  shape (tested, see RedactTests). `Med`
+- [x] **SemVer parser trapped on ≥19-digit runs from remote-controlled input**
+  (Server header / GitHub tag) — clamps to Int.max. `Low-Med`
+- [x] Robustness sweep: backup exit 11/12 → typed errors; find/diff probeTimeout;
+  `--` before user positionals (restore/ls/find); htpasswd-missing guard;
+  `--order` validation; TUI dry-run saves dirty edits first; TUI selection via
+  normalized `containsFolder`/`removeFolder`. `Low`
+- [x] Tests: schedule plist round-trip, `Staging.sanitize`, `randomURLSafe`/
+  `repoURL`, `Notifier.escape`, `pack_size_mib` round-trip, RunHistory
+  mid-file-corruption tolerance (98 → 119).
+
+Deliberately NOT fixed (accepted, with reasons):
+
+- **Manifest counts include Drive files that restic later excludes.** The
+  manifest counts what was verified, restic applies excludes downstream; an
+  excluded file legitimately isn't in the snapshot. Diagnostic mismatch only.
+- **RunHistory's short-write `ftruncate` rollback could clip a concurrent
+  writer's just-appended line.** Reachable only on a write error during two
+  simultaneous runs (restic repo-locks make that rare); the reader is
+  line-tolerant anywhere (now pinned by a test), so the cost is one diagnostic
+  line. The rollback stays.
+- **Two valid command flags resolve by dispatch order** (`--restore
+  --test-restore` runs the first). First-match is the documented rule; unknown
+  flags still fail loudly. Not worth a conflict matrix.
+- **Modal TUI prompts don't redraw on SIGWINCH** — cosmetic, the prompt
+  reflows on the next keypress; the main loop handles `.resize`.
+- **`--limit-upload` validates by hand instead of `positiveInt`** — the custom
+  error message (KiB/s example) is deliberate.
+- **BackupCancellation tracks ONE process** — correct while destinations run
+  sequentially; a `FIXME` at the field anchors the parallel-by-link precondition.
+
 ## Decisions — do NOT re-investigate
 
 - **`--config` forwarding to the restore/read children is a no-op (dead code).**

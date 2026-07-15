@@ -84,7 +84,12 @@ CNF
     -inkey "$tmp/key.pem" -in "$tmp/cert.pem" \
     -name "$SELF_IDENTITY" -out "$tmp/bundle.p12" -passout "pass:$p12pw"
 
-  security import "$tmp/bundle.p12" -k "$LOGIN_KEYCHAIN" -P "$p12pw" -T /usr/bin/codesign
+  if ! security import "$tmp/bundle.p12" -k "$LOGIN_KEYCHAIN" -P "$p12pw" -T /usr/bin/codesign; then
+    echo "error: 'security import' failed — the signing identity was NOT installed." >&2
+    echo "       Unlock the login keychain (security unlock-keychain) and re-run;" >&2
+    echo "       a half-imported identity later surfaces as 'no identity found'." >&2
+    exit 1
+  fi
 
   # A self-signed cert is not trusted for code signing by default, so it would
   # not show up under `find-identity -p codesigning`. Add user-domain code-signing

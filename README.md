@@ -115,7 +115,9 @@ baaackaaab --dry-run       # preview what would upload; writes nothing
 
 On a terminal a real backup shows a live progress bar; piped or under the timer it
 logs restic's plain output. Explicit `--drive-folder` / `--photo-album` flags
-override the set for one-off runs. Run `baaackaaab` with no arguments in a terminal
+**replace the whole set for that run** — folders *and* albums; a single
+`--photo-album Extra` backs up only that album, not the set plus one album. Run
+`baaackaaab` with no arguments in a terminal
 to open the **command center** — the set plus a remote dashboard, with keys to edit,
 sync now, refresh remote status, and check restic / server updates (`u`, contacts GitHub).
 
@@ -189,9 +191,16 @@ Two things do **not** come for free on those backends, though:
 Two persistent knobs live in the backup set (so the unattended timer uses them too):
 
 ```sh
-baaackaaab --limit-upload 2048    # cap upload at ~2 MiB/s (KiB/s); --clear-limit-upload lifts it
-baaackaaab --pack-size 64         # restic target pack size in MiB, 4…128; --clear-pack-size resets
+baaackaaab --limit-upload 2048         # cap upload at ~2 MiB/s (KiB/s); --clear-limit-upload lifts it
+baaackaaab --pack-size 64              # restic target pack size in MiB, 4…128; --clear-pack-size resets
+baaackaaab --repo-quota 50000000000    # server quota (bytes) for the pre-flight gauge; --clear-repo-quota
 ```
+
+`--repo-quota` feeds the soft pre-flight gauge: each run reads the repo size
+first and warns once it passes 85% (`--quota-warn-fraction`) of the configured
+quota — lead time to raise the rest-server's `--max-size` before it hard-stops
+backups at 100%. Persisted in the set, so the unattended timer warns too
+(`--repo-quota-bytes` remains the one-run override).
 
 `--pack-size` trades RAM and re-upload-on-interruption for **fewer, larger objects**
 on the backend — worth it for the many small Drive files over a network REST/S3
@@ -264,8 +273,9 @@ internet:
   you'd otherwise miss, since the scheduled log goes unread.
 - **Online latest** (`--check-updates`, opt-in): additionally asks the GitHub
   releases API for the newest upstream release and compares. This is the only
-  command that contacts `api.github.com`; if GitHub is unreachable it degrades to
-  the offline baseline rather than failing.
+  path that contacts `api.github.com` (the command center's `u` key runs the
+  same check); if GitHub is unreachable it degrades to the offline baseline
+  rather than failing.
 
 The restic version is read locally (`restic version`). The REST server does not
 advertise its version in the normal case, so the server check is best-effort — it
@@ -281,9 +291,10 @@ make test     # or: swift test
 ```
 
 The suite covers the headless pure-logic surface — argument parsing, the backup-set
-model, restore path-safety, secret redaction, version parsing/comparison and the
-server-endpoint extraction behind the update check, and the on-disk destination and
-run-history stores. Store tests relocate to a throwaway directory via
+model, restore path-safety, secret redaction and credential generation, version
+parsing/comparison and the server-endpoint extraction behind the update check, the
+launchd schedule round-trip, staging-path sanitizing, notification escaping, and
+the on-disk destination and run-history stores. Store tests relocate to a throwaway directory via
 `BAAACKAAAB_SUPPORT_DIR`, so they never touch the real credential store. The live
 GitHub query and HTTP header probe touch the network, so they are not unit-tested —
 both degrade to nil/baseline by construction.
@@ -323,8 +334,9 @@ timer are verified on real hardware, not in the test suite.
 
 - Secrets live in `0600` files; only their **paths** are ever passed to restic. No
   secret reaches argv (world-readable via `ps`) or this tool's environment.
-- The repo URL embeds the endpoint password; it is redacted (masking the whole
-  userinfo) wherever it is logged or shown.
+- The repo URL embeds the endpoint password; it is redacted wherever it is
+  logged or shown — the password is masked (`user:***@host`), and for a
+  token-as-username URL the whole userinfo is.
 - Tracked source ships placeholder infrastructure values
   (`restic.example.com`, …); real values come from the environment at setup time
   and otherwise live only in the local credential files.
