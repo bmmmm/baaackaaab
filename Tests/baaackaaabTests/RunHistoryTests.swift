@@ -64,6 +64,22 @@ final class RunHistoryTests: XCTestCase {
         XCTAssertEqual(got.map { $0.runTag }, ["good-2", "good-1"])   // junk dropped
     }
 
+    // The reader is line-by-line tolerant, not just trailing-tolerant: a corrupt
+    // line ANYWHERE (e.g. the O_APPEND interleaving of two writers mangling one
+    // record) must still yield every surrounding good record.
+    func testRecentToleratesACorruptLineInTheMiddle() throws {
+        try RunHistory.append(record("good-1"))
+        let fd = open(RunHistory.file.path, O_WRONLY | O_APPEND)
+        XCTAssertGreaterThanOrEqual(fd, 0)
+        let junk = Data("{ mangled mid-file record\n".utf8)
+        _ = junk.withUnsafeBytes { write(fd, $0.baseAddress, junk.count) }
+        close(fd)
+        try RunHistory.append(record("good-2"))
+
+        let got = RunHistory.recent(10)
+        XCTAssertEqual(got.map { $0.runTag }, ["good-2", "good-1"])
+    }
+
     func testCleanReflectsExitCode() throws {
         try RunHistory.append(record("ok", exit: 0))
         try RunHistory.append(record("partial", exit: 2))

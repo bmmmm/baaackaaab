@@ -206,8 +206,16 @@ enum LaunchdTimer {
     /// Read the installed plist's schedule back (times + weekdays), for the TUI to
     /// show the current state. nil when no plist is present or it can't be parsed.
     static func installedSchedule() -> Schedule? {
-        guard let data = try? Data(contentsOf: plistURL),
-              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
+        guard let data = try? Data(contentsOf: plistURL) else { return nil }
+        return schedule(fromPlistData: data)
+    }
+
+    /// The schedule encoded in a LaunchAgent plist. Split from
+    /// `installedSchedule` (and internal, like `plistXML`) so the
+    /// write→read round-trip is unit-testable without touching the real
+    /// LaunchAgents directory — a wrong schedule is a silently missed backup.
+    static func schedule(fromPlistData data: Data) -> Schedule? {
+        guard let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
         else { return nil }
         var raw: [[String: Any]] = []
         if let arr = plist["StartCalendarInterval"] as? [[String: Any]] { raw = arr }
@@ -227,7 +235,7 @@ enum LaunchdTimer {
         return Schedule(times: times, weekdays: weekdays.sorted())
     }
 
-    private static func plistXML(program: [String], schedule: Schedule, log: String) -> String {
+    static func plistXML(program: [String], schedule: Schedule, log: String) -> String {
         let args = program.map { "        <string>\(xmlEscape($0))</string>" }.joined(separator: "\n")
         return """
         <?xml version="1.0" encoding="UTF-8"?>

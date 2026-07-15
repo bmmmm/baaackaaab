@@ -57,6 +57,13 @@ final class BackupSetTests: XCTestCase {
         XCTAssertFalse(set.isEmpty)
     }
 
+    // pack_size_mib was the one knob without coverage — every sibling
+    // (quota, limit-upload, excludes) already had decode + round-trip pins.
+    func testDecodePackSize() throws {
+        let set = try decode(#"{ "pack_size_mib": 64 }"#)
+        XCTAssertEqual(set.packSizeMiB, 64)
+    }
+
     // MARK: - Round-trip through disk
 
     func testSaveLoadRoundTrip() throws {
@@ -64,7 +71,7 @@ final class BackupSetTests: XCTestCase {
             .appendingPathComponent("bset-\(UUID().uuidString)")
             .appendingPathComponent("backup-set.json")
         let original = BackupSet(driveFolders: ["~/a", "~/b"], photoAlbums: ["Album"],
-                                 quotaBytes: 42, limitUploadKiBps: 512,
+                                 quotaBytes: 42, limitUploadKiBps: 512, packSizeMiB: 64,
                                  excludes: ["*.tmp"], excludeFiles: ["~/ex.txt"])
         try original.save(to: url)
         XCTAssertEqual(try BackupSet.load(from: url), original)
@@ -78,6 +85,7 @@ final class BackupSetTests: XCTestCase {
         let text = try String(contentsOf: url, encoding: .utf8)
         XCTAssertFalse(text.contains("quota_bytes"))        // nil knobs omitted
         XCTAssertFalse(text.contains("limit_upload_kibps"))
+        XCTAssertFalse(text.contains("pack_size_mib"))
         XCTAssertFalse(text.contains("\\/"))                // slashes not escaped
         XCTAssertTrue(text.hasSuffix("\n"))                 // trailing newline
     }
