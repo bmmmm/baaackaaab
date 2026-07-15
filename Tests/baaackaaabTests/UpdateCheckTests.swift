@@ -41,6 +41,16 @@ final class UpdateCheckTests: XCTestCase {
         XCTAssertEqual(SemVer(parsing: "1.2.3.4"), SemVer(1, 2, 3))
     }
 
+    // The parser's input can be remote-controlled (HTTP `Server` header, GitHub
+    // tag_name). A ≥19-digit run used to overflow-trap and crash the process;
+    // it must clamp and keep going instead.
+    func testHugeDigitRunDoesNotCrash() {
+        XCTAssertEqual(
+            SemVer(parsing: "rest-server/99999999999999999999999.1"),
+            SemVer(Int.max, 1, 0))
+        XCTAssertEqual(SemVer(parsing: "1.99999999999999999999999"), SemVer(1, Int.max, 0))
+    }
+
     // MARK: - SemVer comparison
 
     func testComparison() {

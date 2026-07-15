@@ -106,25 +106,37 @@ enum Credentials {
         "rest:https://\(endpointUser):\(password)@\(endpointHost)/\(endpointUser)/"
     }
 
+    /// The `@` that terminates the userinfo in `remainder` (the text after
+    /// `://`), or nil when there is no userinfo. ONE rule shared by `redact`
+    /// and `UpdateCheck.restEndpoint` so the two can never drift.
+    ///
+    /// The URL embeds a raw, un-percent-encoded password (see
+    /// repoURL(password:)), so the spec's "authority ends at the first `/`"
+    /// cannot be trusted: a password containing `/` (any base64 from another
+    /// tool) truncates the apparent authority BEFORE its `@`, and a spec-only
+    /// split would find no userinfo — logging the cleartext password. Two
+    /// steps, security-asymmetric:
+    ///   1. the LAST `@` before the first `/` (the spec rule — also keeps a
+    ///      password containing `@` masked whole);
+    ///   2. failing that, the LAST `@` anywhere. This deliberately over-masks
+    ///      a credential-less URL whose PATH contains `@` — a mangled display
+    ///      of an exotic URL is acceptable, a cleartext password in a log is not.
+    static func userinfoDelimiter(in remainder: Substring) -> Substring.Index? {
+        let authorityEnd = remainder.firstIndex(of: "/") ?? remainder.endIndex
+        if let at = remainder[..<authorityEnd].lastIndex(of: "@") { return at }
+        return remainder.lastIndex(of: "@")
+    }
+
     /// Mask the secret in a `rest:https://user:PASS@host/…` URL so it can be
     /// logged. Masks the password when there is a `user:pass` pair, and the WHOLE
     /// userinfo when there is no colon (e.g. `rest:https://TOKEN@host`) — that
     /// token-as-username form must not leak either. Returns the input unchanged
-    /// only when there is no `scheme://…@host` userinfo at all.
-    ///
-    /// The userinfo is delimited by the LAST `@` in the authority (the segment
-    /// between `://` and the first `/`), not the first `@` anywhere: the URL embeds
-    /// a raw, un-percent-encoded password (see repoURL(password:)), so a password
-    /// containing `@` would, with a first-`@` split, leave its tail unmasked. Bounding
-    /// the search to the authority also stops a `@` in the PATH from being mistaken
-    /// for the userinfo delimiter.
+    /// only when there is no userinfo at all (see `userinfoDelimiter` for how
+    /// that boundary is found and why it errs toward masking).
     static func redact(_ repoURL: String) -> String {
         guard let scheme = repoURL.range(of: "://") else { return repoURL }
         let afterScheme = scheme.upperBound
-        let authorityEnd = repoURL.range(of: "/", range: afterScheme..<repoURL.endIndex)?.lowerBound
-            ?? repoURL.endIndex
-        let authority = repoURL[afterScheme..<authorityEnd]
-        guard let at = authority.lastIndex(of: "@") else { return repoURL }
+        guard let at = userinfoDelimiter(in: repoURL[afterScheme...]) else { return repoURL }
         let userinfo = repoURL[afterScheme..<at]
         if let colon = userinfo.firstIndex(of: ":") {
             return String(repoURL[..<repoURL.index(after: colon)]) + "***" + String(repoURL[at...])

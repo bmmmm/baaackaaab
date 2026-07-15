@@ -60,7 +60,12 @@ struct SemVer: Comparable, Equatable, CustomStringConvertible {
                 var num = 0
                 var any = false
                 while j < chars.count, isDigit(chars[j]) {
-                    num = num * 10 + (chars[j].wholeNumberValue ?? 0)
+                    let d = chars[j].wholeNumberValue ?? 0
+                    // Swift traps on Int overflow, and this input can be
+                    // remote-controlled (the HTTP `Server` header, a GitHub
+                    // tag_name): a ≥19-digit run must clamp to Int.max, not
+                    // crash the whole informational check.
+                    num = num <= (Int.max - d) / 10 ? num * 10 + d : Int.max
                     any = true
                     j += 1
                 }
@@ -211,9 +216,10 @@ enum UpdateCheck {
     /// (`rest:https://user:pass@host:8000/repo/`), with the `rest:` prefix, the
     /// userinfo (credentials), and the repo path stripped — exactly enough to make a
     /// header probe and nothing that leaks the password. nil for non-REST backends
-    /// (no HTTP server to probe). The userinfo is split at the LAST '@' in the
-    /// authority, so a password that itself contains '@' is dropped whole (mirrors
-    /// the redaction rule). Pure + unit-tested.
+    /// (no HTTP server to probe). The userinfo boundary comes from
+    /// `Credentials.userinfoDelimiter` — the SAME rule the log redaction uses —
+    /// so a password containing '@' or a raw '/' is stripped whole here too
+    /// instead of leaking a fragment into the probed host.
     static func restEndpoint(from repoURL: String) -> String? {
         guard repoURL.hasPrefix("rest:") else { return nil }
         let raw = repoURL.dropFirst("rest:".count)
@@ -221,9 +227,15 @@ enum UpdateCheck {
         let scheme = String(raw[raw.startIndex..<schemeSep.lowerBound])
         guard scheme == "http" || scheme == "https" else { return nil }
         let afterScheme = raw[schemeSep.upperBound...]
-        let authorityEnd = afterScheme.firstIndex(of: "/") ?? afterScheme.endIndex
-        let authority = afterScheme[afterScheme.startIndex..<authorityEnd]
-        let hostPort = authority.lastIndex(of: "@").map { authority[authority.index(after: $0)...] } ?? authority
+        let hostStart: Substring.Index
+        if let at = Credentials.userinfoDelimiter(in: afterScheme) {
+            hostStart = afterScheme.index(after: at)
+        } else {
+            hostStart = afterScheme.startIndex
+        }
+        let hostTail = afterScheme[hostStart...]
+        let hostEnd = hostTail.firstIndex(of: "/") ?? hostTail.endIndex
+        let hostPort = hostTail[..<hostEnd]
         guard !hostPort.isEmpty else { return nil }
         return "\(scheme)://\(hostPort)/"
     }

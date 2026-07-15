@@ -29,10 +29,34 @@ final class RedactTests: XCTestCase {
             "rest:https://***@host.example/path/")
     }
 
-    // An '@' in the PATH must not be mistaken for the userinfo delimiter.
-    func testAtSignInPathIsNotTreatedAsUserinfo() {
-        let url = "rest:https://host.example/weird@folder/"
-        XCTAssertEqual(Credentials.redact(url), url)   // unchanged: no userinfo
+    // A password containing a raw '/' truncates the apparent authority BEFORE
+    // its '@' — the spec-only split then found no userinfo and returned the URL
+    // UNCHANGED, logging the cleartext password. The fallback (last '@'
+    // anywhere) must catch it. This is the realistic external-URL case: base64
+    // from other tools contains '/'; only baaackaaab's own generated passwords
+    // are base64url-safe.
+    func testMasksPasswordContainingSlash() {
+        XCTAssertEqual(
+            Credentials.redact("rest:https://macbook:pa/ss@host.example/macbook/"),
+            "rest:https://macbook:***@host.example/macbook/")
+    }
+
+    // An '@' in the PATH of a URL that carries a userinfo is still bounded to
+    // the authority (rule 1 fires first).
+    func testAtSignInPathWithUserinfoStaysCorrect() {
+        XCTAssertEqual(
+            Credentials.redact("rest:https://user:pass@host.example/weird@folder/"),
+            "rest:https://user:***@host.example/weird@folder/")
+    }
+
+    // An '@' in the PATH of a CREDENTIAL-LESS URL is indistinguishable from a
+    // '/'-in-password userinfo, so the redactor deliberately over-masks it:
+    // mangling the display of an exotic URL is acceptable, leaking a cleartext
+    // password (the previous behaviour for '/'-passwords) is not.
+    func testAtSignInPathWithoutUserinfoOverMasks() {
+        XCTAssertEqual(
+            Credentials.redact("rest:https://host.example/weird@folder/"),
+            "rest:https://***@folder/")
     }
 
     func testNoUserinfoLeavesURLUnchanged() {
