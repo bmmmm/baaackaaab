@@ -106,10 +106,21 @@ final class DriveAcquirer {
         // (e.g. an evicted .something) reach restic as a 0-byte placeholder —
         // precisely the failure this guard exists to prevent. The dataless flag,
         // not the name, is the signal; we descend into hidden dirs too.
+        // The errorHandler matters: without one, a subtree the enumerator fails
+        // to descend (transient FileProvider error, permission quirk) is skipped
+        // SILENTLY — but restic walks the live tree independently and may still
+        // read that subtree, including dataless stubs this pass never
+        // materialized. A walk that cannot cover restic's exact set must fail
+        // the folder, not under-verify it.
+        let enumFailure = SyncBox<(path: String, error: Error)?>(nil)
         guard let enumerator = fm.enumerator(
             at: folder,
             includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
-            options: []
+            options: [],
+            errorHandler: { url, error in
+                enumFailure.value = (url.path, error)
+                return false   // stop — the walk is no longer complete
+            }
         ) else {
             throw DriveError.cannotEnumerate(folder.path)
         }
@@ -140,6 +151,9 @@ final class DriveAcquirer {
             ))
             count += 1
         }
+        if let failure = enumFailure.value {
+            throw DriveError.cannotEnumerate("\(failure.path): \(failure.error)")
+        }
         Console.success("materialized \(count) file(s) under \(folder.lastPathComponent) — restic reads in place")
     }
 
@@ -150,10 +164,21 @@ final class DriveAcquirer {
     /// "preview" would download the whole set. Counts hidden files too, matching
     /// the set a real backup would cover.
     func previewDataless(folder: URL) throws -> (files: Int, dataless: Int) {
+        // Same errorHandler rationale as materializeAndVerify: this walk backs
+        // the post-backup re-eviction check, which must not report "0 dataless"
+        // while a whole subtree was silently skipped. On a descent failure the
+        // counts are no longer trustworthy — throw instead of under-counting
+        // (the recheck caller downgrades that to a warning, the dry-run caller
+        // to a preview failure).
+        let enumFailure = SyncBox<(path: String, error: Error)?>(nil)
         guard let enumerator = fm.enumerator(
             at: folder,
             includingPropertiesForKeys: [.isRegularFileKey],
-            options: []
+            options: [],
+            errorHandler: { url, error in
+                enumFailure.value = (url.path, error)
+                return false
+            }
         ) else {
             throw DriveError.cannotEnumerate(folder.path)
         }
@@ -164,6 +189,9 @@ final class DriveAcquirer {
             guard isFile else { continue }
             files += 1
             if isDataless(fileURL) { dataless += 1 }   // lstat only — does NOT fault in
+        }
+        if let failure = enumFailure.value {
+            throw DriveError.cannotEnumerate("\(failure.path): \(failure.error)")
         }
         return (files, dataless)
     }

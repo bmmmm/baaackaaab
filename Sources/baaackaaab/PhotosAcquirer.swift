@@ -62,6 +62,14 @@ final class PhotosAcquirer {
         guard status == .authorized || status == .limited else {
             throw PhotosError.notAuthorized(describe(status))
         }
+        if status == .limited {
+            // With a limited grant PhotoKit only surfaces the user-selected
+            // subset: every visible asset verifies, the summary reads "N/N
+            // verified" and the run exits 0 — while the rest of the library was
+            // never even visible to back up. Say so loudly on the backup path
+            // itself, not just in --doctor.
+            Console.warn("Photos access is LIMITED — only the photos selected under System Settings > Privacy & Security > Photos are visible, so this backup covers that subset, NOT the full library. Grant full access for a complete backup.")
+        }
 
         // Resolve EVERY album with this title, not just the first. Photos lets two
         // albums share a name; backing up only one would silently drop the other's
@@ -84,6 +92,14 @@ final class PhotosAcquirer {
         guard totalAssets > 0 else { throw PhotosError.albumEmpty(albumTitle) }
 
         let photosRoot = try staging.subdir("photos")
+        // Downloads land here first, OUTSIDE every batch dir, and are renamed
+        // into the batch only after they verify. `writeData` has no
+        // cancellation: a timed-out download keeps running and can land its
+        // file on disk long after we gave up on it — if that path were inside
+        // the batch dir, restic would back up a file whose manifest entry says
+        // `verified: false`. The rename-on-verify makes the batch dir hold
+        // only verified files by construction.
+        let inflightDir = try staging.subdir("photos/.inflight")
         let manager = PHAssetResourceManager.default()
 
         var batchIndex = 0
@@ -123,23 +139,41 @@ final class PhotosAcquirer {
                 )
                 try? FileManager.default.createDirectory(at: assetDir, withIntermediateDirectories: true)
 
-                batchBytes += exportResources(
+                let added = exportResources(
                     of: asset, index: ordinal, count: totalAssets,
-                    into: assetDir, manager: manager, staging: staging
+                    into: assetDir, inflight: inflightDir,
+                    manager: manager, staging: staging
                 )
-                assetsInBatch += 1
+                if added > 0 {
+                    batchBytes += added
+                    assetsInBatch += 1
+                } else {
+                    // Every resource of this asset failed or timed out, so its
+                    // dir holds nothing verified. Drop it: a batch where all
+                    // assets failed then flushes as a no-op instead of handing
+                    // restic a tree of empty directories (a near-empty
+                    // permanent snapshot in an un-prunable store).
+                    try? FileManager.default.removeItem(at: assetDir)
+                }
                 if batchBytes >= byteBudget { try flush() }
             }
         }
         try flush()   // final partial batch
+        // Best-effort: clear abandoned partial downloads. A still-running
+        // timed-out download may re-create this dir afterwards; harmless — it
+        // is scratch space that no backup ever reads.
+        try? FileManager.default.removeItem(at: inflightDir)
     }
 
     /// Export every resource (original, paired Live-Photo video, RAW, …) of one
-    /// asset into `assetDir`. Returns the verified byte total. A failed resource
-    /// is deleted and recorded unverified, never returned in the byte total.
+    /// asset into `assetDir`. Returns the verified byte total. Each resource is
+    /// downloaded into `inflight` (outside the batch tree) and renamed into the
+    /// batch only once verified — a failed/timed-out download never has a path
+    /// inside anything restic reads, even if it completes late in the background.
     private func exportResources(
         of asset: PHAsset, index: Int, count: Int,
-        into assetDir: URL, manager: PHAssetResourceManager, staging: Staging
+        into assetDir: URL, inflight: URL,
+        manager: PHAssetResourceManager, staging: Staging
     ) -> Int {
         let resources = PHAssetResource.assetResources(for: asset)
         Console.step("asset \(index)/\(count) id=\(asset.localIdentifier) resources=\(resources.count)")
@@ -151,29 +185,44 @@ final class PhotosAcquirer {
             if FileManager.default.fileExists(atPath: dest.path) {
                 try? FileManager.default.removeItem(at: dest)
             }
+            // `index` is the run-global asset ordinal, so this path is unique
+            // per resource even across same-named albums/assets.
+            let tmp = inflight.appendingPathComponent("\(index)_\(filename)")
+            if FileManager.default.fileExists(atPath: tmp.path) {
+                try? FileManager.default.removeItem(at: tmp)
+            }
 
             let options = PHAssetResourceRequestOptions()
             options.isNetworkAccessAllowed = true   // allow download of cloud-only originals
 
             let semaphore = DispatchSemaphore(value: 0)
             let writeError = SyncBox<Error?>(nil)
-            manager.writeData(for: resource, toFile: dest, options: options) { error in
+            manager.writeData(for: resource, toFile: tmp, options: options) { error in
                 writeError.value = error
                 semaphore.signal()
             }
             let completed = semaphore.wait(timeout: .now() + resourceTimeout) == .success
 
-            let size = (try? dest.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? -1
-            let ok = completed && writeError.value == nil && size > 0
-            if !ok {
-                // Never let a 0-byte / failed / timed-out download reach restic.
-                try? FileManager.default.removeItem(at: dest)
-            } else {
-                bytes += size
-            }
-            let note = !completed
+            let size = (try? tmp.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? -1
+            var ok = completed && writeError.value == nil && size > 0
+            // On timeout, `writeError.value` is never read (the && short-circuits),
+            // so there is no unsynchronized read racing the late completion handler.
+            var note = !completed
                 ? "download timed out after \(Int(resourceTimeout))s"
                 : writeError.value.map { "\($0)" }
+            if ok {
+                do {
+                    try FileManager.default.moveItem(at: tmp, to: dest)
+                    bytes += size
+                } catch {
+                    ok = false
+                    note = "downloaded and verified, but could not move into the batch: \(error)"
+                    try? FileManager.default.removeItem(at: tmp)
+                }
+            } else {
+                // Never let a 0-byte / failed / timed-out download reach restic.
+                try? FileManager.default.removeItem(at: tmp)
+            }
             staging.record(AcquiredItem(
                 source: "\(asset.localIdentifier)#\(resource.type.rawValue)",
                 kind: "photo-resource",
