@@ -271,6 +271,13 @@ final class ResticBackend {
             return
         case 3:
             Console.warn("\(destinationName): restic finished with warnings (exit 3) — a valid snapshot was created, but some source files could not be read (changed or vanished mid-backup). They will be picked up next run.")
+        case 11:
+            // Same typed codes the probe maps: a mid-run lock (a server-side
+            // prune, a concurrent restic) or a wrong key deserve their precise
+            // message here too, not a generic "exited with code 11".
+            throw ResticError.locked
+        case 12:
+            throw ResticError.wrongPassword
         default:
             throw ResticError.failed(command: "backup", code: code)
         }
@@ -389,13 +396,17 @@ final class ResticBackend {
     /// files (exit 0). Folder subtrees have no metacharacters, so escaping is a
     /// no-op for them.
     func restore(snapshot: String, target: URL, include: String?, dryRun: Bool, verify: Bool) throws {
-        var args = ["restore", snapshot, "--target", target.path]
+        // Flags first, the user-controlled positional after `--`: a snapshot id
+        // pasted with a leading '-' must reach restic as a value, never be
+        // parsed as an option.
+        var args = ["restore", "--target", target.path]
         if let include, !include.isEmpty { args += ["--include", Self.escapeResticPattern(include)] }
         if dryRun {
             args += ["--dry-run", "--verbose"]
         } else if verify {
             args += ["--verify"]
         }
+        args += ["--", snapshot]
         let code = try run(args)
         if code != 0 { throw ResticError.failed(command: "restore", code: code) }
     }
@@ -407,8 +418,9 @@ final class ResticBackend {
     /// then re-reads it against the repo. Read-only towards the repository; the
     /// caller restores into (and then deletes) a throwaway temp dir.
     func restoreVerify(snapshot: String, target: URL, includes: [String]) -> (code: Int32, output: String) {
-        var args = ["restore", snapshot, "--target", target.path, "--verify"]
+        var args = ["restore", "--target", target.path, "--verify"]
         for inc in includes where !inc.isEmpty { args += ["--include", Self.escapeResticPattern(inc)] }
+        args += ["--", snapshot]
         return runCapturingResult(args)
     }
 
@@ -645,8 +657,11 @@ final class ResticBackend {
     func find(pattern: String, snapshot: String?) throws -> [Found] {
         var args = ["find", "--json"]
         if let snapshot, !snapshot.isEmpty { args += ["--snapshot", snapshot] }
-        args.append(pattern)
-        let out = try runCapturing(args, command: "find")
+        // `--` so a pattern starting with '-' is a pattern, not an option; the
+        // timeout matches every other bounded read-only query (a wedged repo
+        // otherwise stalls through restic's full retry backoff).
+        args += ["--", pattern]
+        let out = try runCapturing(args, command: "find", timeout: Self.probeTimeout)
         guard let start = out.firstIndex(of: "[") else { return [] }
         guard let data = String(out[start...]).data(using: .utf8),
               let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
@@ -680,7 +695,7 @@ final class ResticBackend {
     /// to the subtree under `path`. Read-only. restic emits a snapshot header line
     /// then one node line per entry (depth-first); we keep the nodes in that order.
     func ls(snapshot: String, path: String?) throws -> [LsEntry] {
-        var args = ["ls", snapshot, "--json"]
+        var args = ["ls", "--json", "--", snapshot]
         if let path, !path.isEmpty { args.append(path) }
         let out = try runCapturing(args, command: "ls", timeout: Self.probeTimeout)
         var entries: [LsEntry] = []
@@ -721,7 +736,8 @@ final class ResticBackend {
     /// from `snapshotA` to `snapshotB`. Returns the changed paths and the summary
     /// statistics. Never modifies either snapshot.
     func diff(snapshotA: String, snapshotB: String) throws -> DiffResult {
-        let out = try runCapturing(["diff", snapshotA, snapshotB, "--json"], command: "diff")
+        let out = try runCapturing(["diff", "--json", "--", snapshotA, snapshotB],
+                                   command: "diff", timeout: Self.probeTimeout)
         var changes: [DiffChange] = []
         var addedFiles = 0, removedFiles = 0, changedFiles = 0, addedBytes = 0, removedBytes = 0
         for line in out.split(separator: "\n") {

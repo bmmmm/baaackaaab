@@ -29,6 +29,11 @@ final class BackupCancellation: @unchecked Sendable {
     private init() {}
 
     private let lock = NSLock()
+    // FIXME: one slot is correct only while the run loop is strictly sequential
+    // (BackupRun: "parallel-by-link is a later slice"). Two concurrent restic
+    // children would overwrite each other's setCurrent, and a Ctrl-C would
+    // interrupt only the last-registered one. Before implementing parallel
+    // destinations, make this a set of live processes and interrupt them all.
     private var current: Process?
     private var cancelledFlag = false
     private var armed = false

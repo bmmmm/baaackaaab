@@ -136,6 +136,13 @@ struct BackupSet: Codable, Equatable {
         return true
     }
 
+    /// Whether `raw` is in the set, under the same normalization addFolder and
+    /// removeFolder use — so a caller comparing against the stored spelling
+    /// (e.g. the TUI's selection markers) cannot drift from the mutation rules.
+    func containsFolder(_ raw: String) -> Bool {
+        driveFolders.contains(Self.normalizeFolder(raw))
+    }
+
     mutating func addAlbum(_ raw: String) -> Bool {
         let a = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !a.isEmpty, !photoAlbums.contains(a) else { return false }

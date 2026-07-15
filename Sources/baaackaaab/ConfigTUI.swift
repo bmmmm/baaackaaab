@@ -473,8 +473,11 @@ final class ConfigTUI {
     }
 
     private func isSelected(_ url: URL) -> Bool {
+        // Through the set's own normalized lookup — a raw `contains` on the
+        // array would silently drift the moment normalizeFolder gains a real
+        // transform (the add path already normalizes).
         let t = tildePath(of: url)
-        return set.driveFolders.contains(t) || set.driveFolders.contains(url.path)
+        return set.containsFolder(t) || set.containsFolder(url.path)
     }
 
     /// Where `url` stands relative to the set: itself selected, an ancestor of a
@@ -489,9 +492,8 @@ final class ConfigTUI {
 
     private func toggle(_ url: URL) {
         let t = tildePath(of: url)
-        if let i = set.driveFolders.firstIndex(of: t) ?? set.driveFolders.firstIndex(of: url.path) {
-            let removed = set.driveFolders.remove(at: i)
-            dirty = true; statusMsg = "removed \(removed)"
+        if set.removeFolder(t) || set.removeFolder(url.path) {
+            dirty = true; statusMsg = "removed \(t)"
         } else {
             _ = set.addFolder(t)
             dirty = true; statusMsg = "added \(t)"
@@ -772,6 +774,12 @@ final class ConfigTUI {
     /// as syncNow(); the repo is read-only during a dry run.
     private func dryRunNow() {
         guard !set.isEmpty else { statusMsg = "backup set is empty \u{2014} press e to add folders / albums"; return }
+        // Same rule as syncNow: the child re-reads the set from disk, so unsaved
+        // edits must be saved first or the preview reports the STALE set — the
+        // opposite of what a user pressing `p` after editing wants to see.
+        // (Saving the local config file is not a repo write; the dry run's
+        // "writes nothing" contract is about the store.)
+        if dirty { save() }
         ensureRepoResolved()
         emit("\u{1B}[?25h\u{1B}[?1049l")
         term.restore()

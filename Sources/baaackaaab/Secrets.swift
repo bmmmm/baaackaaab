@@ -81,10 +81,13 @@ enum Credentials {
 
     enum CredentialError: Error, CustomStringConvertible {
         case htpasswdFailed(Int32)
+        case htpasswdMissing
         var description: String {
             switch self {
             case .htpasswdFailed(let code):
-                return "htpasswd exited with code \(code) — is /usr/sbin/htpasswd present?"
+                return "htpasswd exited with code \(code) — run `/usr/sbin/htpasswd -niB <user>` by hand to see why"
+            case .htpasswdMissing:
+                return "/usr/sbin/htpasswd not found or not executable — it ships with macOS; on a stripped system install Apache's httpd tools, or compute the bcrypt line on the server instead (`htpasswd -B -n <user>`)"
             }
         }
     }
@@ -148,6 +151,12 @@ enum Credentials {
     /// cleartext password is fed to htpasswd over stdin (never argv); only the
     /// one-way hash is returned.
     static func htpasswdLine(user: String, password: String) throws -> String {
+        // Check up front: a missing binary would otherwise surface as a raw
+        // NSCocoaError from proc.run(), never reaching the actionable message
+        // (htpasswdFailed only fires on a non-zero EXIT of a binary that ran).
+        guard FileManager.default.isExecutableFile(atPath: "/usr/sbin/htpasswd") else {
+            throw CredentialError.htpasswdMissing
+        }
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/sbin/htpasswd")
         proc.arguments = ["-niB", user]   // -n: print to stdout, -i: read pw from stdin, -B: bcrypt

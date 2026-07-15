@@ -154,7 +154,15 @@ func addDestination(name: String) {
         exit(1)
     }
     let link = cli.value("--link") ?? "default"
-    let order = cli.value("--order").flatMap { Int($0) }
+    // Reject a malformed --order loudly like every other numeric flag — a
+    // silent flatMap would drop a typo ("--order two") to the default ordering.
+    let order: Int? = cli.value("--order").map { raw in
+        guard let n = Int(raw) else {
+            Console.error("--order needs an integer (lower runs earlier) — got '\(raw)'")
+            exit(1)
+        }
+        return n
+    }
     let enabled = !cli.has("--disabled")
 
     let importing = cli.value("--repo-password-file") != nil
