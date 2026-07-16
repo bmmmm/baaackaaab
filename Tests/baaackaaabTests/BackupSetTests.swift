@@ -64,6 +64,13 @@ final class BackupSetTests: XCTestCase {
         XCTAssertEqual(set.packSizeMiB, 64)
     }
 
+    // rest_connections mirrors pack_size_mib: same optional-Int, tolerant-decode
+    // shape, just a different persisted restic knob (REST-backend concurrency).
+    func testDecodeRestConnections() throws {
+        let set = try decode(#"{ "rest_connections": 2 }"#)
+        XCTAssertEqual(set.restConnections, 2)
+    }
+
     // MARK: - Round-trip through disk
 
     func testSaveLoadRoundTrip() throws {
@@ -72,6 +79,7 @@ final class BackupSetTests: XCTestCase {
             .appendingPathComponent("backup-set.json")
         let original = BackupSet(driveFolders: ["~/a", "~/b"], photoAlbums: ["Album"],
                                  quotaBytes: 42, limitUploadKiBps: 512, packSizeMiB: 64,
+                                 restConnections: 2,
                                  excludes: ["*.tmp"], excludeFiles: ["~/ex.txt"])
         try original.save(to: url)
         XCTAssertEqual(try BackupSet.load(from: url), original)
@@ -86,6 +94,7 @@ final class BackupSetTests: XCTestCase {
         XCTAssertFalse(text.contains("quota_bytes"))        // nil knobs omitted
         XCTAssertFalse(text.contains("limit_upload_kibps"))
         XCTAssertFalse(text.contains("pack_size_mib"))
+        XCTAssertFalse(text.contains("rest_connections"))
         XCTAssertFalse(text.contains("\\/"))                // slashes not escaped
         XCTAssertTrue(text.hasSuffix("\n"))                 // trailing newline
     }
