@@ -241,16 +241,17 @@ final class ResticBackend {
         if let host { args += ["--host", host] }
         for tag in tags { args += ["--tag", tag] }
         args += paths.map { $0.path }
-        // REST-backend connection cap: restic parses `-o key=value` as a GLOBAL
-        // option, so it must precede the subcommand — prepended to the whole
-        // argument list rather than appended like the flags above. restic's own
-        // default is 5 parallel connections; a small store host can 502 under
-        // that much concurrency on pack uploads (see issue #6). This is
-        // backend-specific (restic ignores it for a non-REST repo, e.g. the
-        // local-filesystem repos the integration tests use), so it is safe to
-        // pass unconditionally whenever configured. Only wired into `backup` —
-        // the read-only commands (check, restore, snapshots, ls, find, diff,
-        // stats) were not observed to trigger the 502s and stay unthrottled.
+        // REST-backend connection cap: `-o key=value` is a restic persistent
+        // (global) flag and is accepted before OR after the subcommand — the
+        // prepend is a convention (global options up front), not a parser
+        // requirement. restic's own default is 5 parallel connections; a small
+        // store host can 502 under that much concurrency on pack uploads (see
+        // issue #6). This is backend-specific (restic ignores it for a non-REST
+        // repo, e.g. the local-filesystem repos the integration tests use), so
+        // it is safe to pass unconditionally whenever configured. Deliberately
+        // wired into `backup` only: the run-start probe/init and the read-only
+        // commands issue few concurrent requests and were never observed to
+        // trigger the 502s, so they stay unthrottled.
         if let restConnections, restConnections > 0 {
             args = ["-o", "rest.connections=\(restConnections)"] + args
         }

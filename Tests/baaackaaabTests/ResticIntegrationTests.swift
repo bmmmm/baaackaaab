@@ -168,13 +168,13 @@ final class ResticIntegrationTests: XCTestCase {
 
     // MARK: - -o rest.connections
 
-    /// A backup with a configured connection cap is accepted by restic: the
-    /// global `-o rest.connections=N` option must be prepended BEFORE the
-    /// `backup` subcommand (restic rejects it as a bad flag if placed after —
-    /// confirmed by hand against restic 0.19), so a wrong argument order here
-    /// would fail this backup rather than silently doing nothing. The option is
-    /// backend-specific (restic ignores it for this local-filesystem test repo),
-    /// so this only proves the argument makes it through restic's parser intact.
+    /// A backup with a configured connection cap is accepted by restic. This
+    /// proves SYNTACTIC acceptance only: `-o` is a restic persistent flag
+    /// (valid before or after the subcommand), and the option is
+    /// backend-specific — restic silently ignores it for this local-filesystem
+    /// test repo, so neither the argument position nor the key's effect is
+    /// discriminated here. The throttling effect is only observable against a
+    /// real REST backend (see issue #6).
     func testRestConnectionsBackupIsAcceptedAndVerifies() throws {
         let backend = makeBackend()
         try backend.ensureInitialized()
