@@ -606,12 +606,39 @@ func doctorCommand() {
     Console.section("Scheduled timer")
     let timer = LaunchdTimer.state()
     if timer.installed && timer.loaded {
-        Console.success("installed and loaded")
+        Console.success("backup timer: installed and loaded")
     } else if timer.installed {
-        Console.warn("installed but not loaded — re-run `--install-timer` to (re)load it")
+        Console.warn("backup timer: installed but not loaded — re-run `--install-timer` to (re)load it")
         warnings += 1
     } else {
-        Console.note("not installed (optional) — `--install-timer` schedules a daily backup of the set")
+        Console.note("backup timer: not installed (optional) — `--install-timer` schedules a daily backup of the set")
+    }
+    let drillTimer = LaunchdTimer.drillState()
+    if drillTimer.installed && drillTimer.loaded {
+        Console.success("restore-drill timer: installed and loaded")
+    } else if drillTimer.installed {
+        Console.warn("restore-drill timer: installed but not loaded — re-run `--install-drill-timer` to (re)load it")
+        warnings += 1
+    } else {
+        Console.note("restore-drill timer: not installed (optional) — `--install-drill-timer` schedules a monthly restore drill")
+    }
+
+    Console.section("Restore verification")
+    if let last = RunHistory.lastDrill() {
+        let (level, text) = DrillDashboard.line(lastDrill: last, now: Date())
+        switch level {
+        case .failed:
+            Console.failure(text)
+            problems += 1
+        case .stale:
+            Console.warn(text)
+            warnings += 1
+        default:
+            Console.success(text)
+        }
+    } else {
+        Console.warn("no restore drill has run yet — a backup that is never restore-tested is unproven; run `--restore-drill` (or `--install-drill-timer`)")
+        warnings += 1
     }
 
     Console.section("Updates")

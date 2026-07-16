@@ -286,5 +286,6 @@ extension ConfigTUI {
     func cyan(_ s: String) -> String { "\u{1B}[36m" + s + "\u{1B}[0m" }
     func green(_ s: String) -> String { "\u{1B}[32m" + s + "\u{1B}[0m" }
     func yellow(_ s: String) -> String { "\u{1B}[33m" + s + "\u{1B}[0m" }
+    func red(_ s: String) -> String { "\u{1B}[31m" + s + "\u{1B}[0m" }
     func rev(_ s: String) -> String { "\u{1B}[7m" + s + "\u{1B}[0m" }
 }

@@ -68,6 +68,12 @@ final class ConfigTUI {
     // shows up on return.
     var recentRuns: [RunRecord]?
 
+    // The newest restore-drill record, for the "last verified restore" line. A
+    // double optional: nil = not loaded yet, .some(nil) = loaded, no drill on
+    // record. Scanned from the whole history (a monthly drill sits far behind the
+    // recent daily backups), so cached separately and only computed once.
+    var lastDrillRecord: RunRecord??
+
     // Local-time stamp for run rows: the record stores an absolute Date, shown in
     // the operator's timezone (unlike the remote's already-formatted ISO string).
     let runStampFmt: DateFormatter = {
