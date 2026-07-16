@@ -31,6 +31,7 @@ final class ScheduleTests: XCTestCase {
 
     private func roundTrip(_ schedule: Schedule) -> Schedule? {
         let xml = LaunchdTimer.plistXML(
+            label: "io.baaackaaab.backup",
             program: ["/usr/local/bin/baaackaaab", "--run-tag", "scheduled"],
             schedule: schedule, log: "/tmp/baaackaaab.log")
         return LaunchdTimer.schedule(fromPlistData: Data(xml.utf8))
@@ -50,6 +51,27 @@ final class ScheduleTests: XCTestCase {
             Schedule(times: [(hour: 2, minute: 0), (hour: 18, minute: 30)], weekdays: [5, 1, 3])))
         XCTAssertEqual(back.times.map { "\($0.hour):\($0.minute)" }, ["2:0", "18:30"])
         XCTAssertEqual(back.weekdays, [1, 3, 5])
+    }
+
+    func testDescribeMonthly() {
+        let s = Schedule(times: [(hour: 3, minute: 30)], weekdays: [], dayOfMonth: 15)
+        XCTAssertEqual(s.describe(), "monthly on day 15 at 03:30")
+    }
+
+    func testMonthlyDrillScheduleRoundTrips() throws {
+        // A monthly schedule emits a single <dict> with a Day key (not a Weekday);
+        // it must come back with the same day-of-month and no weekdays.
+        let back = try XCTUnwrap(roundTrip(
+            Schedule(times: [(hour: 3, minute: 0)], weekdays: [], dayOfMonth: 1)))
+        XCTAssertEqual(back.times.map { "\($0.hour):\($0.minute)" }, ["3:0"])
+        XCTAssertEqual(back.weekdays, [])
+        XCTAssertEqual(back.dayOfMonth, 1)
+    }
+
+    func testDailyScheduleHasNoDayOfMonth() throws {
+        // A daily schedule must not acquire a spurious day-of-month on round-trip.
+        let back = try XCTUnwrap(roundTrip(Schedule(times: [(hour: 9, minute: 15)], weekdays: [])))
+        XCTAssertNil(back.dayOfMonth)
     }
 
     func testScheduleParserRejectsPlistWithoutInterval() {

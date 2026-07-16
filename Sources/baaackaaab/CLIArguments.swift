@@ -89,6 +89,29 @@ struct CLIArguments {
         return Schedule(times: times.isEmpty ? [(hour: 12, minute: 0)] : times, weekdays: days)
     }
 
+    /// Build the MONTHLY restore-drill Schedule from `--at HH:MM` (default 03:00)
+    /// and `--day N` day-of-month (1…28, so it fires every month; default 1). Exits
+    /// with an actionable error on a malformed time or an out-of-range day, so an
+    /// install never lands on a wrong time or a day February skips.
+    func drillSchedule() -> Schedule {
+        let time: (hour: Int, minute: Int)
+        if let raw = value("--at") {
+            guard let t = Self.parseAtTime(raw) else {
+                Console.error("--at needs HH:MM in 24-hour form — got '\(raw)' (e.g. --at 03:00)")
+                exit(1)
+            }
+            time = t
+        } else {
+            time = (hour: 3, minute: 0)
+        }
+        let day = positiveInt("--day", default: 1)
+        guard (1...28).contains(day) else {
+            Console.error("--day needs a day-of-month in 1…28 (capped so the monthly drill fires every month, February included) — got \(day)")
+            exit(1)
+        }
+        return Schedule(times: [time], weekdays: [], dayOfMonth: day)
+    }
+
     /// Parse an `--at HH:MM` value (24-hour) into (hour, minute). nil when
     /// malformed, so the caller can reject an explicitly-supplied bad value
     /// rather than silently substituting a wrong time. Pure (no argv access) —
@@ -129,7 +152,7 @@ struct CLIArguments {
         "--add-destination", "--repo-url", "--repo-password-file", "--link",
         "--order", "--remove-destination", "--ls", "--find", "--snapshot",
         "--target", "--include", "--sample", "--max-bytes", "--destination",
-        "--read-data-subset", "--at", "--days", "--repo-quota-bytes",
+        "--read-data-subset", "--at", "--days", "--day", "--repo-quota-bytes",
         "--quota-warn-fraction", "--materialize-test", "--evict-test",
     ]
     /// Flags that stand alone (no value).
@@ -137,9 +160,10 @@ struct CLIArguments {
         "--init-credentials", "--migrate-credentials", "--force", "--check",
         "--list", "--configure", "--clear-limit-upload", "--clear-pack-size", "--clear-repo-quota",
         "--list-destinations",
-        "--disabled", "--snapshots", "--restore", "--test-restore", "--dry-run",
+        "--disabled", "--snapshots", "--restore", "--test-restore", "--restore-drill", "--dry-run",
         "--yes", "--no-verify", "--verify-repo", "--unlock", "--remove-all",
-        "--install-timer", "--uninstall-timer", "--timer-status", "--doctor",
+        "--install-timer", "--uninstall-timer", "--timer-status",
+        "--install-drill-timer", "--uninstall-drill-timer", "--doctor",
         "--check-updates", "--center", "--help", "-h",
     ]
 

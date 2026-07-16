@@ -78,8 +78,9 @@ func printUsage() {
         ("--find <pattern>", "locate a file in a snapshot (single-file restore discovery), then exit"),
         ("--restore", "restore a snapshot into a fresh directory (preview → confirm → verify)"),
         ("--test-restore", "restore a random file sample into a temp dir + verify (proves restorability), then exit"),
-        ("--sample <n>", "with --test-restore, how many files to sample (default 10)"),
-        ("--max-bytes <n>", "with --test-restore, byte budget for the sample (default 1000000000)"),
+        ("--restore-drill", "scheduled drill: restore-verify a rotating sample (one drive folder + one photo batch) into a temp dir, record the outcome, then exit"),
+        ("--sample <n>", "with --test-restore / --restore-drill, how many files to sample (default 10 / 5)"),
+        ("--max-bytes <n>", "with --test-restore / --restore-drill, byte budget for the sample (default 1000000000 / 500000000)"),
         ("--destination <name>", "source destination (required when several are configured)"),
         ("--snapshot <id>", "which snapshot to find/restore (short id; default 'latest')"),
         ("--target <dir>", "restore into this dir (default: ~/baaackaaab-restore/<snap>-<stamp>)"),
@@ -106,8 +107,12 @@ func printUsage() {
         ("--days <list>", "restrict to weekdays, e.g. mon,wed,fri (default: every day)"),
         ("--uninstall-timer", "remove the LaunchAgent, then exit"),
         ("--timer-status", "show whether the timer is installed + loaded, then exit"),
+        ("--install-drill-timer", "install a LaunchAgent that runs a MONTHLY restore drill, then exit"),
+        ("--day <n>", "with --install-drill-timer, day-of-month 1…28 (default 1; --at sets the time, default 03:00)"),
+        ("--uninstall-drill-timer", "remove the restore-drill LaunchAgent, then exit"),
     ])
     Console.note("The timer runs `baaackaaab --run-tag scheduled` (backs up the set). restic reads the credential files directly, so the unattended run needs no Keychain prompt — only a one-time Photos grant (`make release` + one manual backup, so a stable signature keeps the TCC grant across rebuilds).")
+    Console.note("The monthly restore-drill timer runs `baaackaaab --restore-drill`: it restore-verifies a rotating sample into a temp dir (read-only on the store), records the result in the run history, and posts a banner ONLY on failure. The command center shows the last verified restore; --doctor reports it too.")
 
     Console.section("Quota (soft pre-flight gauge)")
     Console.info([

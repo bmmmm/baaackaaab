@@ -163,6 +163,14 @@ if cli.has("--test-restore") {
     exit(0)
 }
 
+// Scheduled restore drill: restore-verify a deterministic-but-rotating sample
+// into a throwaway temp dir, record the outcome (distinct kind), banner only on
+// failure. Read-only on the repo — the monthly drill timer invokes exactly this.
+if cli.has("--restore-drill") {
+    restoreDrillCommand()
+    exit(0)
+}
+
 // Destination management (read-only list / add / remove), then exit. These edit
 // only the local store; remove never touches remote data.
 if cli.has("--list-destinations") {
@@ -208,6 +216,18 @@ if cli.has("--uninstall-timer") {
 if cli.has("--timer-status") {
     LaunchdTimer.status()
     exit(0)
+}
+
+// Monthly restore-drill launchd timer. Installs/removes a per-user LaunchAgent
+// that runs `baaackaaab --restore-drill` on the configured day-of-month. Separate
+// from the backup timer (own label + plist), so the two schedules are independent.
+if cli.has("--install-drill-timer") {
+    do { try LaunchdTimer.installDrill(schedule: cli.drillSchedule()); exit(0) }
+    catch { Console.error("\(error)"); exit(1) }
+}
+if cli.has("--uninstall-drill-timer") {
+    do { try LaunchdTimer.uninstallDrill(); exit(0) }
+    catch { Console.error("\(error)"); exit(1) }
 }
 
 // Bare `baaackaaab` on a real terminal → the interactive command center: the

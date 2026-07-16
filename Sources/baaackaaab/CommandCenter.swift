@@ -78,12 +78,18 @@ extension ConfigTUI {
 
         body.append("")
         body.append(divider("recent runs", cols))
-        let runs = loadRecentRuns()
+        // Drills live in the same history but are shown on their own line below, so
+        // keep the recent-runs list to actual backups.
+        let runs = loadRecentRuns().filter { !$0.isDrill }
         if runs.isEmpty {
             body.append(dim(fit("  no runs recorded yet \u{2014} press s to back up now", cols)))
         } else {
-            for rec in runs { body.append(homeRunLine(rec, cols)) }
+            for rec in runs.prefix(4) { body.append(homeRunLine(rec, cols)) }
         }
+
+        body.append("")
+        body.append(divider("restore drill", cols))
+        body.append(homeDrillLine(cols))
 
         body.append("")
         body.append(divider("updates", cols))
@@ -141,12 +147,36 @@ extension ConfigTUI {
 
     /// The last few run-history records, newest first. Loaded once and cached;
     /// dropped after a sync so the run just finished appears on return. No
-    /// credentials involved — the history file holds only tags/times/counts.
+    /// credentials involved — the history file holds only tags/times/counts. A
+    /// slightly deeper window than the four rows shown, so a stray interleaved
+    /// drill record doesn't push a real backup out of view.
     func loadRecentRuns() -> [RunRecord] {
         if let r = recentRuns { return r }
-        let r = RunHistory.recent(4)
+        let r = RunHistory.recent(12)
         recentRuns = r
         return r
+    }
+
+    /// The newest restore-drill record, cached once (see `lastDrillRecord`).
+    func loadLastDrill() -> RunRecord? {
+        if let cached = lastDrillRecord { return cached }
+        let d = RunHistory.lastDrill()
+        lastDrillRecord = .some(d)
+        return d
+    }
+
+    /// The "last verified restore" line: age since the newest recorded drill,
+    /// styled like the other status lines — red on a failed drill, yellow when
+    /// overdue, dim when fresh or never run. Derived from RunHistory, never
+    /// hardcoded (the threshold + text come from the pure `DrillDashboard`).
+    func homeDrillLine(_ cols: Int) -> String {
+        let (level, text) = DrillDashboard.line(lastDrill: loadLastDrill(), now: Date())
+        switch level {
+        case .none:   return dim(fit("  " + text, cols))
+        case .ok:     return dim(fit("  \u{2713} " + text, cols))
+        case .stale:  return yellow(fit("  \u{2717} " + text, cols))
+        case .failed: return red(fit("  \u{2717} " + text, cols))
+        }
     }
 
     /// One run on the dashboard: outcome mark, end time, run tag, verified/total,

@@ -23,6 +23,13 @@ enum RunHistoryError: Error, CustomStringConvertible {
 
 /// One recorded backup run. Times are ISO-8601; `exitCode` mirrors the process
 /// exit (0 ok, 2 partial/failed, 1 crashed early, 130 cancelled).
+///
+/// A restore-drill run is stored in the SAME history with `kind == "drill"` and
+/// the drill-only fields (`bytes`, `snapshots`) set — the dashboard keeps drills
+/// out of the "recent runs" list and counts them separately for the "last
+/// verified restore" line. The three added fields are optionals encoded with
+/// `encodeIfPresent`, so a backup record's on-disk JSON is byte-identical to
+/// before (no new keys) — the append-only history stays forward/backward-readable.
 struct RunRecord: Codable {
     let runTag: String
     let start: Date
@@ -32,6 +39,12 @@ struct RunRecord: Codable {
     let total: Int
     let sourceFailures: Int
     let destinations: [Dest]
+    /// nil / "backup" = a normal backup run; "drill" = a scheduled restore drill.
+    let kind: String?
+    /// Restore-drill only: total bytes restored + byte-verified this drill.
+    let bytes: Int?
+    /// Restore-drill only: the snapshot ids the drill exercised.
+    let snapshots: [String]?
 
     /// Per-destination outcome for the run. `error` is nil on success; on failure
     /// it is the restic error description (already redacted, never a secret).
@@ -48,10 +61,33 @@ struct RunRecord: Codable {
         case verified, total
         case sourceFailures = "source_failures"
         case destinations
+        case kind, bytes, snapshots
     }
 
-    /// True when every destination got every byte and nothing was skipped.
+    // Explicit init so the drill fields default to nil — existing backup call
+    // sites (BackupRun, the crash-early path, the tests) keep compiling unchanged.
+    init(runTag: String, start: Date, end: Date, exitCode: Int, verified: Int, total: Int,
+         sourceFailures: Int, destinations: [Dest],
+         kind: String? = nil, bytes: Int? = nil, snapshots: [String]? = nil) {
+        self.runTag = runTag
+        self.start = start
+        self.end = end
+        self.exitCode = exitCode
+        self.verified = verified
+        self.total = total
+        self.sourceFailures = sourceFailures
+        self.destinations = destinations
+        self.kind = kind
+        self.bytes = bytes
+        self.snapshots = snapshots
+    }
+
+    /// True when every destination got every byte and nothing was skipped (for a
+    /// drill: every sampled file restored + verified).
     var clean: Bool { exitCode == 0 }
+
+    /// A restore-drill record rather than a backup run.
+    var isDrill: Bool { kind == "drill" }
 }
 
 enum RunHistory {
@@ -124,17 +160,35 @@ enum RunHistory {
         }
     }
 
-    /// The last `limit` records, newest first, for the dashboard. Tolerant of a
-    /// corrupt/partially-written trailing line (a crash mid-write) — that line is
-    /// simply dropped rather than failing the whole read.
-    static func recent(_ limit: Int) -> [RunRecord] {
+    /// Every record in file order (oldest → newest). Tolerant of a corrupt line
+    /// ANYWHERE (a crash mid-write, an O_APPEND interleaving): that line is dropped
+    /// rather than failing the whole read.
+    private static func allRecords() -> [RunRecord] {
         guard let data = FileManager.default.contents(atPath: file.path),
               let text = String(data: data, encoding: .utf8) else { return [] }
         let dec = decoder()
-        let records = text.split(separator: "\n").compactMap { line -> RunRecord? in
+        return text.split(separator: "\n").compactMap { line -> RunRecord? in
             guard let d = line.data(using: .utf8) else { return nil }
             return try? dec.decode(RunRecord.self, from: d)
         }
-        return Array(records.suffix(limit).reversed())
+    }
+
+    /// The last `limit` records, newest first, for the dashboard.
+    static func recent(_ limit: Int) -> [RunRecord] {
+        Array(allRecords().suffix(limit).reversed())
+    }
+
+    /// The newest restore-drill record, or nil if none has run — the source for
+    /// the dashboard's "last verified restore" line and doctor's drill verdict.
+    /// Scans the whole history: a drill is monthly, so it can sit far behind the
+    /// daily backup records `recent()` returns.
+    static func lastDrill() -> RunRecord? {
+        allRecords().last { $0.isDrill }
+    }
+
+    /// How many restore drills have been recorded — the rotation cursor the drill
+    /// uses to advance its sampled source across successive runs.
+    static func drillCount() -> Int {
+        allRecords().reduce(0) { $0 + ($1.isDrill ? 1 : 0) }
     }
 }

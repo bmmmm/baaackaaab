@@ -87,4 +87,58 @@ final class RunHistoryTests: XCTestCase {
         XCTAssertEqual(got.first(where: { $0.runTag == "ok" })?.clean, true)
         XCTAssertEqual(got.first(where: { $0.runTag == "partial" })?.clean, false)
     }
+
+    // MARK: - Restore-drill records
+
+    private func drillRecord(_ tag: String, exit: Int = 0) -> RunRecord {
+        RunRecord(runTag: tag, start: Date(timeIntervalSince1970: 1_700_000_000),
+                  end: Date(timeIntervalSince1970: 1_700_000_060), exitCode: exit,
+                  verified: 4, total: 5, sourceFailures: 0,
+                  destinations: [RunRecord.Dest(name: "default", ok: exit == 0, error: nil)],
+                  kind: "drill", bytes: 4096, snapshots: ["a1b2", "c3d4"])
+    }
+
+    func testDrillRecordRoundTrip() throws {
+        try RunHistory.append(drillRecord("drill", exit: 0))
+        let got = try XCTUnwrap(RunHistory.recent(10).first)
+        XCTAssertTrue(got.isDrill)
+        XCTAssertEqual(got.kind, "drill")
+        XCTAssertEqual(got.bytes, 4096)
+        XCTAssertEqual(got.snapshots, ["a1b2", "c3d4"])
+        XCTAssertEqual(got.verified, 4)
+    }
+
+    func testBackupRecordHasNoDrillFields() throws {
+        // A backup record encodes without the drill keys (encodeIfPresent), and
+        // decodes back with nil kind — so it never counts as a drill.
+        try RunHistory.append(record("backup"))
+        let got = try XCTUnwrap(RunHistory.recent(1).first)
+        XCTAssertNil(got.kind)
+        XCTAssertNil(got.bytes)
+        XCTAssertNil(got.snapshots)
+        XCTAssertFalse(got.isDrill)
+    }
+
+    func testLastDrillSkipsBackupsAndCounts() throws {
+        try RunHistory.append(record("backup-1"))
+        try RunHistory.append(drillRecord("drill-1"))
+        try RunHistory.append(record("backup-2"))   // newest overall, but not a drill
+        XCTAssertEqual(RunHistory.lastDrill()?.runTag, "drill-1")
+        XCTAssertEqual(RunHistory.drillCount(), 1)
+    }
+
+    func testLastDrillReturnsNewestDrill() throws {
+        try RunHistory.append(drillRecord("drill-old"))
+        try RunHistory.append(record("backup"))
+        try RunHistory.append(drillRecord("drill-new"))
+        XCTAssertEqual(RunHistory.lastDrill()?.runTag, "drill-new")
+        XCTAssertEqual(RunHistory.drillCount(), 2)
+    }
+
+    func testLastDrillNilWhenOnlyBackups() throws {
+        try RunHistory.append(record("backup-1"))
+        try RunHistory.append(record("backup-2"))
+        XCTAssertNil(RunHistory.lastDrill())
+        XCTAssertEqual(RunHistory.drillCount(), 0)
+    }
 }
