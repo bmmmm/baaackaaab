@@ -341,6 +341,9 @@ func testRestoreCommand() {
         .appendingPathComponent("baaackaaab-test-restore-\(stampFmt.string(from: Date()))", isDirectory: true)
     do { try RestoreEngine.validateTarget(target); try RestoreEngine.ensureTargetDir(target) }
     catch { Console.error("\(error)"); exit(1) }
+    // Cleanup on the normal return path. exit() does NOT unwind, so the two
+    // failure exits below each remove the temp dir explicitly first (same
+    // constraint as RestoreDrill).
     defer { try? FileManager.default.removeItem(at: target) }
 
     // 3) Restore the sample WITH --verify (restic re-reads each restored file
@@ -354,6 +357,7 @@ func testRestoreCommand() {
         for line in out.split(separator: "\n").suffix(8) { Console.detail(Credentials.redact(String(line))) }
         Console.summary(headline: "test-restore FAILED — restic exited \(code); the backup may not be cleanly restorable",
                         state: .fail, details: [("snapshot", snapshot), ("next", "investigate with --verify-repo; check the destination is reachable")])
+        try? FileManager.default.removeItem(at: target)   // exit() skips the defer
         exit(1)
     }
 
@@ -377,6 +381,7 @@ func testRestoreCommand() {
         Console.summary(
             headline: "test-restore FAILED — only \(present)/\(sample.count) sampled file(s) landed non-empty",
             state: .fail, details: [("snapshot", snapshot)])
+        try? FileManager.default.removeItem(at: target)   // exit() skips the defer
         exit(1)
     }
 }
