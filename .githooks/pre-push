@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+#
+# Pre-push hook: build + test before every push.
+#
+# baaackaaab has no macOS CI runner (the dev Mac is the only build host — see
+# issue #4), so this hook is the gate instead. Installed via `make
+# install-hooks` (sets core.hooksPath to this directory) — this script never
+# runs `git config` itself.
+#
+# Skips the build+test entirely when the push range touches none of
+# Sources/, Tests/, Package.swift, or Makefile: most pushes (README/docs/backlog
+# edits) don't need a rebuild.
+#
+# Bypass once: git push --no-verify
+set -euo pipefail
+
+zero_sha="0000000000000000000000000000000000000000"
+testable_paths=(Sources Tests Package.swift Makefile)
+
+has_range=0
+needs_check=0
+
+# stdin: one line per ref being pushed —
+#   "<local ref> <local sha1> <remote ref> <remote sha1>"
+# shellcheck disable=SC2034 # remote_ref is part of git's fixed input format, unused here
+while read -r local_ref local_sha remote_ref remote_sha || [ -n "${local_ref:-}" ]; do
+  [ -z "${local_ref:-}" ] && continue
+
+  # A deleted ref pushes nothing new — never gates a delete.
+  if [ "$local_sha" = "$zero_sha" ]; then
+    continue
+  fi
+  has_range=1
+
+  if [ "$needs_check" -eq 1 ]; then
+    continue
+  fi
+
+  # New branch/tag on the remote: there is no old point to diff against, so we
+  # can't cheaply prove "nothing testable changed" — run the full check.
+  if [ "$remote_sha" = "$zero_sha" ]; then
+    needs_check=1
+    continue
+  fi
+
+  if ! diff_out="$(git diff --name-only "$remote_sha" "$local_sha" -- "${testable_paths[@]}")"; then
+    # Couldn't compute the diff (e.g. remote_sha not locally known) — safe
+    # fallback is to run the full check rather than silently skip it.
+    needs_check=1
+    continue
+  fi
+  if [ -n "$diff_out" ]; then
+    needs_check=1
+  fi
+done
+
+if [ "$has_range" -eq 0 ]; then
+  exit 0 # only ref deletions in this push — nothing to build or test
+fi
+
+if [ "$needs_check" -eq 0 ]; then
+  echo "pre-push: no Sources/Tests/Package.swift/Makefile changes in range — skipping build+test."
+  exit 0
+fi
+
+echo "pre-push: building and testing before push (bypass once: git push --no-verify) …"
+
+# Runs `swift <subcommand>`, capturing output. SwiftPM occasionally fails
+# inside a nested build sandbox (macOS sandbox-exec can't apply a sandbox
+# profile from within another sandbox — "sandbox_apply: Operation not
+# permitted"); on that specific failure, retry once with --disable-sandbox.
+run_swift() {
+  local subcommand="$1"
+  local log
+  log="$(mktemp)"
+
+  if swift "$subcommand" >"$log" 2>&1; then
+    cat "$log"
+    rm -f "$log"
+    return 0
+  fi
+
+  if grep -qi "sandbox" "$log"; then
+    echo "pre-push: 'swift $subcommand' failed under the build sandbox — retrying once with --disable-sandbox…"
+    : >"$log"
+    if swift "$subcommand" --disable-sandbox >"$log" 2>&1; then
+      cat "$log"
+      rm -f "$log"
+      return 0
+    fi
+  fi
+
+  cat "$log" >&2
+  rm -f "$log"
+  return 1
+}
+
+if ! run_swift build; then
+  echo "pre-push: 'swift build' failed — push blocked." >&2
+  echo "pre-push: fix the build, or bypass once with: git push --no-verify" >&2
+  exit 1
+fi
+
+if ! run_swift test; then
+  echo "pre-push: 'swift test' failed — push blocked." >&2
+  echo "pre-push: fix the failing tests, or bypass once with: git push --no-verify" >&2
+  exit 1
+fi
+
+echo "pre-push: build + test passed."
+exit 0

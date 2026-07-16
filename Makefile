@@ -9,7 +9,7 @@
 # Then:            make             (debug build + sign)
 #                  make release     (release build + sign)
 
-.PHONY: build release test sign sign-init clean
+.PHONY: build release test sign sign-init clean install-hooks
 
 build:
 	swift build
@@ -36,3 +36,10 @@ sign-init:
 
 clean:
 	swift package clean
+
+# One-time: point git at the tracked .githooks/ dir, so pre-push runs
+# `swift build` + `swift test` before every push (no macOS CI runner exists —
+# the dev Mac gates itself; see issue #4). Bypass once with `git push --no-verify`.
+install-hooks:
+	git config core.hooksPath .githooks
+	@echo "hooks installed: pre-push now builds + tests (bypass once: git push --no-verify)"
