@@ -27,6 +27,9 @@ func listBackupSet(_ set: BackupSet, path: URL, existed: Bool) {
     if let p = set.packSizeMiB {
         pairs.append(("pack-size", "\(p) MiB"))
     }
+    if let rc = set.restConnections {
+        pairs.append(("rest-connections", "\(rc)"))
+    }
     for e in set.excludes { pairs.append(("exclude", e)) }
     for f in set.excludeFiles { pairs.append(("exclude-file", f)) }
     Console.info(pairs)
@@ -94,6 +97,23 @@ func manageBackupSet(configPath: URL) {
     if cli.has("--clear-pack-size") {
         if set.packSizeMiB != nil { set.packSizeMiB = nil; changed = true; Console.success("pack size cleared (restic default, 16 MiB target)") }
         else { Console.note("no pack size was set") }
+    }
+    // REST-backend connection cap: persisted in the set (like pack size) so the
+    // timer uses it too. Passed to restic as the global `-o rest.connections=N`
+    // option; restic's own default is 5 parallel connections, which can 502 a
+    // small store host under concurrent pack uploads. `--clear-rest-connections`
+    // restores that default.
+    if let raw = cli.value("--rest-connections") {
+        guard let n = Int(raw), n > 0 else {
+            Console.error("--rest-connections needs a positive integer, e.g. --rest-connections 2 to cap a small store host")
+            exit(1)
+        }
+        if set.restConnections != n { set.restConnections = n; changed = true; Console.success("rest connections set to \(n)") }
+        else { Console.note("rest connections already \(n)") }
+    }
+    if cli.has("--clear-rest-connections") {
+        if set.restConnections != nil { set.restConnections = nil; changed = true; Console.success("rest connections cleared (restic default, 5 connections)") }
+        else { Console.note("no rest connections cap was set") }
     }
     // Repo-quota gauge: persisted in the set so the UNATTENDED timer warns too
     // — that run is the whole point of the pre-flight gauge, and it reads only

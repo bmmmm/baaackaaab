@@ -5,8 +5,9 @@ import XCTest
 // filesystem repository in a throwaway temp dir — no server, no network, no
 // listen socket, so they run anywhere restic is installed. They exercise exactly
 // the paths that unit tests can't reach: the typed exit-code mapping
-// (probe/ensureInitialized), --skip-if-unchanged, --pack-size, excludes (junk +
-// caches + custom globs), the restore/read commands, check, and unlock.
+// (probe/ensureInitialized), --skip-if-unchanged, --pack-size, -o
+// rest.connections, excludes (junk + caches + custom globs), the restore/read
+// commands, check, and unlock.
 //
 // Gated on restic being present (XCTSkipUnless), so `swift test` on a machine
 // without restic still passes — matching the suite's "degrades by construction"
@@ -162,6 +163,27 @@ final class ResticIntegrationTests: XCTestCase {
 
         let check = backend.checkRepo(readDataSubset: "100%")
         XCTAssertTrue(check.clean, "repo should pass check after a pack-size backup:\n\(check.output)")
+        XCTAssertFalse(check.lockedOut)
+    }
+
+    // MARK: - -o rest.connections
+
+    /// A backup with a configured connection cap is accepted by restic. This
+    /// proves SYNTACTIC acceptance only: `-o` is a restic persistent flag
+    /// (valid before or after the subcommand), and the option is
+    /// backend-specific — restic silently ignores it for this local-filesystem
+    /// test repo, so neither the argument position nor the key's effect is
+    /// discriminated here. The throttling effect is only observable against a
+    /// real REST backend (see issue #6).
+    func testRestConnectionsBackupIsAcceptedAndVerifies() throws {
+        let backend = makeBackend()
+        try backend.ensureInitialized()
+        let src = try makeSource("src", files: ["doc.txt": "hello"])
+        try backend.backup(paths: [src], tags: ["throttled"], host: "testhost", restConnections: 2)
+        XCTAssertEqual(try backend.listSnapshots().count, 1)
+
+        let check = backend.checkRepo(readDataSubset: "100%")
+        XCTAssertTrue(check.clean, "repo should pass check after a rest-connections backup:\n\(check.output)")
         XCTAssertFalse(check.lockedOut)
     }
 

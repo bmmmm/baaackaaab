@@ -129,6 +129,19 @@ final class CLIArgumentsTests: XCTestCase {
         XCTAssertNotNil(CLIArguments.unknownArgument(in: ["baaackaaab", "--docktor"]))
     }
 
+    // MARK: - --rest-connections (persist + clear)
+
+    /// `--rest-connections <n>` and `--clear-rest-connections` mirror the
+    /// pack-size / repo-quota persistent knobs: a value flag and a standalone
+    /// clear flag, both recognized (not rejected as an unknown argument), with
+    /// the value reachable through `value(_:)`.
+    func testRestConnectionsFlagsAreRecognizedAndParsed() {
+        XCTAssertNil(CLIArguments.unknownArgument(in: ["baaackaaab", "--rest-connections", "2"]))
+        XCTAssertNil(CLIArguments.unknownArgument(in: ["baaackaaab", "--clear-rest-connections"]))
+        XCTAssertEqual(CLIArguments(tokens: ["--rest-connections", "2"]).value("--rest-connections"), "2")
+        XCTAssertTrue(CLIArguments(tokens: ["--clear-rest-connections"]).has("--clear-rest-connections"))
+    }
+
     /// A flag value may legitimately start with '-' or look like a bare word — it
     /// is consumed by its flag, never checked. `--diff` consumes two.
     func testUnknownArgumentSkipsFlagValues() {

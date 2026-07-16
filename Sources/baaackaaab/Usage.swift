@@ -42,6 +42,8 @@ func printUsage() {
         ("--clear-limit-upload", "remove the upload throttle"),
         ("--pack-size <mib>", "persist a restic target pack size in MiB (4…128; fewer round-trips on a network store)"),
         ("--clear-pack-size", "restore restic's default pack size (16 MiB target)"),
+        ("--rest-connections <n>", "persist a cap on the REST backend's parallel connections (restic's default is 5)"),
+        ("--clear-rest-connections", "restore restic's default connection count"),
         ("--repo-quota <bytes>", "persist the server quota for the pre-flight gauge (the timer warns too)"),
         ("--clear-repo-quota", "remove the persisted quota gauge"),
         ("--config <path>", "backup-set file (default ~/.config/baaackaaab/backup-set.json)"),

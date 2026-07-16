@@ -14,6 +14,7 @@ struct BackupRun {
     let backupDryRun: Bool
     let configLimitUploadKiBps: Int?
     let configPackSizeMiB: Int?
+    let configRestConnections: Int?
     let configExcludes: [String]
     let configExcludeFiles: [String]
     let repoQuotaBytes: Int?
@@ -90,6 +91,9 @@ struct BackupRun {
             }
             if let ps = configPackSizeMiB, ps > 0, !backupDryRun {
                 info.append(("pack-size", "\(ps) MiB"))
+            }
+            if let rc = configRestConnections, rc > 0, !backupDryRun {
+                info.append(("rest-connections", "\(rc)"))
             }
             // Excludes are always active (the macOS-junk defaults + caches), so this
             // line shows on every run — plus any set globs / exclude-files, so it's
@@ -180,6 +184,7 @@ struct BackupRun {
                         try run.backend.backup(paths: paths, tags: tags, host: host,
                                                dryRun: backupDryRun, limitUploadKiBps: configLimitUploadKiBps,
                                                packSizeMiB: configPackSizeMiB,
+                                               restConnections: configRestConnections,
                                                excludes: configExcludes, excludeFiles: excludeFilesResolved,
                                                showProgress: showProgress)
                     } catch {

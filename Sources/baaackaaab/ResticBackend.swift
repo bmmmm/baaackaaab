@@ -186,6 +186,9 @@ final class ResticBackend {
     /// changed bytes) and uploads nothing — a true preview that touches the repo
     /// read-only. `limitUploadKiBps`, when > 0, throttles the upload via
     /// `--limit-upload` (KiB/s); it is irrelevant on a dry run (nothing uploads).
+    /// `restConnections`, when > 0, caps the REST backend's connection pool via
+    /// the global `-o rest.connections=N` option, applied on a dry run too since
+    /// it bounds the backend's concurrency, not the upload itself.
     ///
     /// `showProgress` (a real backup on a TTY) switches restic to `--json` and
     /// renders a parsed, self-rewriting progress bar; otherwise restic's own
@@ -206,7 +209,7 @@ final class ResticBackend {
 
     func backup(paths: [URL], tags: [String], host: String?,
                 dryRun: Bool = false, limitUploadKiBps: Int? = nil,
-                packSizeMiB: Int? = nil,
+                packSizeMiB: Int? = nil, restConnections: Int? = nil,
                 excludes: [String] = [], excludeFiles: [String] = [],
                 showProgress: Bool = false) throws {
         // `--skip-if-unchanged`: when a source is byte-for-byte identical to its
@@ -238,6 +241,20 @@ final class ResticBackend {
         if let host { args += ["--host", host] }
         for tag in tags { args += ["--tag", tag] }
         args += paths.map { $0.path }
+        // REST-backend connection cap: `-o key=value` is a restic persistent
+        // (global) flag and is accepted before OR after the subcommand — the
+        // prepend is a convention (global options up front), not a parser
+        // requirement. restic's own default is 5 parallel connections; a small
+        // store host can 502 under that much concurrency on pack uploads (see
+        // issue #6). This is backend-specific (restic ignores it for a non-REST
+        // repo, e.g. the local-filesystem repos the integration tests use), so
+        // it is safe to pass unconditionally whenever configured. Deliberately
+        // wired into `backup` only: the run-start probe/init and the read-only
+        // commands issue few concurrent requests and were never observed to
+        // trigger the 502s, so they stay unthrottled.
+        if let restConnections, restConnections > 0 {
+            args = ["-o", "rest.connections=\(restConnections)"] + args
+        }
 
         let names = paths.map { $0.lastPathComponent }.joined(separator: ", ")
         let mode = dryRun ? " (dry run — nothing uploaded)" : ""

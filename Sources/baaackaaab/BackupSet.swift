@@ -26,6 +26,12 @@ struct BackupSet: Codable, Equatable {
     /// round-trips) at the cost of RAM and re-upload on interruption. restic's
     /// own default target is 16 MiB when this is unset; valid range 4…128.
     var packSizeMiB: Int?
+    /// Optional restic REST-backend connection cap, passed to restic as the
+    /// global `-o rest.connections=N` option. Persisted here so the unattended
+    /// timer uses it too. restic's own default is 5 parallel connections; a
+    /// small store host can 502 under that much concurrency on pack uploads, so
+    /// this lets the operator cap it without touching the timer.
+    var restConnections: Int?
     /// Extra restic exclude globs, on top of the always-on macOS-junk defaults
     /// (see ResticBackend.junkExcludes). Persisted here so the unattended timer
     /// applies them too. Each is a `restic backup --exclude` pattern — matched on
@@ -40,12 +46,14 @@ struct BackupSet: Codable, Equatable {
 
     init(driveFolders: [String] = [], photoAlbums: [String] = [],
          quotaBytes: Int? = nil, limitUploadKiBps: Int? = nil,
-         packSizeMiB: Int? = nil, excludes: [String] = [], excludeFiles: [String] = []) {
+         packSizeMiB: Int? = nil, restConnections: Int? = nil,
+         excludes: [String] = [], excludeFiles: [String] = []) {
         self.driveFolders = driveFolders
         self.photoAlbums = photoAlbums
         self.quotaBytes = quotaBytes
         self.limitUploadKiBps = limitUploadKiBps
         self.packSizeMiB = packSizeMiB
+        self.restConnections = restConnections
         self.excludes = excludes
         self.excludeFiles = excludeFiles
     }
@@ -58,6 +66,7 @@ struct BackupSet: Codable, Equatable {
         case quotaBytes = "quota_bytes"
         case limitUploadKiBps = "limit_upload_kibps"
         case packSizeMiB = "pack_size_mib"
+        case restConnections = "rest_connections"
         case excludes
         case excludeFiles = "exclude_files"
     }
@@ -72,6 +81,7 @@ struct BackupSet: Codable, Equatable {
         quotaBytes = try c.decodeIfPresent(Int.self, forKey: .quotaBytes)
         limitUploadKiBps = try c.decodeIfPresent(Int.self, forKey: .limitUploadKiBps)
         packSizeMiB = try c.decodeIfPresent(Int.self, forKey: .packSizeMiB)
+        restConnections = try c.decodeIfPresent(Int.self, forKey: .restConnections)
         excludes = try c.decodeIfPresent([String].self, forKey: .excludes) ?? []
         excludeFiles = try c.decodeIfPresent([String].self, forKey: .excludeFiles) ?? []
     }
