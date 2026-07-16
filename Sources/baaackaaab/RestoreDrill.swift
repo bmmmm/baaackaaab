@@ -20,14 +20,17 @@ struct DrillTarget: Equatable {
     let label: String        // the covered folder path (drive) or batch tag (photos)
 }
 
-/// Pure sample-selection: which snapshots a drill exercises, rotating across runs
-/// so every source is covered over time. Kept free of I/O so the rotation is
-/// unit-testable (a wrong pick just tests the wrong thing, but a broken rotation
-/// would silently never cover some sources).
+/// Pure sample-selection: which snapshots a drill exercises, rotating across
+/// runs to sample the sources with variety. This is sampling, NOT a coverage
+/// guarantee: candidates are ordered newest-first, so daily backups permute the
+/// order between drills while the cursor advances by one — a reorder can
+/// re-sample one source and delay another. Kept free of I/O so the rotation is
+/// unit-testable.
 enum DrillPlan {
-    /// Deterministic rotating pick from `items`, advancing by the count of prior
-    /// drills so successive runs walk through every entry. nil when empty (that
-    /// source type isn't configured / has no snapshots yet).
+    /// Deterministic rotating pick from `items`, advancing by the count of
+    /// prior drills. Full coverage only holds while the candidate order is
+    /// stable between drills (see type comment). nil when empty (that source
+    /// type isn't configured / has no snapshots yet).
     static func rotate<T>(_ items: [T], priorDrills: Int) -> T? {
         guard !items.isEmpty else { return nil }
         return items[((priorDrills % items.count) + items.count) % items.count]
@@ -157,7 +160,10 @@ func restoreDrillCommand() {
     let tempRoot = DrillPlan.tempTarget(stamp: stampFmt.string(from: runStart))
     do { try RestoreEngine.validateTarget(tempRoot); try RestoreEngine.ensureTargetDir(tempRoot) }
     catch { Console.error("\(error)"); exit(1) }
-    defer { try? FileManager.default.removeItem(at: tempRoot) }   // cleaned even on failure
+    // Cleanup on the normal return path. The failure path below exits the
+    // process — exit() does NOT unwind, so defer alone would leak the temp dir
+    // there; the failure branch removes it explicitly before exit(1).
+    defer { try? FileManager.default.removeItem(at: tempRoot) }
 
     Console.step("drilling \(targets.count) sampled snapshot(s) into a throwaway temp dir (rotation #\(priorDrills + 1))")
     var verifiedFiles = 0, sampledFiles = 0, totalBytes = 0
@@ -214,6 +220,9 @@ func restoreDrillCommand() {
                             message: "\(failures.count) sampled snapshot(s) did not restore — \(next)",
                             subtitle: "restore drill")
         }
+        // exit() skips defer — remove the (up to 500 MB) sample explicitly, or
+        // every failed unattended drill would pile it up under Caches.
+        try? FileManager.default.removeItem(at: tempRoot)
         exit(1)
     }
 }
