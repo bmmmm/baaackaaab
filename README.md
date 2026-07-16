@@ -314,6 +314,24 @@ without it.
 The TTY TUI, live restic against a real *rest-server*, Photos/TCC, and the launchd
 timer are verified on real hardware, not in the test suite.
 
+### Pre-push hook
+
+There is no macOS CI runner for this project — the dev Mac is the only build host —
+so a git pre-push hook gates pushes instead, running `swift build` + `swift test`
+and blocking the push on failure. Enable it once:
+
+```sh
+make install-hooks
+```
+
+It skips the build+test entirely when a push's range touches none of `Sources/`,
+`Tests/`, `Package.swift`, or `Makefile` (e.g. a README-only push). To push once
+without waiting for it (or around a known-broken WIP commit):
+
+```sh
+git push --no-verify
+```
+
 ## Layout
 
 | File | Role |
