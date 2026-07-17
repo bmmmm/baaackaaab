@@ -238,6 +238,30 @@ Patterns follow restic's [exclude rules](https://restic.readthedocs.io/en/stable
 `--add-exclude-file` must exist at add time; if it later vanishes it is dropped with a
 warning at run time rather than failing the backup.
 
+### Anomaly warning (source-side tripwire)
+
+The append-only store protects *old* snapshots — a compromised Mac can add but
+never delete history. What it can't tell you is that the **source** is being
+mass-rewritten right now: ransomware that encrypts your iCloud files makes every
+file look changed, so the next backup dutifully re-uploads everything. To the store
+that looks like a normal (if large) run.
+
+So every backup records its churn (files/bytes/data added, per destination) into the
+run history and compares this run against a median baseline of the prior successful
+runs to the same destination. Two shapes raise a loud, actionable warning — on the
+console and, on an unattended run, as a macOS banner:
+
+- **Spike** — data added is more than 10× the baseline median *and* over 1 GiB:
+  "if you did not add/re-encode large amounts of data, check the source for mass
+  modification".
+- **Shrink** — the source processed less than half the baseline: "check that iCloud
+  is signed in and folders/albums still resolve".
+
+This is deliberately **warn-only**: it never changes the run's exit code and never
+touches eviction — a false positive costs a banner, never a backup. It stays silent
+until at least three baseline runs exist, so early runs don't false-alarm, and it
+persists nothing new (the baseline is derived from the existing run history each run).
+
 ### Scheduling
 
 ```sh

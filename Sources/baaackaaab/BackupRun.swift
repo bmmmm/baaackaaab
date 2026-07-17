@@ -43,9 +43,15 @@ struct BackupRun {
             // every terminal path (no-destination, nothing-acquired, partial, success)
             // records the same shape. Best-effort: a failed write never blocks the exit.
             func recordRun(exitCode: Int, verified: Int, total: Int, sourceFailures: Int) {
-                let dests = runs.map { r in
-                    RunRecord.Dest(name: r.destination.name, ok: r.ok,
-                                   error: r.initError ?? r.firstBackupError)
+                let dests = runs.map { r -> RunRecord.Dest in
+                    let c = r.churn
+                    return RunRecord.Dest(
+                        name: r.destination.name, ok: r.ok,
+                        error: r.initError ?? r.firstBackupError,
+                        dataAdded: c.hasData ? c.dataAdded : nil,
+                        filesChanged: c.hasData ? c.filesChanged : nil,
+                        filesNew: c.hasData ? c.filesNew : nil,
+                        bytesProcessed: c.hasData ? c.bytesProcessed : nil)
                 }
                 let record = RunRecord(runTag: runTag, start: runStart, end: Date(),
                                        exitCode: exitCode, verified: verified, total: total,
@@ -181,12 +187,18 @@ struct BackupRun {
                 for run in ready {
                     if BackupCancellation.shared.isCancelled { throw RunCancelled() }
                     do {
-                        try run.backend.backup(paths: paths, tags: tags, host: host,
-                                               dryRun: backupDryRun, limitUploadKiBps: configLimitUploadKiBps,
-                                               packSizeMiB: configPackSizeMiB,
-                                               restConnections: configRestConnections,
-                                               excludes: configExcludes, excludeFiles: excludeFilesResolved,
-                                               showProgress: showProgress)
+                        // Aggregate the per-snapshot churn summary into this
+                        // destination's running total (nil on a dry run / a skipped
+                        // backup that wrote no snapshot). Persisted + fed to the tripwire.
+                        if let summary = try run.backend.backup(
+                                paths: paths, tags: tags, host: host,
+                                dryRun: backupDryRun, limitUploadKiBps: configLimitUploadKiBps,
+                                packSizeMiB: configPackSizeMiB,
+                                restConnections: configRestConnections,
+                                excludes: configExcludes, excludeFiles: excludeFilesResolved,
+                                showProgress: showProgress) {
+                            run.churn.add(summary)
+                        }
                     } catch {
                         // A cancel interrupts restic into a non-zero (130) exit; treat that
                         // as cancellation, not as this destination's own backup failure.
@@ -384,8 +396,40 @@ struct BackupRun {
                 sourcesConfigured: !(driveFolders.isEmpty && photoAlbums.isEmpty),
                 dryRun: false, readyCount: ready.count, runTag: runTag)
             Console.summary(headline: outcome.headline, state: outcome.state, details: details)
+            // Snapshot the history BEFORE recording this run, so the churn-anomaly
+            // baseline is built purely from PRIOR runs and never includes the run we
+            // are about to append.
+            let priorHistory = runCancelled ? [] : RunHistory.recent(ChurnAnomaly.baselineWindow)
             recordRun(exitCode: Int(outcome.exitCode), verified: verified, total: total, sourceFailures: sourceFailures)
             if outcome.notify, let message = outcome.notifyMessage { notifyOnFailure(message) }
+
+            // Source-side ransomware tripwire (warn-only). Compare each destination's
+            // aggregated churn against a median baseline of its prior successful runs
+            // and, on a spike or shrink, warn loudly + fire a notification. This NEVER
+            // alters the exit code and NEVER touches eviction — an explicit warn-only
+            // decision, so a false positive costs a banner, never a backup. Skipped on
+            // a cancelled run (its metrics are partial). The notification mirrors the
+            // failure-banner gate: only when our output is invisible (launchd / piped),
+            // since an interactive run already shows the warning on screen.
+            if !runCancelled {
+                for run in ready where run.ok && run.churn.hasData {
+                    let baseline = ChurnAnomaly.baseline(from: priorHistory,
+                                                         destination: run.destination.name)
+                    let message: String
+                    switch ChurnAnomaly.evaluate(current: run.churn, baseline: baseline) {
+                    case .clean, .insufficientBaseline:
+                        continue
+                    case .spike(let m), .shrink(let m):
+                        message = m
+                    }
+                    Console.warn("\(run.destination.name): \(message)")
+                    if isatty(STDERR_FILENO) == 0 {
+                        Notifier.notify(title: "baaackaaab \u{2014} anomaly warning",
+                                        message: message,
+                                        subtitle: "run \(runTag) \u{2014} \(run.destination.name)")
+                    }
+                }
+            }
             // Unattended (log-only) path: nudge once per clean run when restic or the
             // server has fallen behind the tested baseline — the scheduled log goes
             // unread, so a banner is the only signal. Offline for restic; best-effort

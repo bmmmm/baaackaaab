@@ -48,10 +48,44 @@ struct RunRecord: Codable {
 
     /// Per-destination outcome for the run. `error` is nil on success; on failure
     /// it is the restic error description (already redacted, never a secret).
+    ///
+    /// The four churn fields are this run's metrics aggregated across every restic
+    /// snapshot written to the destination (a run can produce several — Photos are
+    /// batched). They are optionals encoded with `encodeIfPresent`, so a record
+    /// from before this feature (no metrics) and one that legitimately had none
+    /// (dry run / all-skipped) both stay byte-identical to the old format — the
+    /// history remains forward/backward-readable. They feed the churn tripwire's
+    /// baseline; nothing else is persisted for it.
     struct Dest: Codable {
         let name: String
         let ok: Bool
         let error: String?
+        let dataAdded: Int64?
+        let filesChanged: Int64?
+        let filesNew: Int64?
+        let bytesProcessed: Int64?
+
+        enum CodingKeys: String, CodingKey {
+            case name, ok, error
+            case dataAdded = "data_added"
+            case filesChanged = "files_changed"
+            case filesNew = "files_new"
+            case bytesProcessed = "bytes_processed"
+        }
+
+        // Explicit init so the churn fields default to nil — existing call sites
+        // (the crash-early path, the drill, the tests) keep compiling unchanged.
+        init(name: String, ok: Bool, error: String?,
+             dataAdded: Int64? = nil, filesChanged: Int64? = nil,
+             filesNew: Int64? = nil, bytesProcessed: Int64? = nil) {
+            self.name = name
+            self.ok = ok
+            self.error = error
+            self.dataAdded = dataAdded
+            self.filesChanged = filesChanged
+            self.filesNew = filesNew
+            self.bytesProcessed = bytesProcessed
+        }
     }
 
     enum CodingKeys: String, CodingKey {
