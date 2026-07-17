@@ -254,11 +254,22 @@ stable signature then keeps alive across rebuilds.
 ### Maintenance & diagnostics
 
 ```sh
-baaackaaab --doctor          # restic, destinations, disk, Photos, timer, updates — read-only
+baaackaaab --doctor          # restic, destinations, append-only, disk, Photos, timer, updates — read-only
 baaackaaab --verify-repo     # restic check per destination (read-only)
 baaackaaab --check-updates   # compare restic + the REST server against the latest releases
 baaackaaab --unlock --destination offsite   # remove STALE locks (the only delete op)
 ```
+
+`--doctor`'s "Append-only enforcement" section actively PROVES the core safety
+guarantee instead of just documenting it: for each enabled `rest:` destination it
+sends an HTTP DELETE for a guaranteed-absent, non-existent object under `data/`
+(never `locks/`, never a real object — so the probe cannot destroy anything even
+if enforcement is missing) and checks the response. A `403` means the server
+rejected it — append-only holds. A `404` or `2xx` means the server actually
+considered or accepted the delete — a hard finding, since a rest-server started
+without `--append-only` is otherwise indistinguishable from a correctly
+configured one. Non-`rest:` destinations can't be checked at this protocol
+level; see [Backends & the immutability caveat](#backends--the-immutability-caveat).
 
 ### Staying current
 
@@ -293,11 +304,13 @@ make test     # or: swift test
 The suite covers the headless pure-logic surface — argument parsing, the backup-set
 model, restore path-safety, secret redaction and credential generation, version
 parsing/comparison and the server-endpoint extraction behind the update check, the
-launchd schedule round-trip, staging-path sanitizing, notification escaping, and
-the on-disk destination and run-history stores. Store tests relocate to a throwaway directory via
-`BAAACKAAAB_SUPPORT_DIR`, so they never touch the real credential store. The live
-GitHub query and HTTP header probe touch the network, so they are not unit-tested —
-both degrade to nil/baseline by construction.
+append-only DELETE probe's status-code classification and rest:-URL/credential
+derivation, the launchd schedule round-trip, staging-path sanitizing, notification
+escaping, and the on-disk destination and run-history stores. Store tests relocate
+to a throwaway directory via `BAAACKAAAB_SUPPORT_DIR`, so they never touch the real
+credential store. The live GitHub query, HTTP header probe, and append-only DELETE
+probe touch the network, so they are not unit-tested — all three degrade to
+nil/unreachable by construction.
 
 A second layer of **live restic integration tests** (`ResticIntegrationTests`)
 drives the real `restic` binary against a throwaway *local* repository — no
@@ -347,6 +360,7 @@ git push --no-verify
 | `ConfigTUI.swift` | the raw-mode terminal UI (command center + editor) |
 | `Timer.swift` | the launchd LaunchAgent |
 | `UpdateCheck.swift` | restic + REST-server version checks (offline baseline / online latest) |
+| `AppendOnlyProbe.swift` | `--doctor`'s active append-only enforcement DELETE probe |
 
 ## Security notes
 
@@ -359,6 +373,9 @@ git push --no-verify
   (`restic.example.com`, …); real values come from the environment at setup time
   and otherwise live only in the local credential files.
 - The store is `--append-only`: a compromised Mac cannot delete or rewrite history.
+  `--doctor` actively verifies this per `rest:` destination (an HTTP DELETE probe
+  against a guaranteed-absent object) rather than only documenting it — see
+  [Maintenance & diagnostics](#maintenance--diagnostics).
 
 ## Further reading (restic)
 

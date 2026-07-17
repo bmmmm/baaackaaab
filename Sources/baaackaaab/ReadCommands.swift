@@ -580,6 +580,37 @@ func doctorCommand() {
         }
     }
 
+    Console.section("Append-only enforcement")
+    Console.note("actively probes each rest: destination — the single most on-point safety check, since a server accidentally started WITHOUT --append-only looks identical to a correct one to every other check above")
+    let enabledDests = dests.filter { $0.enabled }
+    if enabledDests.isEmpty {
+        Console.note("no enabled destinations to probe")
+    }
+    for dest in enabledDests {
+        guard let repoURL = dest.displayURL else {
+            Console.warn("\(dest.name): repo URL unreadable — cannot determine the backend, skipping the append-only probe")
+            warnings += 1
+            continue
+        }
+        guard let target = AppendOnlyProbe.target(from: repoURL) else {
+            Console.note("\(dest.name): not a rest: destination — append-only cannot be verified at the protocol level here; enforce immutability at the storage layer instead (S3/B2 Object Lock, etc. — see README's Backends & the immutability caveat)")
+            continue
+        }
+        let verdict = AppendOnlyProbe.probe(target)
+        switch verdict {
+        case .enforced:
+            Console.success("\(dest.name): \(verdict.message)")
+        case .notEnforced:
+            Console.failure("\(dest.name): \(verdict.message)")
+            problems += 1
+        case .authProblem, .inconclusive:
+            Console.warn("\(dest.name): \(verdict.message)")
+            warnings += 1
+        case .unreachable:
+            Console.note("\(dest.name): \(verdict.message)")
+        }
+    }
+
     Console.section("Disk space")
     let home = FileManager.default.homeDirectoryForCurrentUser
     let stagingDefault = home.appendingPathComponent("Library/Caches/baaackaaab/staging", isDirectory: true)
