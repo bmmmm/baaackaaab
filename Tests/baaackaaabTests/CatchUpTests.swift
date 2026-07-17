@@ -34,11 +34,34 @@ final class CatchUpTests: XCTestCase {
         XCTAssertEqual(CatchUp.decide(lastSuccess: last, interval: day, now: now), .overdue(ageDays: 1))
     }
 
-    func testJustUnderIntervalIsFresh() {
+    func testJitterShortOfIntervalIsStillOverdue() {
+        // The calendar trigger carries --catch-up too, and spawn jitter can make a
+        // punctual daily fire measure a few seconds LESS than a day since the
+        // previous run's recorded start. That must count as overdue, or the daily
+        // schedule silently degrades toward every-other-day.
         let now = Date()
         let last = now.addingTimeInterval(-day + 60)   // 1 minute short of a day
-        if case .fresh = CatchUp.decide(lastSuccess: last, interval: day, now: now) { }
-        else { XCTFail("just under the interval should be fresh") }
+        XCTAssertEqual(CatchUp.decide(lastSuccess: last, interval: day, now: now), .overdue(ageDays: 0))
+    }
+
+    func testInsideGraceWindowBoundary() {
+        // Just under interval − grace is the last fresh moment; at the boundary
+        // it flips to overdue.
+        let now = Date()
+        let fresh = now.addingTimeInterval(-(day - CatchUp.jitterGrace) + 1)
+        if case .fresh = CatchUp.decide(lastSuccess: fresh, interval: day, now: now) { }
+        else { XCTFail("just inside the grace boundary should be fresh") }
+        let due = now.addingTimeInterval(-(day - CatchUp.jitterGrace))
+        if case .overdue = CatchUp.decide(lastSuccess: due, interval: day, now: now) { }
+        else { XCTFail("at the grace boundary it must be overdue") }
+    }
+
+    func testSameDayDuplicateFireIsFresh() {
+        // The duplicate fire right after a normal calendar run (age = minutes)
+        // must stay quiet.
+        let now = Date()
+        let last = now.addingTimeInterval(-300)
+        XCTAssertEqual(CatchUp.decide(lastSuccess: last, interval: day, now: now), .fresh(ageDays: 0))
     }
 
     func testWeeklyScheduleUsesItsWiderInterval() {

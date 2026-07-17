@@ -20,16 +20,27 @@ enum CatchUp {
         case noHistory
     }
 
+    /// Grace subtracted from the interval before the freshness comparison. The
+    /// `--catch-up` marker also rides on the CALENDAR trigger (launchd has one
+    /// argument list for both), and spawn/start-recording jitter of a few seconds
+    /// can make a punctual daily fire measure age = interval − ε — which a strict
+    /// `age < interval` check would skip, silently degrading a daily schedule
+    /// toward every-other-day. One hour of grace swallows any realistic jitter
+    /// while still treating a same-day duplicate fire (age ≪ interval) as fresh.
+    static let jitterGrace: TimeInterval = 3_600
+
     /// Decide whether a catch-up (RunAtLoad / boot) invocation should proceed.
     /// `lastSuccess` is the newest successful backup's anchor time (nil = none
-    /// ever). Fresh iff it is STRICTLY younger than `interval`; exactly-at or older
-    /// is overdue, so a due scheduled run is never skipped. No history is overdue —
-    /// a backup that has never proven itself must run. Pure — unit-testable.
+    /// ever). Fresh iff it is younger than `interval` minus `jitterGrace`; at or
+    /// beyond that is overdue, so a due scheduled run is never skipped even when
+    /// spawn jitter makes it fire seconds "early" relative to the previous run's
+    /// recorded start. No history is overdue — a backup that has never proven
+    /// itself must run. Pure — unit-testable.
     static func decide(lastSuccess: Date?, interval: TimeInterval, now: Date) -> Decision {
         guard let last = lastSuccess else { return .noHistory }
         let age = now.timeIntervalSince(last)
         let ageDays = max(0, Int(age / 86_400))
-        return age < interval ? .fresh(ageDays: ageDays) : .overdue(ageDays: ageDays)
+        return age < interval - jitterGrace ? .fresh(ageDays: ageDays) : .overdue(ageDays: ageDays)
     }
 }
 
