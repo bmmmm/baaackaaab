@@ -72,6 +72,10 @@ the last check and its slice (e.g. `integrity check 3/8 · 2d ago`). A plain
 `baaackaaab --verify-repo` (no `--rotate-read-data`) is unchanged — the manual
 structural check, with an optional one-off `--read-data-subset`.
 
+That this actually catches rot — a single flipped pack byte fails the read-data
+check with concrete error lines while staying invisible to the structural check —
+is demonstrated in the [bit-rot PoC](poc-bitrot-detection.md).
+
 The restore drill and the integrity check are complementary: the **drill** proves a
 sample *decrypts and restores* end-to-end, the **check** proves *all bytes still
 hash correctly* over time. Both install/uninstall independently of the backup timer

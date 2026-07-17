@@ -33,12 +33,20 @@ parsing, and the `--repo-usage` aggregation against a real snapshot. They are
 skipped automatically when `restic` isn't on `PATH`, so the suite still passes
 without it.
 
-The ransomware-detection PoC (`RansomwarePoCTests`) is part of this live layer:
-it simulates a mass in-place encryption and a mass source loss against real
-restic and asserts the SPIKE/SHRINK verdicts through the real summary →
-aggregation → evaluator pipeline — scaled small in the normal suite, full-size
-with production thresholds via `BAAACKAAAB_POC_FULL=1` (see
-[the PoC report](poc-ransomware-detection.md)).
+Three PoC tests are part of this live layer, each backing a safety claim with a
+measured demonstration instead of an assertion in prose:
+
+- `RansomwarePoCTests` — simulates a mass in-place encryption and a mass source
+  loss against real restic and asserts the SPIKE/SHRINK verdicts through the
+  real summary → aggregation → evaluator pipeline; scaled small in the normal
+  suite, full-size with production thresholds via `BAAACKAAAB_POC_FULL=1`
+  ([report](poc-ransomware-detection.md)).
+- `RecoveryKitPoCTests` — executes the recovery sheet's own fenced `sh` block
+  verbatim with stock restic in a clean environment and verifies the restored
+  bytes ([report](poc-recovery-kit.md)).
+- `BitRotPoCTests` — flips one byte in a data pack and asserts the read-data
+  check fails while the structural check stays clean
+  ([report](poc-bitrot-detection.md)).
 
 The TTY TUI, live restic against a real *rest-server*, Photos/TCC, and the launchd
 timer are verified on real hardware, not in the test suite.

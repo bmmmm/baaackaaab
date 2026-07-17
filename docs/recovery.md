@@ -60,6 +60,10 @@ variants refuse to write into live iCloud Drive / Photos. A destination whose
 credential files are missing/unreadable at export time is noted as incomplete in
 the sheet rather than failing the whole export.
 
+That the sheet actually suffices — its own recovery commands, executed verbatim
+with stock restic in a clean environment, restore the data byte-identically —
+is proven continuously by the [recovery-kit PoC](poc-recovery-kit.md).
+
 ## Locks & store usage
 
 ```sh

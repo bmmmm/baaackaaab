@@ -20,14 +20,16 @@ dashboard; a launchd timer runs it unattended.
   over live iCloud; previews with `--dry-run`, re-reads with `--verify`.
 - **Trust is scheduled, not assumed** — a monthly restore drill proves a sample
   decrypts end-to-end; a rotating read-data check re-hashes every stored byte
-  over eight runs to catch bit-rot.
+  over eight runs to catch bit-rot
+  ([proven against a real flipped byte](docs/poc-bitrot-detection.md)).
 - **Monitoring that survives a dead Mac** — Healthchecks-style heartbeat,
   ntfy/webhook pushes, `status.json` + a Prometheus textfile; a source-side
   anomaly tripwire flags ransomware-shaped mass-rewrite churn
   ([demonstrated end-to-end](docs/poc-ransomware-detection.md), not just claimed).
 - **Multiple destinations & an emergency recovery kit** — independent repos
   with separate keys, plus an encrypted offline sheet that restores with stock
-  restic on any machine — no baaackaaab, no Mac.
+  restic on any machine — no baaackaaab, no Mac
+  ([the sheet's own commands are executed in the test suite](docs/poc-recovery-kit.md)).
 - **One binary, no daemons** — a single Swift CLI; scheduling is a plain
   launchd LaunchAgent, secrets live in `0600` files and never touch argv.
 
