@@ -44,6 +44,8 @@ func printUsage() {
         ("--clear-pack-size", "restore restic's default pack size (16 MiB target)"),
         ("--rest-connections <n>", "persist a cap on the REST backend's parallel connections (restic's default is 5)"),
         ("--clear-rest-connections", "restore restic's default connection count"),
+        ("--defer-on-battery", "scheduled/catch-up runs skip while on battery power (interactive runs always proceed)"),
+        ("--no-defer-on-battery", "restore the default — scheduled runs proceed on battery too"),
         ("--repo-quota <bytes>", "persist the server quota for the pre-flight gauge (the timer warns too)"),
         ("--clear-repo-quota", "remove the persisted quota gauge"),
         ("--config <path>", "backup-set file (default ~/.config/baaackaaab/backup-set.json)"),

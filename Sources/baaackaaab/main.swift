@@ -289,9 +289,11 @@ if cli.has("--limit-upload")
     || cli.has("--rest-connections")
     || cli.has("--clear-rest-connections")
     || cli.has("--repo-quota")
-    || cli.has("--clear-repo-quota") {
+    || cli.has("--clear-repo-quota")
+    || cli.has("--defer-on-battery")
+    || cli.has("--no-defer-on-battery") {
     if !cli.values("--drive-folder").isEmpty || !cli.values("--photo-album").isEmpty {
-        Console.error("--limit-upload / --pack-size / --rest-connections / --repo-quota (and their --clear-* forms) change the backup set's PERSISTENT tuning; they are not per-run flags (a run reads them from the set — there is no ad-hoc form). Set them on their own first (e.g. `baaackaaab --pack-size 64`), then run the backup separately. Combined with --drive-folder/--photo-album they would silently edit the set and skip the backup.")
+        Console.error("--limit-upload / --pack-size / --rest-connections / --repo-quota / --defer-on-battery (and their --clear-* / --no-* forms) change the backup set's PERSISTENT tuning; they are not per-run flags (a run reads them from the set — there is no ad-hoc form). Set them on their own first (e.g. `baaackaaab --pack-size 64`), then run the backup separately. Combined with --drive-folder/--photo-album they would silently edit the set and skip the backup.")
         exit(1)
     }
 }
@@ -304,6 +306,7 @@ if cli.hasAny(["--list", "--add-folder", "--remove-folder", "--add-album", "--re
                "--limit-upload", "--clear-limit-upload", "--pack-size", "--clear-pack-size",
                "--rest-connections", "--clear-rest-connections",
                "--repo-quota", "--clear-repo-quota",
+               "--defer-on-battery", "--no-defer-on-battery",
                "--add-exclude", "--remove-exclude", "--add-exclude-file", "--remove-exclude-file"]) {
     manageBackupSet(configPath: configPath)
     exit(0)
@@ -320,6 +323,7 @@ var configPackSizeMiB: Int? = nil
 var configRestConnections: Int? = nil
 var configExcludes: [String] = []
 var configExcludeFiles: [String] = []
+var configDeferOnBattery = false
 if driveFolders.isEmpty && photoAlbums.isEmpty
     && FileManager.default.fileExists(atPath: configPath.path) {
     do {
@@ -332,6 +336,7 @@ if driveFolders.isEmpty && photoAlbums.isEmpty
         configRestConnections = set.restConnections
         configExcludes = set.excludes
         configExcludeFiles = set.excludeFiles
+        configDeferOnBattery = set.deferOnBattery
     } catch {
         Console.error("backup set at \(configPath.path) is unreadable — fix or delete it: \(error)")
         exit(1)
@@ -397,6 +402,20 @@ let runStart = Date()
 // banner it unattended) and fall through to the normal backup below. A no-op
 // without the marker. Evaluated here, before any backup work begins.
 catchUpGateOrProceed()
+
+// Battery-defer gate (opt-in). ONLY for scheduled / catch-up invocations — an
+// interactive run always proceeds. When the knob is set and we are on battery,
+// exit 0 without backing up (and BEFORE any backup work / heartbeat begins): a
+// deferred run deliberately looks like a missed run, and the next scheduled fire
+// (or the catch-up on AC) picks it up.
+let isScheduledRun = runTag == "scheduled" || cli.has("--catch-up")
+if !backupDryRun,
+   ScheduledBackup.shouldDeferOnBattery(isScheduled: isScheduledRun,
+                                        deferConfigured: configDeferOnBattery,
+                                        onBattery: PowerSource.onBattery()) {
+    Console.note("on battery — deferring scheduled backup (defer-on-battery is on); it will run on the next scheduled slot on wall power")
+    exit(0)
+}
 
 // Hand off to the extracted orchestrator: it runs init, quota, Drive, Photos,
 // manifest, summary, run-history and exit codes, then exits the process.

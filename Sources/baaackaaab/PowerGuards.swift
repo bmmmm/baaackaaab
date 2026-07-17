@@ -1,6 +1,7 @@
 import Foundation
 #if canImport(IOKit)
 import IOKit.pwr_mgt
+import IOKit.ps
 #endif
 
 /// A best-effort IOKit power assertion that prevents IDLE system sleep for as long
@@ -42,4 +43,33 @@ final class SleepHold {
     }
 
     deinit { release() }
+}
+
+/// Thin IOKit wrapper around the current power source. Untested (a bare syscall
+/// bridge); the decision that consumes it, `ScheduledBackup.shouldDeferOnBattery`,
+/// is the pure, unit-tested part.
+enum PowerSource {
+    /// True when the Mac is currently drawing from the battery (not AC / UPS).
+    /// Fails safe: any inability to read the power state returns false (assume
+    /// wall power), so a read glitch never defers a backup that should have run.
+    static func onBattery() -> Bool {
+        #if canImport(IOKit)
+        guard let blob = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
+              let type = IOPSGetProvidingPowerSourceType(blob)?.takeRetainedValue() as String?
+        else { return false }
+        return type == kIOPSBatteryPowerValue
+        #else
+        return false
+        #endif
+    }
+}
+
+/// Pure decision for the opt-in battery-defer guard. Kept separate from the IOKit
+/// read so it is unit-testable. A run defers ONLY when all three hold: it is a
+/// scheduled/catch-up invocation (an interactive run always proceeds), the
+/// `defer_on_battery` knob is set, and the Mac is actually on battery.
+enum ScheduledBackup {
+    static func shouldDeferOnBattery(isScheduled: Bool, deferConfigured: Bool, onBattery: Bool) -> Bool {
+        isScheduled && deferConfigured && onBattery
+    }
 }

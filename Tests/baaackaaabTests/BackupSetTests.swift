@@ -71,6 +71,27 @@ final class BackupSetTests: XCTestCase {
         XCTAssertEqual(set.restConnections, 2)
     }
 
+    // defer_on_battery is a Bool defaulting false when absent (unlike the optional
+    // knobs) — and it is written ONLY when true, so an existing file stays
+    // byte-identical.
+    func testDecodeDeferOnBatteryDefaultsFalseAndReadsTrue() throws {
+        XCTAssertFalse(try decode("{}").deferOnBattery)
+        XCTAssertTrue(try decode(#"{ "defer_on_battery": true }"#).deferOnBattery)
+        XCTAssertFalse(try decode(#"{ "defer_on_battery": false }"#).deferOnBattery)
+    }
+
+    func testDeferOnBatteryOmittedWhenFalseWrittenWhenTrue() throws {
+        func saved(_ set: BackupSet) throws -> String {
+            let url = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("bset-\(UUID().uuidString)")
+                .appendingPathComponent("backup-set.json")
+            try set.save(to: url)
+            return try String(contentsOf: url, encoding: .utf8)
+        }
+        XCTAssertFalse(try saved(BackupSet(driveFolders: ["~/x"])).contains("defer_on_battery"))
+        XCTAssertTrue(try saved(BackupSet(driveFolders: ["~/x"], deferOnBattery: true)).contains("defer_on_battery"))
+    }
+
     // MARK: - Round-trip through disk
 
     func testSaveLoadRoundTrip() throws {

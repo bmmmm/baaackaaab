@@ -30,6 +30,9 @@ func listBackupSet(_ set: BackupSet, path: URL, existed: Bool) {
     if let rc = set.restConnections {
         pairs.append(("rest-connections", "\(rc)"))
     }
+    if set.deferOnBattery {
+        pairs.append(("defer-on-battery", "on (scheduled runs skip while on battery)"))
+    }
     for e in set.excludes { pairs.append(("exclude", e)) }
     for f in set.excludeFiles { pairs.append(("exclude-file", f)) }
     Console.info(pairs)
@@ -114,6 +117,17 @@ func manageBackupSet(configPath: URL) {
     if cli.has("--clear-rest-connections") {
         if set.restConnections != nil { set.restConnections = nil; changed = true; Console.success("rest connections cleared (restic default, 5 connections)") }
         else { Console.note("no rest connections cap was set") }
+    }
+    // Battery-defer knob: opt-in, persisted so the unattended timer reads it. When
+    // on, a scheduled/catch-up run exits without backing up while on battery power
+    // (interactive runs always proceed). --no-defer-on-battery restores the default.
+    if cli.has("--defer-on-battery") {
+        if !set.deferOnBattery { set.deferOnBattery = true; changed = true; Console.success("defer-on-battery on — scheduled runs skip while on battery power") }
+        else { Console.note("defer-on-battery already on") }
+    }
+    if cli.has("--no-defer-on-battery") {
+        if set.deferOnBattery { set.deferOnBattery = false; changed = true; Console.success("defer-on-battery off — scheduled runs proceed on battery") }
+        else { Console.note("defer-on-battery already off (the default)") }
     }
     // Repo-quota gauge: persisted in the set so the UNATTENDED timer warns too
     // — that run is the whole point of the pre-flight gauge, and it reads only

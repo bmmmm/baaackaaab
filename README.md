@@ -294,6 +294,24 @@ sample *decrypts and restores* end-to-end, the **check** proves *all bytes still
 hash correctly* over time. Both install/uninstall independently of the backup timer
 and of each other (`--timer-status` lists all three).
 
+#### Power
+
+- **Sleep-hold (always on).** During a real backup and during a rotating integrity
+  check, baaackaaab takes an IOKit power assertion
+  (`kIOPMAssertionTypePreventUserIdleSystemSleep`) so a long unattended upload or
+  re-read isn't cut short by the idle-sleep timer. Pure IOKit — no `caffeinate`
+  child. Honest scope: this holds off **idle** sleep only; **closing the lid (or an
+  explicit Sleep) still sleeps the machine**. It is harmless outside a run, so there
+  is no knob.
+- **Battery-defer (opt-in).** `--defer-on-battery` makes *scheduled and catch-up*
+  runs exit without backing up while the Mac is on battery (interactive runs always
+  proceed); `--no-defer-on-battery` restores the default. It is persisted in the set
+  (so the timer honors it) and shown in `--list`. A deferred run exits **before** any
+  backup work begins, so — by design — it **looks like a missed run**: the next
+  scheduled slot on wall power (or the login/boot catch-up) picks it up. If you also
+  wire an external heartbeat/dead-man's-switch to the backup, a battery-deferred run
+  will register as a miss there too, which is the correct signal.
+
 ### Maintenance & diagnostics
 
 ```sh
