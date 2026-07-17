@@ -155,6 +155,7 @@ struct CLIArguments {
         "--read-data-subset", "--at", "--days", "--day", "--repo-quota-bytes",
         "--quota-warn-fraction", "--materialize-test", "--evict-test",
         "--history", "--read-concurrency",
+        "--set-heartbeat", "--add-ntfy", "--add-webhook", "--remove-notify",
     ]
     /// Flags that stand alone (no value).
     static let boolFlags: Set<String> = [
@@ -167,6 +168,7 @@ struct CLIArguments {
         "--install-timer", "--uninstall-timer", "--timer-status",
         "--install-drill-timer", "--uninstall-drill-timer", "--doctor",
         "--check-updates", "--center", "--help", "-h",
+        "--clear-heartbeat", "--test-notify",
     ]
 
     /// Find the first token that is neither a known flag nor a consumed flag

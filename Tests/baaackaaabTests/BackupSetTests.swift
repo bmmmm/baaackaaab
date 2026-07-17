@@ -159,4 +159,82 @@ final class BackupSetTests: XCTestCase {
         XCTAssertTrue(set.removeExcludeFile("~/ex.txt"))
         XCTAssertFalse(set.removeExcludeFile("~/ex.txt"))
     }
+
+    // MARK: - Monitoring & notifications
+
+    func testDecodeHeartbeatAndNotifyChannels() throws {
+        let set = try decode(#"""
+        {
+          "heartbeat_url": "https://hc-ping.com/uuid",
+          "notify_channels": [
+            { "type": "ntfy", "url": "https://ntfy.sh/mytopic" },
+            { "type": "webhook", "url": "https://example.com/hook" }
+          ]
+        }
+        """#)
+        XCTAssertEqual(set.heartbeatURL, "https://hc-ping.com/uuid")
+        XCTAssertEqual(set.notifyChannels, [
+            NotifyChannel(type: .ntfy, url: "https://ntfy.sh/mytopic"),
+            NotifyChannel(type: .webhook, url: "https://example.com/hook"),
+        ])
+    }
+
+    func testDecodeMissingMonitoringFieldsDefaultToAbsent() throws {
+        let set = try decode("{}")
+        XCTAssertNil(set.heartbeatURL)
+        XCTAssertEqual(set.notifyChannels, [])
+    }
+
+    func testMonitoringRoundTripsThroughDisk() throws {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("bset-\(UUID().uuidString)")
+            .appendingPathComponent("backup-set.json")
+        let original = BackupSet(driveFolders: ["~/a"], heartbeatURL: "https://hc-ping.com/uuid",
+                                 notifyChannels: [NotifyChannel(type: .ntfy, url: "https://ntfy.sh/mytopic")])
+        try original.save(to: url)
+        XCTAssertEqual(try BackupSet.load(from: url), original)
+    }
+
+    func testSavedFileOmitsNilHeartbeatAndEmptyChannels() throws {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("bset-\(UUID().uuidString)")
+            .appendingPathComponent("backup-set.json")
+        try BackupSet(driveFolders: ["~/x"]).save(to: url)
+        let text = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertFalse(text.contains("heartbeat_url"))
+    }
+
+    func testSetHeartbeatTrimsAndNoOpsOnSameValue() {
+        var set = BackupSet()
+        XCTAssertTrue(set.setHeartbeat("  https://hc-ping.com/uuid  "))
+        XCTAssertEqual(set.heartbeatURL, "https://hc-ping.com/uuid")
+        XCTAssertFalse(set.setHeartbeat("https://hc-ping.com/uuid"))   // unchanged
+        XCTAssertTrue(set.setHeartbeat("https://hc-ping.com/other"))   // replaces
+        XCTAssertEqual(set.heartbeatURL, "https://hc-ping.com/other")
+    }
+
+    func testClearHeartbeat() {
+        var set = BackupSet(heartbeatURL: "https://hc-ping.com/uuid")
+        XCTAssertTrue(set.clearHeartbeat())
+        XCTAssertNil(set.heartbeatURL)
+        XCTAssertFalse(set.clearHeartbeat())   // already clear
+    }
+
+    func testAddNotifyChannelDedupsByURL() {
+        var set = BackupSet()
+        XCTAssertTrue(set.addNotifyChannel(type: .ntfy, url: "https://ntfy.sh/mytopic"))
+        XCTAssertEqual(set.notifyChannels.count, 1)
+        XCTAssertFalse(set.addNotifyChannel(type: .ntfy, url: "https://ntfy.sh/mytopic"))   // exact dup
+        XCTAssertEqual(set.notifyChannels.count, 1)
+        XCTAssertTrue(set.addNotifyChannel(type: .webhook, url: "https://example.com/hook"))
+        XCTAssertEqual(set.notifyChannels.count, 2)
+    }
+
+    func testRemoveNotifyChannelByURL() {
+        var set = BackupSet()
+        _ = set.addNotifyChannel(type: .ntfy, url: "https://ntfy.sh/mytopic")
+        XCTAssertTrue(set.removeNotifyChannel(url: "https://ntfy.sh/mytopic"))
+        XCTAssertTrue(set.notifyChannels.isEmpty)
+        XCTAssertFalse(set.removeNotifyChannel(url: "https://ntfy.sh/mytopic"))   // already gone
+    }
 }

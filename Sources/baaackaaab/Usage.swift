@@ -48,10 +48,21 @@ func printUsage() {
         ("--clear-read-concurrency", "restore restic's default read concurrency"),
         ("--repo-quota <bytes>", "persist the server quota for the pre-flight gauge (the timer warns too)"),
         ("--clear-repo-quota", "remove the persisted quota gauge"),
+        ("--set-heartbeat <url>", "persist a dead-man's-switch heartbeat URL, pinged at run start/success/fail"),
+        ("--clear-heartbeat", "remove the heartbeat URL"),
+        ("--add-ntfy <url>", "persist an ntfy topic URL to push the run outcome to (repeatable)"),
+        ("--add-webhook <url>", "persist a webhook URL to POST the run outcome to as JSON (repeatable)"),
+        ("--remove-notify <url>", "drop a previously-added ntfy/webhook channel by its URL"),
         ("--config <path>", "backup-set file (default ~/.config/baaackaaab/backup-set.json)"),
     ])
     Console.note("A bare `baaackaaab` (no source flags) backs up the set; the launchd timer runs exactly that. Any explicit --drive-folder/--photo-album REPLACES the whole set for that run (folders AND albums), it does not add to it. Add --dry-run to preview a backup (reports what would upload, writes nothing; Photos are skipped in a dry run). On a terminal a real backup shows a live progress bar (percent, bytes, ETA); piped or under the timer it logs restic's plain output.")
     Console.note("Every backup already excludes macOS junk (.DS_Store, .Trashes, .Spotlight-V100, …) and CACHEDIR.TAG-tagged caches — important on an append-only store the Mac can never prune. --add-exclude / --add-exclude-file add your own patterns on top.")
+
+    Console.section("Monitoring & notifications", detail: "outbound heartbeat + push — a macOS banner is invisible when you're away")
+    Console.info([
+        ("--test-notify", "fire a sample message through every configured channel + a heartbeat ping, report delivered/failed, then exit"),
+    ])
+    Console.note("The heartbeat is a Healthchecks-style dead-man's switch: GET <url>/start at run begin, GET <url> on success, GET <url>/fail on failure. The alarm fires on the MONITOR side when a ping goes missing — the only way to catch a run that stopped happening entirely (crashed, unplugged, timer disabled), not just one that failed while running. Push channels (ntfy/webhook) additionally deliver the outcome away from the Mac. Both are best-effort: a delivery failure never changes a run's exit code. --test-notify proves the whole path before you rely on it.")
 
     Console.section("Restic target")
     Console.info([

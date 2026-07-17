@@ -24,6 +24,8 @@ struct BackupRun {
     let photoAlbums: [String]
     let stagingURL: URL
     let photoBatchBytes: Int
+    let heartbeatURL: String?
+    let notifyChannels: [NotifyChannel]
 
     func execute() {
         // Fire a macOS failure banner, but ONLY when our output is invisible (launchd or
@@ -36,8 +38,35 @@ struct BackupRun {
                             message: headline, subtitle: "run \(runTag)")
         }
 
+        // Outbound monitoring is fire-and-forget: it never touches the exit code.
+        // Skipped entirely on a dry run — it writes/uploads nothing, so it isn't
+        // the run the dead-man's switch (or the operator's phone) needs to hear
+        // about. Every call site that uses this also calls
+        // OutboundNotifier.waitForPending() right before its own exit(), so the
+        // pings/pushes actually leave instead of being killed mid-flight.
+        func sendOutboundOutcome(ok: Bool, message: String, verified: Int, total: Int,
+                                 destStatuses: [(name: String, ok: Bool)]) {
+            guard !backupDryRun, heartbeatURL != nil || !notifyChannels.isEmpty else { return }
+            if let heartbeatURL {
+                OutboundNotifier.fireHeartbeat(base: heartbeatURL, event: ok ? .success : .fail)
+            }
+            if !notifyChannels.isEmpty {
+                OutboundNotifier.pushOutcome(channels: notifyChannels, ok: ok, message: message,
+                                             started: runStart, finished: Date(),
+                                             verified: verified, total: total, destinations: destStatuses)
+            }
+            OutboundNotifier.waitForPending()
+        }
+
         do {
             let staging = try Staging(root: stagingURL)
+            // Heartbeat "start" ping, fired as early as the run itself starts
+            // (before init/acquisition can fail) — a crash right after this still
+            // gets its "start" ping followed by a "fail" ping from the catch below,
+            // which is exactly what a dead-man's switch needs to see.
+            if !backupDryRun, let heartbeatURL {
+                OutboundNotifier.fireHeartbeat(base: heartbeatURL, event: .start)
+            }
             let runs = destinations.map { DestinationRun($0) }
 
             // Append one NDJSON history record, then exit. Built from the live `runs` so
@@ -112,6 +141,12 @@ struct BackupRun {
             if !configExcludes.isEmpty { excludeParts.append("\(configExcludes.count) pattern(s)") }
             if !excludeFilesResolved.isEmpty { excludeParts.append("\(excludeFilesResolved.count) exclude-file(s)") }
             info.append(("excludes", excludeParts.joined(separator: ", ")))
+            if !backupDryRun, heartbeatURL != nil || !notifyChannels.isEmpty {
+                var monitoring: [String] = []
+                if heartbeatURL != nil { monitoring.append("heartbeat") }
+                if !notifyChannels.isEmpty { monitoring.append("\(notifyChannels.count) push channel(s)") }
+                info.append(("monitoring", monitoring.joined(separator: ", ")))
+            }
             Console.info(info)
 
             // Initialize every destination, best-effort. A destination that can't be
@@ -174,6 +209,9 @@ struct BackupRun {
                                 state: .fail, details: [("run-tag", runTag)])
                 recordRun(exitCode: 2, verified: 0, total: 0, sourceFailures: 0)
                 notifyOnFailure("no destination could be initialized — nothing was backed up")
+                sendOutboundOutcome(ok: false, message: "no destination could be initialized — nothing was backed up",
+                                   verified: 0, total: 0,
+                                   destStatuses: runs.map { (name: $0.destination.name, ok: false) })
                 exit(2)
             }
 
@@ -436,6 +474,13 @@ struct BackupRun {
                     }
                 }
             }
+            // Unlike the macOS banner (failure-only, since a passing run is already
+            // visible on screen), the heartbeat/push path reports EVERY terminal
+            // outcome — a heartbeat's whole point is a "success" ping resetting the
+            // monitor's dead-man's-switch clock, not just a failure alert.
+            sendOutboundOutcome(ok: outcome.state == .ok, message: outcome.notifyMessage ?? outcome.headline,
+                               verified: verified, total: total,
+                               destStatuses: runs.map { (name: $0.destination.name, ok: $0.initError == nil && $0.backupFailures == 0) })
             // Unattended (log-only) path: nudge once per clean run when restic or the
             // server has fallen behind the tested baseline — the scheduled log goes
             // unread, so a banner is the only signal. Offline for restic; best-effort
@@ -458,6 +503,7 @@ struct BackupRun {
                                              exitCode: 1, verified: 0, total: 0,
                                              sourceFailures: 0, destinations: []))
             notifyOnFailure("\(error)")
+            sendOutboundOutcome(ok: false, message: "\(error)", verified: 0, total: 0, destStatuses: [])
             exit(1)
         }
         exit(0)

@@ -277,6 +277,57 @@ The timer runs `baaackaaab --run-tag scheduled`. It needs no Keychain prompt (th
 credential files are read directly); it needs a one-time Photos grant, which a
 stable signature then keeps alive across rebuilds.
 
+### Monitoring & notifications
+
+The macOS banner (`Notifier.swift`) is invisible when you're away from the Mac,
+and nothing about it can tell "a run failed" apart from "the Mac never even ran
+it" — a crashed process, an unplugged machine, or a disabled timer just goes
+silent. Both problems need a MONITOR-side dead-man's switch, not another local
+notification.
+
+```sh
+baaackaaab --set-heartbeat https://hc-ping.com/your-uuid   # or your own Gatus/Uptime-Kuma/healthchecks
+baaackaaab --add-ntfy https://ntfy.sh/your-topic
+baaackaaab --add-webhook https://your-endpoint/hook
+baaackaaab --test-notify                                   # prove the path before you rely on it
+```
+
+**Heartbeat semantics.** The heartbeat follows the [Healthchecks](https://healthchecks.io)
+convention (self-hosted Gatus/Uptime-Kuma monitors that speak the same
+convention work identically): `GET <url>/start` at run begin, a bare `GET <url>`
+on success, `GET <url>/fail` on failure. The alarm fires on the **monitor's**
+side when an expected ping goes missing — that is the only way to catch a run
+that stopped happening entirely, which a local banner structurally cannot do
+(it needs a machine that is still running baaackaaab at all). Persisted in the
+backup set, so the unattended timer pings it too — that scheduled run is the
+whole point.
+
+**Push channels.** `--add-ntfy` / `--add-webhook` additionally deliver the run
+outcome away from the Mac: ntfy gets a plain-text push (the same summary the
+banner shows, with a `Title:` header and high priority on failure); a webhook
+gets a JSON POST — `{ event, outcome, started, finished, verified, total,
+destinations: [{name, ok}], message }`. Both are repeatable (`--remove-notify
+<url>` drops one by URL) and fire on every terminal outcome, not just failures
+— a heartbeat "success" ping is what resets the monitor's clock.
+
+**Privacy note.** These payloads carry status only — counts, an outcome word, a
+human summary — never a repo URL, a file path, or a credential-file location
+(`destinations` carries only `{name, ok}`, no error text). The heartbeat/ntfy/
+webhook URLs themselves may embed a bearer token (an ntfy topic, a Healthchecks
+UUID, a webhook path secret); `--list` and every log line redact them the same
+way a repo URL is redacted — `--list` shows only `scheme://host/***`. If you
+don't want any run metadata leaving your infrastructure at all, point these at
+a self-hosted monitor (Gatus, Uptime-Kuma, a self-hosted ntfy, your own webhook
+receiver) instead of a public one.
+
+**Best-effort by contract**, matching the banner and `UpdateCheck`'s
+network-degrades-gracefully philosophy: a delivery failure is logged (one
+console line) and never changes a run's exit code. `--test-notify` is the way
+to actually prove delivery works — it fires a clearly-marked sample message
+through every configured channel plus a heartbeat ping, synchronously, and
+reports delivered/failed per channel with an actionable reason (e.g. "ntfy
+returned HTTP 404 — check the topic URL is correct").
+
 ### Maintenance & diagnostics
 
 ```sh
@@ -332,11 +383,13 @@ model, restore path-safety, secret redaction and credential generation, version
 parsing/comparison and the server-endpoint extraction behind the update check, the
 append-only DELETE probe's status-code classification and rest:-URL/credential
 derivation, the launchd schedule round-trip, staging-path sanitizing, notification
-escaping, and the on-disk destination and run-history stores. Store tests relocate
+escaping, the heartbeat/ntfy/webhook request construction and monitor-URL
+redaction, and the on-disk destination and run-history stores. Store tests relocate
 to a throwaway directory via `BAAACKAAAB_SUPPORT_DIR`, so they never touch the real
-credential store. The live GitHub query, HTTP header probe, and append-only DELETE
-probe touch the network, so they are not unit-tested — all three degrade to
-nil/unreachable by construction.
+credential store. The live GitHub query, the HTTP header probe, the append-only
+DELETE probe, and the heartbeat/ntfy/webhook network sends touch the network, so
+they are not unit-tested — all degrade to nil/unreachable (or, for outbound
+monitoring, a logged no-op that never changes the run's exit code) by construction.
 
 A second layer of **live restic integration tests** (`ResticIntegrationTests`)
 drives the real `restic` binary against a throwaway *local* repository — no
@@ -387,6 +440,8 @@ git push --no-verify
 | `Timer.swift` | the launchd LaunchAgent |
 | `UpdateCheck.swift` | restic + REST-server version checks (offline baseline / online latest) |
 | `AppendOnlyProbe.swift` | `--doctor`'s active append-only enforcement DELETE probe |
+| `Notifier.swift` | the local macOS banner (osascript), failure-only |
+| `OutboundNotifier.swift` | outbound heartbeat + ntfy/webhook push, best-effort, every terminal outcome |
 
 ## Security notes
 
