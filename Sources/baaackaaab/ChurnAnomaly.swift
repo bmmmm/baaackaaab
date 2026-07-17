@@ -42,23 +42,37 @@ struct ChurnMetrics: Equatable {
 /// — a false positive must cost a banner, not a backup).
 enum ChurnAnomaly {
 
-    /// Below this many baseline runs the verdict is `.insufficientBaseline`
-    /// (silent): with too little history the median is not trustworthy and every
-    /// early run would false-positive.
-    static let minBaselineRuns = 3
+    /// The detector's decision thresholds. Production uses `.production`;
+    /// injectable so the live-restic PoC test can drive the REAL pipeline
+    /// (restic summary → aggregation → verdict) at a small data scale while the
+    /// production values stay pinned by the unit tests.
+    struct Thresholds {
+        /// Below this many baseline runs the verdict is `.insufficientBaseline`
+        /// (silent): with too little history the median is not trustworthy and
+        /// every early run would false-positive.
+        var minBaselineRuns: Int
+        /// SPIKE: current data-added must exceed this multiple of the baseline
+        /// median AND the absolute floor below, so noise never trips it.
+        var spikeFactor: Double
+        /// SPIKE absolute floor: a spike under 1 GiB is not worth a ransomware
+        /// alarm (re-encoding a few photos, a new document folder) — mass
+        /// modification of a real iCloud source moves far more than this.
+        var spikeFloorBytes: Int64
+        /// SHRINK: current processed-bytes below this fraction of the baseline
+        /// median means the source more than halved between runs.
+        var shrinkFraction: Double
 
-    /// SPIKE: current data-added must exceed this multiple of the baseline median
-    /// AND the absolute floor below, so a small repo's noise never trips it.
-    static let spikeFactor = 10.0
+        static let production = Thresholds(
+            minBaselineRuns: 3,
+            spikeFactor: 10.0,
+            spikeFloorBytes: 1 << 30,   // 1 GiB
+            shrinkFraction: 0.5)
+    }
 
-    /// SPIKE absolute floor: a spike under 1 GiB is not worth a ransomware alarm
-    /// (re-encoding a few photos, a new document folder) — mass modification of a
-    /// real iCloud source moves far more than this.
-    static let spikeFloorBytes: Int64 = 1 << 30   // 1 GiB
-
-    /// SHRINK: current processed-bytes below this fraction of the baseline median
-    /// means the source more than halved between runs.
-    static let shrinkFraction = 0.5
+    static let minBaselineRuns = Thresholds.production.minBaselineRuns
+    static let spikeFactor = Thresholds.production.spikeFactor
+    static let spikeFloorBytes = Thresholds.production.spikeFloorBytes
+    static let shrinkFraction = Thresholds.production.shrinkFraction
 
     /// How many recent history records to draw the baseline from.
     static let baselineWindow = 30
@@ -88,18 +102,19 @@ enum ChurnAnomaly {
 
     /// Evaluate the current run against the baseline. Spike is checked before
     /// shrink (a run cannot be both). Pure — the caller decides how to surface it.
-    static func evaluate(current: ChurnMetrics, baseline: [ChurnMetrics]) -> Verdict {
-        guard baseline.count >= minBaselineRuns else { return .insufficientBaseline }
+    static func evaluate(current: ChurnMetrics, baseline: [ChurnMetrics],
+                         thresholds: Thresholds = .production) -> Verdict {
+        guard baseline.count >= thresholds.minBaselineRuns else { return .insufficientBaseline }
 
         let medianAdded = median(baseline.map { $0.dataAdded })
-        if Double(current.dataAdded) > spikeFactor * medianAdded,
-           current.dataAdded > spikeFloorBytes {
+        if Double(current.dataAdded) > thresholds.spikeFactor * medianAdded,
+           current.dataAdded > thresholds.spikeFloorBytes {
             return .spike(spikeMessage)
         }
 
         let medianProcessed = median(baseline.map { $0.bytesProcessed })
         if medianProcessed > 0,
-           Double(current.bytesProcessed) < shrinkFraction * medianProcessed {
+           Double(current.bytesProcessed) < thresholds.shrinkFraction * medianProcessed {
             return .shrink(shrinkMessage)
         }
 

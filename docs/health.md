@@ -119,6 +119,10 @@ touches eviction — a false positive costs a banner, never a backup. It stays s
 until at least three baseline runs exist, so early runs don't false-alarm, and it
 persists nothing new (the baseline is derived from the existing run history each run).
 
+That this actually fires — real restic, simulated mass encryption, production
+thresholds, both verdicts — is demonstrated end-to-end, with honest scope
+limits, in the [ransomware-detection PoC](poc-ransomware-detection.md).
+
 **Large-file warning.** Because anything snapshotted is permanent, a single huge
 file landing in the set unnoticed can quietly commit the store to it forever. Any
 acquired Drive or Photos file over a configurable threshold (default 4 GiB) prints

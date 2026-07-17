@@ -23,7 +23,8 @@ dashboard; a launchd timer runs it unattended.
   over eight runs to catch bit-rot.
 - **Monitoring that survives a dead Mac** — Healthchecks-style heartbeat,
   ntfy/webhook pushes, `status.json` + a Prometheus textfile; a source-side
-  anomaly tripwire flags ransomware-shaped mass-rewrite churn.
+  anomaly tripwire flags ransomware-shaped mass-rewrite churn
+  ([demonstrated end-to-end](docs/poc-ransomware-detection.md), not just claimed).
 - **Multiple destinations & an emergency recovery kit** — independent repos
   with separate keys, plus an encrypted offline sheet that restores with stock
   restic on any machine — no baaackaaab, no Mac.
