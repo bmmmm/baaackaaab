@@ -141,4 +141,74 @@ final class RunHistoryTests: XCTestCase {
         XCTAssertNil(RunHistory.lastDrill())
         XCTAssertEqual(RunHistory.drillCount(), 0)
     }
+
+    // MARK: - Integrity-check records
+
+    private func checkRecord(_ tag: String, slice: Int, exit: Int = 0) -> RunRecord {
+        RunRecord(runTag: tag, start: Date(timeIntervalSince1970: 1_700_000_000),
+                  end: Date(timeIntervalSince1970: 1_700_000_060), exitCode: exit,
+                  verified: exit == 0 ? 1 : 0, total: 1, sourceFailures: 0,
+                  destinations: [RunRecord.Dest(name: "default", ok: exit == 0, error: nil)],
+                  kind: "check", slice: slice)
+    }
+
+    func testCheckRecordRoundTrip() throws {
+        try RunHistory.append(checkRecord("check", slice: 3))
+        let got = try XCTUnwrap(RunHistory.recent(10).first)
+        XCTAssertTrue(got.isCheck)
+        XCTAssertFalse(got.isDrill)
+        XCTAssertFalse(got.isBackup)
+        XCTAssertEqual(got.kind, "check")
+        XCTAssertEqual(got.slice, 3)
+        // The drill-only fields stay absent on a check record.
+        XCTAssertNil(got.bytes)
+        XCTAssertNil(got.snapshots)
+    }
+
+    func testBackupRecordHasNoSliceField() throws {
+        try RunHistory.append(record("backup"))
+        let got = try XCTUnwrap(RunHistory.recent(1).first)
+        XCTAssertNil(got.slice)
+        XCTAssertFalse(got.isCheck)
+        XCTAssertTrue(got.isBackup)
+    }
+
+    func testLastCheckSkipsBackupsAndDrills() throws {
+        try RunHistory.append(record("backup-1"))
+        try RunHistory.append(drillRecord("drill-1"))
+        try RunHistory.append(checkRecord("check-1", slice: 5))
+        try RunHistory.append(record("backup-2"))   // newest overall, but not a check
+        XCTAssertEqual(RunHistory.lastCheck()?.runTag, "check-1")
+        XCTAssertEqual(RunHistory.lastCheck()?.slice, 5)
+    }
+
+    func testLastCheckReturnsNewestCheck() throws {
+        try RunHistory.append(checkRecord("check-old", slice: 1))
+        try RunHistory.append(record("backup"))
+        try RunHistory.append(checkRecord("check-new", slice: 2))
+        XCTAssertEqual(RunHistory.lastCheck()?.runTag, "check-new")
+    }
+
+    func testLastCheckNilWhenNone() throws {
+        try RunHistory.append(record("backup"))
+        try RunHistory.append(drillRecord("drill"))
+        XCTAssertNil(RunHistory.lastCheck())
+    }
+
+    // MARK: - lastSuccessfulBackup (the catch-up / overdue anchor)
+
+    func testLastSuccessfulBackupSkipsDrillsChecksAndFailures() throws {
+        try RunHistory.append(record("ok-old", exit: 0))
+        try RunHistory.append(drillRecord("drill"))
+        try RunHistory.append(checkRecord("check", slice: 1))
+        try RunHistory.append(record("partial", exit: 2))   // newest, but not clean
+        let last = try XCTUnwrap(RunHistory.lastSuccessfulBackup())
+        XCTAssertEqual(last.runTag, "ok-old")
+    }
+
+    func testLastSuccessfulBackupNilWhenNoCleanBackup() throws {
+        try RunHistory.append(record("partial", exit: 2))
+        try RunHistory.append(checkRecord("check", slice: 1))
+        XCTAssertNil(RunHistory.lastSuccessfulBackup())
+    }
 }

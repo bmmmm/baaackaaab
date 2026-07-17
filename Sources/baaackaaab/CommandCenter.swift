@@ -78,9 +78,9 @@ extension ConfigTUI {
 
         body.append("")
         body.append(divider("recent runs", cols))
-        // Drills live in the same history but are shown on their own line below, so
-        // keep the recent-runs list to actual backups.
-        let runs = loadRecentRuns().filter { !$0.isDrill }
+        // Drills and integrity checks live in the same history but are shown on
+        // their own lines below, so keep the recent-runs list to actual backups.
+        let runs = loadRecentRuns().filter { $0.isBackup }
         if runs.isEmpty {
             body.append(dim(fit("  no runs recorded yet \u{2014} press s to back up now", cols)))
         } else {
