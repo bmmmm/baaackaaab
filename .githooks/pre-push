@@ -14,6 +14,16 @@
 # Bypass once: git push --no-verify
 set -euo pipefail
 
+# Chain a local, untracked leak gate first, when one is installed at
+# .git/hooks/pre-push-gate (mirror tooling puts it there on checkouts that
+# push to a public "github" remote; it exits 0 for every other remote).
+# Both consumers need git's ref-list stdin, so capture it once and feed each.
+hook_input="$(cat)"
+gate="$(git rev-parse --git-dir)/hooks/pre-push-gate"
+if [ -x "$gate" ]; then
+  "$gate" "$@" <<< "$hook_input" || exit 1
+fi
+
 zero_sha="0000000000000000000000000000000000000000"
 testable_paths=(Sources Tests Package.swift Makefile)
 
@@ -52,7 +62,7 @@ while read -r local_ref local_sha remote_ref remote_sha || [ -n "${local_ref:-}"
   if [ -n "$diff_out" ]; then
     needs_check=1
   fi
-done
+done <<< "$hook_input"
 
 if [ "$has_range" -eq 0 ]; then
   exit 0 # only ref deletions in this push — nothing to build or test

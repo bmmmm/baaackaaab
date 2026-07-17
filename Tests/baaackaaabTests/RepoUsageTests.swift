@@ -18,7 +18,7 @@ final class RepoUsageTests: XCTestCase {
     // MARK: - components (pure helper)
 
     func testComponentsSplitsAbsolutePathDroppingLeadingEmpty() {
-        XCTAssertEqual(RepoUsage.components(of: "/Users/demo/Documents/a.txt"), ["Users", "bma", "Documents", "a.txt"])
+        XCTAssertEqual(RepoUsage.components(of: "/Users/demo/Documents/a.txt"), ["Users", "demo", "Documents", "a.txt"])
     }
 
     // MARK: - aggregate
