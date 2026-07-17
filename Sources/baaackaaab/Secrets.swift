@@ -147,6 +147,21 @@ enum Credentials {
         return String(repoURL[..<afterScheme]) + "***" + String(repoURL[at...])
     }
 
+    /// Mask a monitoring/notification URL (heartbeat, ntfy, webhook) for display —
+    /// the same "never leak it" discipline as `redact`, but a different shape:
+    /// unlike a restic repo URL, these carry their secret in the PATH or QUERY
+    /// (an ntfy topic name, a Healthchecks UUID, a webhook path token), not in a
+    /// clearly-scoped userinfo. So this keeps only scheme + host[:port] — enough to
+    /// recognize which service it is in `--list` / logs — and masks everything
+    /// after. Returns the input unchanged only when it isn't a parseable URL at all.
+    static func redactMonitorURL(_ raw: String) -> String {
+        guard let comps = URLComponents(string: raw), let host = comps.host, let scheme = comps.scheme else {
+            return raw
+        }
+        let port = comps.port.map { ":\($0)" } ?? ""
+        return "\(scheme)://\(host)\(port)/***"
+    }
+
     /// Compute the bcrypt `user:$2y$…` htpasswd line for the server. The
     /// cleartext password is fed to htpasswd over stdin (never argv); only the
     /// one-way hash is returned.

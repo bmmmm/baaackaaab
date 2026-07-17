@@ -43,11 +43,21 @@ struct BackupSet: Codable, Equatable {
     /// Stored as the user typed them (tilde kept); expanded + existence-checked at
     /// run time (a missing file is dropped with a warning, never fails the backup).
     var excludeFiles: [String]
+    /// Optional Healthchecks-style dead-man's-switch URL, pinged at run start and
+    /// on every terminal outcome. Persisted so the unattended timer pings it too —
+    /// that scheduled run is the whole point: a monitor that never hears from a
+    /// stopped machine is the one failure a macOS banner can never report (the
+    /// banner needs a machine that is still running baaackaaab at all).
+    var heartbeatURL: String?
+    /// Push channels (ntfy / webhook) notified with the run outcome, on top of the
+    /// local macOS banner. Persisted so the unattended timer pushes too.
+    var notifyChannels: [NotifyChannel]
 
     init(driveFolders: [String] = [], photoAlbums: [String] = [],
          quotaBytes: Int? = nil, limitUploadKiBps: Int? = nil,
          packSizeMiB: Int? = nil, restConnections: Int? = nil,
-         excludes: [String] = [], excludeFiles: [String] = []) {
+         excludes: [String] = [], excludeFiles: [String] = [],
+         heartbeatURL: String? = nil, notifyChannels: [NotifyChannel] = []) {
         self.driveFolders = driveFolders
         self.photoAlbums = photoAlbums
         self.quotaBytes = quotaBytes
@@ -56,6 +66,8 @@ struct BackupSet: Codable, Equatable {
         self.restConnections = restConnections
         self.excludes = excludes
         self.excludeFiles = excludeFiles
+        self.heartbeatURL = heartbeatURL
+        self.notifyChannels = notifyChannels
     }
 
     // Stable snake_case keys, written explicitly so the on-disk file stays
@@ -69,6 +81,8 @@ struct BackupSet: Codable, Equatable {
         case restConnections = "rest_connections"
         case excludes
         case excludeFiles = "exclude_files"
+        case heartbeatURL = "heartbeat_url"
+        case notifyChannels = "notify_channels"
     }
 
     // Tolerant decode: a hand-edited file may omit an array entirely (e.g. only
@@ -84,6 +98,8 @@ struct BackupSet: Codable, Equatable {
         restConnections = try c.decodeIfPresent(Int.self, forKey: .restConnections)
         excludes = try c.decodeIfPresent([String].self, forKey: .excludes) ?? []
         excludeFiles = try c.decodeIfPresent([String].self, forKey: .excludeFiles) ?? []
+        heartbeatURL = try c.decodeIfPresent(String.self, forKey: .heartbeatURL)
+        notifyChannels = try c.decodeIfPresent([NotifyChannel].self, forKey: .notifyChannels) ?? []
     }
 
     // A set with no sources contributes nothing to a run.
@@ -196,6 +212,40 @@ struct BackupSet: Codable, Equatable {
         let f = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let i = excludeFiles.firstIndex(of: f) else { return false }
         excludeFiles.remove(at: i)
+        return true
+    }
+
+    // MARK: - Monitoring & notifications
+
+    /// Set (or replace) the heartbeat URL. URL validity is the caller's job
+    /// (`OutboundNotifier.isValidHTTPURL`) — this stays a pure trim + compare, like
+    /// every other mutation here.
+    mutating func setHeartbeat(_ raw: String) -> Bool {
+        let u = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !u.isEmpty, heartbeatURL != u else { return false }
+        heartbeatURL = u
+        return true
+    }
+
+    mutating func clearHeartbeat() -> Bool {
+        guard heartbeatURL != nil else { return false }
+        heartbeatURL = nil
+        return true
+    }
+
+    /// Add a push channel, deduped by URL (the same topic/webhook added twice
+    /// would otherwise double-notify on every run).
+    mutating func addNotifyChannel(type: NotifyChannel.Kind, url raw: String) -> Bool {
+        let u = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !u.isEmpty, !notifyChannels.contains(where: { $0.url == u }) else { return false }
+        notifyChannels.append(NotifyChannel(type: type, url: u))
+        return true
+    }
+
+    mutating func removeNotifyChannel(url raw: String) -> Bool {
+        let u = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let i = notifyChannels.firstIndex(where: { $0.url == u }) else { return false }
+        notifyChannels.remove(at: i)
         return true
     }
 }
