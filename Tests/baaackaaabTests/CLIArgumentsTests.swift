@@ -160,6 +160,15 @@ final class CLIArgumentsTests: XCTestCase {
         XCTAssertEqual(cli.value("--destination"), "offsite")
     }
 
+    // MARK: - --large-file-warn-mib / --clear-large-file-warn-mib
+
+    func testLargeFileWarnFlagsAreRecognizedAndParsed() {
+        XCTAssertNil(CLIArguments.unknownArgument(in: ["baaackaaab", "--large-file-warn-mib", "8192"]))
+        XCTAssertNil(CLIArguments.unknownArgument(in: ["baaackaaab", "--clear-large-file-warn-mib"]))
+        XCTAssertEqual(CLIArguments(tokens: ["--large-file-warn-mib", "0"]).value("--large-file-warn-mib"), "0")
+        XCTAssertTrue(CLIArguments(tokens: ["--clear-large-file-warn-mib"]).has("--clear-large-file-warn-mib"))
+    }
+
     /// A flag value may legitimately start with '-' or look like a bare word — it
     /// is consumed by its flag, never checked. `--diff` consumes two.
     func testUnknownArgumentSkipsFlagValues() {

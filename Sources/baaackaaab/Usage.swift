@@ -48,10 +48,13 @@ func printUsage() {
         ("--clear-rest-connections", "restore restic's default connection count"),
         ("--repo-quota <bytes>", "persist the server quota for the pre-flight gauge (the timer warns too)"),
         ("--clear-repo-quota", "remove the persisted quota gauge"),
+        ("--large-file-warn-mib <n>", "persist a warn-only large-file threshold in MiB (default 4096; 0 disables)"),
+        ("--clear-large-file-warn-mib", "reset the large-file warning threshold to the default"),
         ("--config <path>", "backup-set file (default ~/.config/baaackaaab/backup-set.json)"),
     ])
     Console.note("A bare `baaackaaab` (no source flags) backs up the set; the launchd timer runs exactly that. Any explicit --drive-folder/--photo-album REPLACES the whole set for that run (folders AND albums), it does not add to it. Add --dry-run to preview a backup (reports what would upload, writes nothing; Photos are skipped in a dry run). On a terminal a real backup shows a live progress bar (percent, bytes, ETA); piped or under the timer it logs restic's plain output.")
     Console.note("Every backup already excludes macOS junk (.DS_Store, .Trashes, .Spotlight-V100, …) and CACHEDIR.TAG-tagged caches — important on an append-only store the Mac can never prune. --add-exclude / --add-exclude-file add your own patterns on top.")
+    Console.note("--large-file-warn-mib is WARN-ONLY: it never excludes anything or changes a run's outcome. Any acquired Drive/Photos file over the threshold prints a warning after acquisition so you can decide whether to --add-exclude it — once a file is snapshotted, the append-only store can never shed it.")
 
     Console.section("Restic target")
     Console.info([

@@ -288,22 +288,25 @@ if cli.has("--limit-upload")
     || cli.has("--rest-connections")
     || cli.has("--clear-rest-connections")
     || cli.has("--repo-quota")
-    || cli.has("--clear-repo-quota") {
+    || cli.has("--clear-repo-quota")
+    || cli.has("--large-file-warn-mib")
+    || cli.has("--clear-large-file-warn-mib") {
     if !cli.values("--drive-folder").isEmpty || !cli.values("--photo-album").isEmpty {
-        Console.error("--limit-upload / --pack-size / --rest-connections / --repo-quota (and their --clear-* forms) change the backup set's PERSISTENT tuning; they are not per-run flags (a run reads them from the set — there is no ad-hoc form). Set them on their own first (e.g. `baaackaaab --pack-size 64`), then run the backup separately. Combined with --drive-folder/--photo-album they would silently edit the set and skip the backup.")
+        Console.error("--limit-upload / --pack-size / --rest-connections / --repo-quota / --large-file-warn-mib (and their --clear-* forms) change the backup set's PERSISTENT tuning; they are not per-run flags (a run reads them from the set — there is no ad-hoc form). Set them on their own first (e.g. `baaackaaab --pack-size 64`), then run the backup separately. Combined with --drive-folder/--photo-album they would silently edit the set and skip the backup.")
         exit(1)
     }
 }
 
 // Backup-set management (--list / --add-* / --remove-* / --limit-upload /
-// --pack-size / --rest-connections): edit the set and exit. These are
-// PERSISTENT knobs (like --add-folder), not per-run flags — a backup reads
-// them from the set, never argv.
+// --pack-size / --rest-connections / --large-file-warn-mib): edit the set and
+// exit. These are PERSISTENT knobs (like --add-folder), not per-run flags — a
+// backup reads them from the set, never argv.
 if cli.hasAny(["--list", "--add-folder", "--remove-folder", "--add-album", "--remove-album",
                "--limit-upload", "--clear-limit-upload", "--pack-size", "--clear-pack-size",
                "--rest-connections", "--clear-rest-connections",
                "--repo-quota", "--clear-repo-quota",
-               "--add-exclude", "--remove-exclude", "--add-exclude-file", "--remove-exclude-file"]) {
+               "--add-exclude", "--remove-exclude", "--add-exclude-file", "--remove-exclude-file",
+               "--large-file-warn-mib", "--clear-large-file-warn-mib"]) {
     manageBackupSet(configPath: configPath)
     exit(0)
 }
@@ -319,6 +322,7 @@ var configPackSizeMiB: Int? = nil
 var configRestConnections: Int? = nil
 var configExcludes: [String] = []
 var configExcludeFiles: [String] = []
+var configLargeFileWarnMiB = BackupSet.defaultLargeFileWarnMiB
 if driveFolders.isEmpty && photoAlbums.isEmpty
     && FileManager.default.fileExists(atPath: configPath.path) {
     do {
@@ -331,6 +335,7 @@ if driveFolders.isEmpty && photoAlbums.isEmpty
         configRestConnections = set.restConnections
         configExcludes = set.excludes
         configExcludeFiles = set.excludeFiles
+        configLargeFileWarnMiB = set.largeFileWarnMiBEffective
     } catch {
         Console.error("backup set at \(configPath.path) is unreadable — fix or delete it: \(error)")
         exit(1)
@@ -405,6 +410,7 @@ BackupRun(
     configRestConnections: configRestConnections,
     configExcludes: configExcludes,
     configExcludeFiles: configExcludeFiles,
+    configLargeFileWarnMiB: configLargeFileWarnMiB,
     repoQuotaBytes: repoQuotaBytes,
     quotaWarnFraction: quotaWarnFraction,
     driveFolders: driveFolders,

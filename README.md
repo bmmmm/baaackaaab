@@ -271,6 +271,19 @@ Patterns follow restic's [exclude rules](https://restic.readthedocs.io/en/stable
 `--add-exclude-file` must exist at add time; if it later vanishes it is dropped with a
 warning at run time rather than failing the backup.
 
+**Large-file warning.** Because anything snapshotted is permanent, a single huge
+file landing in the set unnoticed can quietly commit the store to it forever. Any
+acquired Drive or Photos file over a configurable threshold (default 4 GiB) prints
+a warning after acquisition — **warn-only**: it never excludes anything and never
+changes the run's outcome, it just gives you the chance to `--add-exclude` it on
+purpose.
+
+```sh
+baaackaaab --large-file-warn-mib 8192      # warn above 8 GiB instead of the 4 GiB default
+baaackaaab --large-file-warn-mib 0         # disable the warning
+baaackaaab --clear-large-file-warn-mib     # back to the 4 GiB default
+```
+
 ### Scheduling
 
 ```sh
@@ -337,7 +350,7 @@ model, restore path-safety, secret redaction and credential generation, version
 parsing/comparison and the server-endpoint extraction behind the update check, the
 launchd schedule round-trip, staging-path sanitizing, notification escaping, the
 recovery-kit sheet composition and passphrase validation, the repo-usage size
-aggregation, and
+aggregation, the large-file warning threshold, and
 the on-disk destination and run-history stores. Store tests relocate to a throwaway directory via
 `BAAACKAAAB_SUPPORT_DIR`, so they never touch the real credential store. The live
 GitHub query and HTTP header probe touch the network, so they are not unit-tested —

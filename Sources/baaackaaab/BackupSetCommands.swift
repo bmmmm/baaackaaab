@@ -32,6 +32,9 @@ func listBackupSet(_ set: BackupSet, path: URL, existed: Bool) {
     }
     for e in set.excludes { pairs.append(("exclude", e)) }
     for f in set.excludeFiles { pairs.append(("exclude-file", f)) }
+    let lfw = set.largeFileWarnMiBEffective
+    let lfwSuffix = set.largeFileWarnMiB == nil ? " (default)" : ""
+    pairs.append(("large-file-warn", lfw == 0 ? "disabled" : "\(lfw) MiB\(lfwSuffix)"))
     Console.info(pairs)
     Console.note("Plus always-on defaults: macOS junk (\(ResticBackend.junkExcludes.joined(separator: ", "))) and CACHEDIR.TAG-tagged caches are excluded on every backup.")
 }
@@ -160,6 +163,25 @@ func manageBackupSet(configPath: URL) {
     for raw in cli.values("--remove-exclude-file") {
         if set.removeExcludeFile(raw) { changed = true; Console.success("removed exclude-file  \(raw)") }
         else { Console.note("exclude-file not in set: \(raw)") }
+    }
+    // Large-file warning threshold: warn-only, never excludes anything itself.
+    // 0 is a valid, explicit "disabled" — distinct from an absent flag, which
+    // leaves the persisted value (nil = the 4 GiB default) untouched.
+    if let raw = cli.value("--large-file-warn-mib") {
+        guard let n = Int(raw), n >= 0 else {
+            Console.error("--large-file-warn-mib needs a non-negative integer (MiB) — got '\(raw)' (0 disables the warning)")
+            exit(1)
+        }
+        if set.largeFileWarnMiB != n {
+            set.largeFileWarnMiB = n; changed = true
+            Console.success(n == 0 ? "large-file warning disabled" : "large-file warning threshold set to \(n) MiB")
+        } else { Console.note("large-file warning threshold already \(n) MiB") }
+    }
+    if cli.has("--clear-large-file-warn-mib") {
+        if set.largeFileWarnMiB != nil {
+            set.largeFileWarnMiB = nil; changed = true
+            Console.success("large-file warning threshold reset to the default (\(BackupSet.defaultLargeFileWarnMiB) MiB)")
+        } else { Console.note("large-file warning threshold already at the default") }
     }
 
     if changed {

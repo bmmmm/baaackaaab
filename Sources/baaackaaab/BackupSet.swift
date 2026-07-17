@@ -43,11 +43,27 @@ struct BackupSet: Codable, Equatable {
     /// Stored as the user typed them (tilde kept); expanded + existence-checked at
     /// run time (a missing file is dropped with a warning, never fails the backup).
     var excludeFiles: [String]
+    /// Warn-only large-file threshold in MiB, persisted so the timer applies it
+    /// too. nil means "use the default" (`defaultLargeFileWarnMiB`); 0 disables
+    /// the warning entirely — that must be set explicitly via
+    /// `--large-file-warn-mib 0`, it is never the unset-in-JSON meaning. Never
+    /// excludes or alters the run outcome — purely informational (see
+    /// `LargeFileWarning`).
+    var largeFileWarnMiB: Int?
+
+    /// The default large-file warning threshold: 4 GiB. Files at or under this
+    /// size never warn; nothing this tool does treats it as a hard limit.
+    static let defaultLargeFileWarnMiB = 4096
+
+    /// The threshold actually in effect: the persisted value, or the default
+    /// when unset. 0 (persisted or default) disables the warning.
+    var largeFileWarnMiBEffective: Int { largeFileWarnMiB ?? Self.defaultLargeFileWarnMiB }
 
     init(driveFolders: [String] = [], photoAlbums: [String] = [],
          quotaBytes: Int? = nil, limitUploadKiBps: Int? = nil,
          packSizeMiB: Int? = nil, restConnections: Int? = nil,
-         excludes: [String] = [], excludeFiles: [String] = []) {
+         excludes: [String] = [], excludeFiles: [String] = [],
+         largeFileWarnMiB: Int? = nil) {
         self.driveFolders = driveFolders
         self.photoAlbums = photoAlbums
         self.quotaBytes = quotaBytes
@@ -56,6 +72,7 @@ struct BackupSet: Codable, Equatable {
         self.restConnections = restConnections
         self.excludes = excludes
         self.excludeFiles = excludeFiles
+        self.largeFileWarnMiB = largeFileWarnMiB
     }
 
     // Stable snake_case keys, written explicitly so the on-disk file stays
@@ -69,6 +86,7 @@ struct BackupSet: Codable, Equatable {
         case restConnections = "rest_connections"
         case excludes
         case excludeFiles = "exclude_files"
+        case largeFileWarnMiB = "large_file_warn_mib"
     }
 
     // Tolerant decode: a hand-edited file may omit an array entirely (e.g. only
@@ -84,6 +102,7 @@ struct BackupSet: Codable, Equatable {
         restConnections = try c.decodeIfPresent(Int.self, forKey: .restConnections)
         excludes = try c.decodeIfPresent([String].self, forKey: .excludes) ?? []
         excludeFiles = try c.decodeIfPresent([String].self, forKey: .excludeFiles) ?? []
+        largeFileWarnMiB = try c.decodeIfPresent(Int.self, forKey: .largeFileWarnMiB)
     }
 
     // A set with no sources contributes nothing to a run.
