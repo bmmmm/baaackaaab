@@ -1,0 +1,30 @@
+# Build + test on GitHub's macOS runners. This covers the headless surface only
+# (see Package.swift's test-target note): the TTY TUI, live Photos/TCC and
+# launchd stay operator-verified on real hardware. The integration tests run
+# live restic against throwaway local repos, so the runner needs the restic
+# binary but no network store.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install restic
+        run: brew install restic
+      - name: Build (release)
+        run: swift build -c release
+      - name: Test
+        run: swift test
+        env:
+          RESTIC_CACHE_DIR: ${{ runner.temp }}/restic-cache

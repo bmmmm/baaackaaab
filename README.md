@@ -1,5 +1,7 @@
 # baaackaaab
 
+[![CI](https://github.com/bmmmm/baaackaaab/actions/workflows/ci.yml/badge.svg)](https://github.com/bmmmm/baaackaaab/actions/workflows/ci.yml)
+
 One-way backup for iCloud Drive and iCloud Photos into an immutable
 [restic](https://restic.net) repository, built to survive ransomware: the Mac can
 only ever **add** to the backup store, never delete or overwrite it.
