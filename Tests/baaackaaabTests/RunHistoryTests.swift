@@ -141,4 +141,78 @@ final class RunHistoryTests: XCTestCase {
         XCTAssertNil(RunHistory.lastDrill())
         XCTAssertEqual(RunHistory.drillCount(), 0)
     }
+
+    // MARK: - Churn-metric NDJSON forward/backward compatibility
+
+    // A record written with churn metrics survives the append→read round trip with
+    // every field intact.
+    func testChurnMetricsRoundTripThroughStore() throws {
+        let rec = RunRecord(runTag: "metrics", start: Date(timeIntervalSince1970: 1_700_000_000),
+                            end: Date(timeIntervalSince1970: 1_700_000_060), exitCode: 0,
+                            verified: 5, total: 5, sourceFailures: 0,
+                            destinations: [RunRecord.Dest(
+                                name: "primary", ok: true, error: nil,
+                                dataAdded: 12_345, filesChanged: 7, filesNew: 3, bytesProcessed: 99_000)])
+        try RunHistory.append(rec)
+        let got = try XCTUnwrap(RunHistory.recent(1).first?.destinations.first)
+        XCTAssertEqual(got.dataAdded, 12_345)
+        XCTAssertEqual(got.filesChanged, 7)
+        XCTAssertEqual(got.filesNew, 3)
+        XCTAssertEqual(got.bytesProcessed, 99_000)
+    }
+
+    // A metrics-less Dest omits the four churn keys entirely (encodeIfPresent), so
+    // its on-disk JSON is byte-identical to a pre-feature line — no new keys, no
+    // nulls. This is the forward-compat guarantee for the append-only history.
+    func testMetricLessDestEmitsNoChurnKeys() throws {
+        let enc = JSONEncoder()
+        let data = try enc.encode(RunRecord.Dest(name: "d", ok: true, error: nil))
+        let json = String(data: data, encoding: .utf8) ?? ""
+        for key in ["data_added", "files_changed", "files_new", "bytes_processed"] {
+            XCTAssertFalse(json.contains(key), "unexpected \(key) in \(json)")
+        }
+    }
+
+    // BACKWARD compat: an old-format line (no churn keys at all) still decodes, with
+    // the new fields defaulting to nil.
+    func testOldFormatLineDecodesWithNilMetrics() throws {
+        let old = """
+        {"run_tag":"old","start":"2023-11-14T22:13:20Z","end":"2023-11-14T22:14:20Z",\
+        "exit":0,"verified":5,"total":5,"source_failures":0,\
+        "destinations":[{"name":"default","ok":true}]}
+        """
+        try writeLine(old)
+        let dest = try XCTUnwrap(RunHistory.recent(1).first?.destinations.first)
+        XCTAssertEqual(dest.name, "default")
+        XCTAssertNil(dest.dataAdded)
+        XCTAssertNil(dest.filesChanged)
+        XCTAssertNil(dest.filesNew)
+        XCTAssertNil(dest.bytesProcessed)
+    }
+
+    // FORWARD compat: a new-format line (with the snake_case churn keys) decodes
+    // with the metrics populated — the reader understands both shapes.
+    func testNewFormatLineDecodesWithMetrics() throws {
+        let new = """
+        {"run_tag":"new","start":"2023-11-14T22:13:20Z","end":"2023-11-14T22:14:20Z",\
+        "exit":0,"verified":5,"total":5,"source_failures":0,\
+        "destinations":[{"name":"default","ok":true,"data_added":4096,\
+        "files_changed":2,"files_new":1,"bytes_processed":8192}]}
+        """
+        try writeLine(new)
+        let dest = try XCTUnwrap(RunHistory.recent(1).first?.destinations.first)
+        XCTAssertEqual(dest.dataAdded, 4096)
+        XCTAssertEqual(dest.filesChanged, 2)
+        XCTAssertEqual(dest.filesNew, 1)
+        XCTAssertEqual(dest.bytesProcessed, 8192)
+    }
+
+    /// Write one raw NDJSON line into the (relocated) history file, creating it if
+    /// needed — for feeding a hand-crafted old/new-format record to the reader.
+    private func writeLine(_ line: String) throws {
+        let fm = FileManager.default
+        try fm.createDirectory(at: supportDir, withIntermediateDirectories: true)
+        let data = Data((line + "\n").utf8)
+        try data.write(to: RunHistory.file)
+    }
 }

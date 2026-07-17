@@ -396,8 +396,40 @@ struct BackupRun {
                 sourcesConfigured: !(driveFolders.isEmpty && photoAlbums.isEmpty),
                 dryRun: false, readyCount: ready.count, runTag: runTag)
             Console.summary(headline: outcome.headline, state: outcome.state, details: details)
+            // Snapshot the history BEFORE recording this run, so the churn-anomaly
+            // baseline is built purely from PRIOR runs and never includes the run we
+            // are about to append.
+            let priorHistory = runCancelled ? [] : RunHistory.recent(ChurnAnomaly.baselineWindow)
             recordRun(exitCode: Int(outcome.exitCode), verified: verified, total: total, sourceFailures: sourceFailures)
             if outcome.notify, let message = outcome.notifyMessage { notifyOnFailure(message) }
+
+            // Source-side ransomware tripwire (warn-only). Compare each destination's
+            // aggregated churn against a median baseline of its prior successful runs
+            // and, on a spike or shrink, warn loudly + fire a notification. This NEVER
+            // alters the exit code and NEVER touches eviction — an explicit warn-only
+            // decision, so a false positive costs a banner, never a backup. Skipped on
+            // a cancelled run (its metrics are partial). The notification mirrors the
+            // failure-banner gate: only when our output is invisible (launchd / piped),
+            // since an interactive run already shows the warning on screen.
+            if !runCancelled {
+                for run in ready where run.ok && run.churn.hasData {
+                    let baseline = ChurnAnomaly.baseline(from: priorHistory,
+                                                         destination: run.destination.name)
+                    let message: String
+                    switch ChurnAnomaly.evaluate(current: run.churn, baseline: baseline) {
+                    case .clean, .insufficientBaseline:
+                        continue
+                    case .spike(let m), .shrink(let m):
+                        message = m
+                    }
+                    Console.warn("\(run.destination.name): \(message)")
+                    if isatty(STDERR_FILENO) == 0 {
+                        Notifier.notify(title: "baaackaaab \u{2014} anomaly warning",
+                                        message: message,
+                                        subtitle: "run \(runTag) \u{2014} \(run.destination.name)")
+                    }
+                }
+            }
             // Unattended (log-only) path: nudge once per clean run when restic or the
             // server has fallen behind the tested baseline — the scheduled log goes
             // unread, so a banner is the only signal. Offline for restic; best-effort

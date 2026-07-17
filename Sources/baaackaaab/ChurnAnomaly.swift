@@ -33,3 +33,95 @@ struct ChurnMetrics: Equatable {
         snapshotCount += 1
     }
 }
+
+/// Pure, testable churn-anomaly evaluator — the warn-only source-side tripwire.
+/// Given the current run's aggregated metrics and a baseline drawn from prior
+/// successful runs, it returns a verdict. No I/O, no side effects: the wiring in
+/// BackupRun does the console warning and the notification, and NEVER lets a
+/// verdict change the run's exit code or eviction (an explicit warn-only decision
+/// — a false positive must cost a banner, not a backup).
+enum ChurnAnomaly {
+
+    /// Below this many baseline runs the verdict is `.insufficientBaseline`
+    /// (silent): with too little history the median is not trustworthy and every
+    /// early run would false-positive.
+    static let minBaselineRuns = 3
+
+    /// SPIKE: current data-added must exceed this multiple of the baseline median
+    /// AND the absolute floor below, so a small repo's noise never trips it.
+    static let spikeFactor = 10.0
+
+    /// SPIKE absolute floor: a spike under 1 GiB is not worth a ransomware alarm
+    /// (re-encoding a few photos, a new document folder) — mass modification of a
+    /// real iCloud source moves far more than this.
+    static let spikeFloorBytes: Int64 = 1 << 30   // 1 GiB
+
+    /// SHRINK: current processed-bytes below this fraction of the baseline median
+    /// means the source more than halved between runs.
+    static let shrinkFraction = 0.5
+
+    /// How many recent history records to draw the baseline from.
+    static let baselineWindow = 30
+
+    static let spikeMessage =
+        "unusually large change volume — if you did not add/re-encode large amounts of data, check the source for mass modification (ransomware encrypts files → everything reuploads)"
+    static let shrinkMessage =
+        "source shrank by more than half — check that iCloud is signed in and folders/albums still resolve"
+
+    enum Verdict: Equatable {
+        case clean
+        /// Fewer than `minBaselineRuns` baseline runs — silent, no warning.
+        case insufficientBaseline
+        case spike(String)
+        case shrink(String)
+    }
+
+    /// The median of `values` as a Double: the mean of the two middle elements for
+    /// an even count, the middle element for an odd count, 0 for an empty input.
+    static func median(_ values: [Int64]) -> Double {
+        guard !values.isEmpty else { return 0 }
+        let s = values.sorted()
+        let n = s.count
+        if n % 2 == 1 { return Double(s[n / 2]) }
+        return (Double(s[n / 2 - 1]) + Double(s[n / 2])) / 2.0
+    }
+
+    /// Evaluate the current run against the baseline. Spike is checked before
+    /// shrink (a run cannot be both). Pure — the caller decides how to surface it.
+    static func evaluate(current: ChurnMetrics, baseline: [ChurnMetrics]) -> Verdict {
+        guard baseline.count >= minBaselineRuns else { return .insufficientBaseline }
+
+        let medianAdded = median(baseline.map { $0.dataAdded })
+        if Double(current.dataAdded) > spikeFactor * medianAdded,
+           current.dataAdded > spikeFloorBytes {
+            return .spike(spikeMessage)
+        }
+
+        let medianProcessed = median(baseline.map { $0.bytesProcessed })
+        if medianProcessed > 0,
+           Double(current.bytesProcessed) < shrinkFraction * medianProcessed {
+            return .shrink(shrinkMessage)
+        }
+
+        return .clean
+    }
+
+    /// Build the baseline for `destination` from history: successful backup-kind
+    /// records (not drills, exit 0) whose entry for that destination succeeded and
+    /// carries churn metrics. Drills, failures, and pre-metrics records are skipped,
+    /// so an old runs.ndjson simply yields a smaller (possibly insufficient)
+    /// baseline rather than a wrong one.
+    static func baseline(from records: [RunRecord], destination: String) -> [ChurnMetrics] {
+        records.compactMap { rec -> ChurnMetrics? in
+            guard !rec.isDrill, rec.exitCode == 0 else { return nil }
+            guard let d = rec.destinations.first(where: { $0.name == destination }),
+                  d.ok, let processed = d.bytesProcessed else { return nil }
+            return ChurnMetrics(
+                dataAdded: d.dataAdded ?? 0,
+                filesChanged: d.filesChanged ?? 0,
+                filesNew: d.filesNew ?? 0,
+                bytesProcessed: processed,
+                snapshotCount: 1)
+        }
+    }
+}
