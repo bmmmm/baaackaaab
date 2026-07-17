@@ -187,6 +187,25 @@ final class ResticIntegrationTests: XCTestCase {
         XCTAssertFalse(check.lockedOut)
     }
 
+    // MARK: - --read-concurrency
+
+    /// A backup with a configured read-concurrency is accepted by restic (a bad
+    /// flag would fail the run) and produces a snapshot that passes an
+    /// integrity check. Same syntactic-acceptance scope as the pack-size /
+    /// rest-connections tests above: the concurrency EFFECT is not observable
+    /// against a tiny local test repo.
+    func testReadConcurrencyBackupIsAcceptedAndVerifies() throws {
+        let backend = makeBackend()
+        try backend.ensureInitialized()
+        let src = try makeSource("src", files: ["doc.txt": "hello"])
+        try backend.backup(paths: [src], tags: ["concurrent"], host: "testhost", readConcurrency: 4)
+        XCTAssertEqual(try backend.listSnapshots().count, 1)
+
+        let check = backend.checkRepo(readDataSubset: "100%")
+        XCTAssertTrue(check.clean, "repo should pass check after a read-concurrency backup:\n\(check.output)")
+        XCTAssertFalse(check.lockedOut)
+    }
+
     // MARK: - check / locks
 
     /// A healthy freshly-backed-up repo checks clean, reports no locks, and unlock
@@ -271,6 +290,28 @@ final class ResticIntegrationTests: XCTestCase {
         let entries = try backend.ls(snapshot: snapID, path: nil)
         XCTAssertTrue(entries.contains { $0.name == "needle.txt" && $0.type == "file" })
         XCTAssertTrue(entries.contains { $0.name == "hay.txt" })
+    }
+
+    /// A file changed between two backups produces two versions once find()'s
+    /// hits are grouped by snapshot (the --history command's core data path):
+    /// newest-first by mtime, each carrying its own size.
+    func testHistoryGroupsHitsPerSnapshotNewestFirst() throws {
+        let backend = makeBackend()
+        try backend.ensureInitialized()
+        let src = try makeSource("src", files: ["doc.txt": "v1"])
+        try backend.backup(paths: [src], tags: ["t"], host: "testhost")
+        Thread.sleep(forTimeInterval: 1.1)   // a distinct, later mtime for the second write
+        try "version-two".write(to: src.appendingPathComponent("doc.txt"), atomically: true, encoding: .utf8)
+        try backend.backup(paths: [src], tags: ["t"], host: "testhost")
+
+        let hits = try backend.find(pattern: "doc.txt", snapshot: nil)
+        let versions = groupHistoryBySnapshot(hits)
+        XCTAssertEqual(versions.count, 2, "the file should have one version per snapshot")
+        XCTAssertNotEqual(versions.first?.snapshot, versions.last?.snapshot)
+        XCTAssertEqual(versions.first?.size, 11, "newest version ('version-two', 11 bytes) should lead")
+        XCTAssertEqual(versions.last?.size, 2, "oldest version ('v1', 2 bytes) should trail")
+        XCTAssertNotNil(versions.first?.mtime)
+        XCTAssertNotNil(versions.last?.mtime)
     }
 
     /// diff between two snapshots reports the modified file with the "M" modifier

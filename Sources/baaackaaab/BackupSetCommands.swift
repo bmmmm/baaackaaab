@@ -30,6 +30,9 @@ func listBackupSet(_ set: BackupSet, path: URL, existed: Bool) {
     if let rc = set.restConnections {
         pairs.append(("rest-connections", "\(rc)"))
     }
+    if let rcc = set.readConcurrency {
+        pairs.append(("read-concurrency", "\(rcc)"))
+    }
     for e in set.excludes { pairs.append(("exclude", e)) }
     for f in set.excludeFiles { pairs.append(("exclude-file", f)) }
     Console.info(pairs)
@@ -114,6 +117,22 @@ func manageBackupSet(configPath: URL) {
     if cli.has("--clear-rest-connections") {
         if set.restConnections != nil { set.restConnections = nil; changed = true; Console.success("rest connections cleared (restic default, 5 connections)") }
         else { Console.note("no rest connections cap was set") }
+    }
+    // Read-concurrency knob: how many files restic reads concurrently while
+    // building the backup. Persisted so the timer uses it too; restic's own
+    // default is 2. The 1…64 range is this tool's own sanity bound, not one
+    // restic enforces.
+    if let raw = cli.value("--read-concurrency") {
+        guard let n = Int(raw), (1...64).contains(n) else {
+            Console.error("--read-concurrency needs an integer in 1…64, e.g. --read-concurrency 4")
+            exit(1)
+        }
+        if set.readConcurrency != n { set.readConcurrency = n; changed = true; Console.success("read concurrency set to \(n)") }
+        else { Console.note("read concurrency already \(n)") }
+    }
+    if cli.has("--clear-read-concurrency") {
+        if set.readConcurrency != nil { set.readConcurrency = nil; changed = true; Console.success("read concurrency cleared (restic default, 2)") }
+        else { Console.note("no read concurrency was set") }
     }
     // Repo-quota gauge: persisted in the set so the UNATTENDED timer warns too
     // — that run is the whole point of the pre-flight gauge, and it reads only

@@ -190,11 +190,12 @@ final class ResticBackend {
     /// the global `-o rest.connections=N` option, applied on a dry run too since
     /// it bounds the backend's concurrency, not the upload itself.
     ///
-    /// `showProgress` (a real backup on a TTY) switches restic to `--json` and
-    /// renders a parsed, self-rewriting progress bar; otherwise restic's own
-    /// output streams straight to the terminal. The dry-run path always keeps the
-    /// plain `--verbose` output — there its value is the file list, not a bar — and
-    /// off a TTY (launchd / a pipe) we never use --json so the log stays readable.
+    /// A real backup always runs restic with `--json` so the churn summary can be
+    /// captured (the anomaly baseline must also build under the unattended timer).
+    /// `showProgress` (a TTY) only decides the rendering: a parsed, self-rewriting
+    /// progress bar on a TTY, one concise tally line off a TTY (launchd / a pipe).
+    /// The dry-run path keeps restic's plain `--verbose` output — there its value
+    /// is the file list, not a bar — and returns no summary.
     /// macOS filesystem junk that appears in every iCloud Drive folder and carries
     /// no user data — Finder/Spotlight indexes, trash + revision metadata, temp
     /// scratch. Excluded on EVERY backup: on the append-only store the Mac can
@@ -215,6 +216,7 @@ final class ResticBackend {
     func backup(paths: [URL], tags: [String], host: String?,
                 dryRun: Bool = false, limitUploadKiBps: Int? = nil,
                 packSizeMiB: Int? = nil, restConnections: Int? = nil,
+                readConcurrency: Int? = nil,
                 excludes: [String] = [], excludeFiles: [String] = [],
                 showProgress: Bool = false) throws -> ResticSummary? {
         // `--skip-if-unchanged`: when a source is byte-for-byte identical to its
@@ -241,6 +243,14 @@ final class ResticBackend {
         // target is 16 MiB when unset.
         if let packSizeMiB, packSizeMiB > 0 {
             args += ["--pack-size", String(packSizeMiB)]
+        }
+        // How many files restic reads concurrently while building the backup.
+        // restic's own default is 2 ($RESTIC_READ_CONCURRENCY); raising it can
+        // help saturate a fast local disk, lowering it eases CPU/IO pressure
+        // from many small iCloud Drive files. Optional, same guarded pattern as
+        // --pack-size / rest.connections.
+        if let readConcurrency, readConcurrency > 0 {
+            args += ["--read-concurrency", String(readConcurrency)]
         }
         if dryRun { args += ["--dry-run", "--verbose"] }
         if let host { args += ["--host", host] }
@@ -627,6 +637,9 @@ final class ResticBackend {
         var snapshotCount = 0
         var latestTime: String?
         var latestTags: [String] = []
+        /// The oldest snapshot's time, for the dashboard's "oldest <age>" line —
+        /// how far back this destination's history actually reaches.
+        var oldestTime: String?
         var sizeBytes: Int?
         var error: String?
         /// Per-source breakdown (drive / photos), so the dashboard can show one
@@ -668,11 +681,13 @@ final class ResticBackend {
             let snaps = try snapshotsJSON(timeout: Self.probeTimeout)
             status.reachable = true
             status.snapshotCount = snaps.count
-            // restic lists snapshots oldest → newest, so the last one is latest.
+            // restic lists snapshots oldest → newest (verified against `restic
+            // snapshots --json`), so the first one is oldest, the last is latest.
             if let latest = snaps.last {
                 status.latestTime = latest["time"] as? String
                 status.latestTags = (latest["tags"] as? [String]) ?? []
             }
+            status.oldestTime = snaps.first?["time"] as? String
             status.sources = Self.sourceBreakdown(snaps)
             status.sizeBytes = repoSizeBytes(timeout: Self.probeTimeout)
         } catch {
@@ -695,12 +710,16 @@ final class ResticBackend {
 
     /// One file found by `restic find`, for the single-file restore flow: its
     /// full path inside the snapshot (which is exactly what `--include` then takes),
-    /// its type, size, and which snapshot it was found in.
+    /// its type, size, which snapshot it was found in, and its mtime there (the
+    /// `--history` command's per-version timestamp; restic's ISO8601 string, kept
+    /// raw rather than parsed — every other display path in this tool truncates
+    /// the same raw string instead of round-tripping through Date).
     struct Found {
         let path: String
         let type: String
         let size: Int?
         let snapshot: String
+        let mtime: String?
     }
 
     /// Search `snapshot` (default: all snapshots when nil) for files matching
@@ -726,7 +745,8 @@ final class ResticBackend {
                     path: (m["path"] as? String) ?? "",
                     type: (m["type"] as? String) ?? "",
                     size: (m["size"] as? NSNumber)?.intValue,
-                    snapshot: snap
+                    snapshot: snap,
+                    mtime: m["mtime"] as? String
                 ))
             }
         }

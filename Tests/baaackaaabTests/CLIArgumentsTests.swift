@@ -142,6 +142,28 @@ final class CLIArgumentsTests: XCTestCase {
         XCTAssertTrue(CLIArguments(tokens: ["--clear-rest-connections"]).has("--clear-rest-connections"))
     }
 
+    // MARK: - --read-concurrency (persist + clear)
+
+    /// `--read-concurrency <n>` and `--clear-read-concurrency` mirror the
+    /// rest-connections / pack-size persistent knobs: a value flag and a
+    /// standalone clear flag, both recognized, with the value reachable
+    /// through `value(_:)`.
+    func testReadConcurrencyFlagsAreRecognizedAndParsed() {
+        XCTAssertNil(CLIArguments.unknownArgument(in: ["baaackaaab", "--read-concurrency", "4"]))
+        XCTAssertNil(CLIArguments.unknownArgument(in: ["baaackaaab", "--clear-read-concurrency"]))
+        XCTAssertEqual(CLIArguments(tokens: ["--read-concurrency", "4"]).value("--read-concurrency"), "4")
+        XCTAssertTrue(CLIArguments(tokens: ["--clear-read-concurrency"]).has("--clear-read-concurrency"))
+    }
+
+    // MARK: - --history
+
+    /// `--history <path>` is a value flag like --find, recognized (not rejected
+    /// as unknown) with its value reachable through `value(_:)`.
+    func testHistoryFlagIsRecognizedAndParsed() {
+        XCTAssertNil(CLIArguments.unknownArgument(in: ["baaackaaab", "--history", "report.pdf"]))
+        XCTAssertEqual(CLIArguments(tokens: ["--history", "report.pdf"]).value("--history"), "report.pdf")
+    }
+
     /// A flag value may legitimately start with '-' or look like a bare word — it
     /// is consumed by its flag, never checked. `--diff` consumes two.
     func testUnknownArgumentSkipsFlagValues() {

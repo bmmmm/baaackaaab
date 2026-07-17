@@ -65,6 +65,71 @@ func findCommand() {
     }
 }
 
+/// One version of a file as it appeared in one snapshot: which snapshot, its
+/// size, and its mtime there. The `--history` command's building block.
+struct FileVersion {
+    let snapshot: String
+    let size: Int?
+    let mtime: String?
+}
+
+/// Group `find`-results for a single file into one FileVersion per snapshot,
+/// newest mtime first. `restic find` on a literal path yields at most one match
+/// per snapshot, so this is really a re-sort; grouping is explicit so a future
+/// glob pattern that DID match more than one path in a snapshot degrades to
+/// "first match wins" instead of duplicate rows for that snapshot. Compares the
+/// raw ISO8601 mtime strings restic emits rather than parsing them into Date —
+/// same-host backups share the same format and UTC offset, so lexicographic
+/// order is chronological order, and nothing else in this command needs a real
+/// Date. Pure (no restic/argv access) — directly unit-testable.
+func groupHistoryBySnapshot(_ found: [ResticBackend.Found]) -> [FileVersion] {
+    var bySnapshot: [String: ResticBackend.Found] = [:]
+    for f in found where bySnapshot[f.snapshot] == nil {
+        bySnapshot[f.snapshot] = f
+    }
+    return bySnapshot.values
+        .map { FileVersion(snapshot: $0.snapshot, size: $0.size, mtime: $0.mtime) }
+        .sorted { ($0.mtime ?? "") > ($1.mtime ?? "") }
+}
+
+/// Show a file's version history across ALL snapshots (read-only): one line per
+/// snapshot it appears in, newest first, with that version's size + mtime, per
+/// destination. Complements `--find` (which locates a file within ONE
+/// snapshot); `--history` spans every snapshot at once, so you can pick which
+/// past version to restore.
+func historyCommand() {
+    Console.banner("baaackaaab", tagline: "history — file versions across snapshots")
+    guard let path = cli.value("--history"), !path.isEmpty else {
+        Console.error("--history needs a path, e.g. --history report.pdf or --history notes/todo.txt")
+        exit(1)
+    }
+    let dests = destinationsForCommand()
+    var anyVersions = false
+    let failures = forEachDestination(dests) { dest in
+        let hits = try ResticBackend(destination: dest).find(pattern: path, snapshot: nil)
+        let versions = groupHistoryBySnapshot(hits)
+        if versions.isEmpty {
+            Console.note("no match for '\(path)' in any snapshot")
+            return true
+        }
+        anyVersions = true
+        for v in versions {
+            let when = v.mtime.map { String($0.prefix(16)).replacingOccurrences(of: "T", with: " ") } ?? "unknown time"
+            let size = v.size.map { " (" + ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .file) + ")" } ?? ""
+            Console.step("\(v.snapshot.prefix(8))  \(when)\(size)")
+        }
+        return true
+    }
+    if anyVersions {
+        let destFlag = dests.count > 1 ? " --destination <name>" : ""
+        Console.note("restore a specific version with:  baaackaaab --restore --include \(path) --snapshot <id>\(destFlag)")
+    }
+    if failures > 0 {
+        Console.error("\(failures)/\(dests.count) destination(s) could not be searched — see above")
+        exit(1)
+    }
+}
+
 /// Browse a snapshot's contents with `restic ls` (read-only), per destination
 /// (or just `--destination <name>`). `--ls <id>` picks the snapshot (default
 /// 'latest'); `--include <subpath>` limits to a subtree. The printed path is

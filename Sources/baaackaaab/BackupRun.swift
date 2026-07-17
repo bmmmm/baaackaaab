@@ -15,6 +15,7 @@ struct BackupRun {
     let configLimitUploadKiBps: Int?
     let configPackSizeMiB: Int?
     let configRestConnections: Int?
+    let configReadConcurrency: Int?
     let configExcludes: [String]
     let configExcludeFiles: [String]
     let repoQuotaBytes: Int?
@@ -101,6 +102,9 @@ struct BackupRun {
             if let rc = configRestConnections, rc > 0, !backupDryRun {
                 info.append(("rest-connections", "\(rc)"))
             }
+            if let rcc = configReadConcurrency, rcc > 0, !backupDryRun {
+                info.append(("read-concurrency", "\(rcc)"))
+            }
             // Excludes are always active (the macOS-junk defaults + caches), so this
             // line shows on every run — plus any set globs / exclude-files, so it's
             // visible exactly what is being kept out of the un-prunable store.
@@ -179,9 +183,10 @@ struct BackupRun {
             // the run. (Parallel-by-link is a later slice; this is the sequential base.)
             // The ONLY thing it throws is RunCancelled — a real restic failure is recorded
             // and swallowed, but a cancel must propagate so the run stops launching work.
-            // A real backup on a TTY renders the parsed `restic backup --json` progress
-            // bar; a dry run (file-list preview) and any non-TTY run (launchd / a pipe)
-            // keep restic's plain output so logs stay readable.
+            // A real backup always runs `restic --json` (the churn summary must be
+            // captured even under the timer); on a TTY that stream renders the live
+            // progress bar, off a TTY it yields one concise tally line per backup.
+            // A dry run (file-list preview) keeps restic's plain output.
             let showProgress = isatty(STDOUT_FILENO) != 0 && !backupDryRun
             func backupToAll(paths: [URL], tags: [String], label: String) throws {
                 for run in ready {
@@ -195,6 +200,7 @@ struct BackupRun {
                                 dryRun: backupDryRun, limitUploadKiBps: configLimitUploadKiBps,
                                 packSizeMiB: configPackSizeMiB,
                                 restConnections: configRestConnections,
+                                readConcurrency: configReadConcurrency,
                                 excludes: configExcludes, excludeFiles: excludeFilesResolved,
                                 showProgress: showProgress) {
                             run.churn.add(summary)

@@ -135,6 +135,15 @@ if cli.has("--find") {
     exit(0)
 }
 
+// Show a file's version history across ALL snapshots (read-only): every
+// version's size + mtime, newest first. Dispatch on presence like --find, so a
+// forgotten path argument fails loudly inside historyCommand rather than
+// falling through to a backup of the set.
+if cli.has("--history") {
+    historyCommand()
+    exit(0)
+}
+
 // Browse a snapshot's contents (read-only). The listed paths feed --restore --include.
 // `--ls` with no id is valid (defaults to the latest snapshot); dispatch on
 // presence so a bare `--ls` browses latest instead of falling through to a backup.
@@ -267,21 +276,24 @@ if cli.has("--limit-upload")
     || cli.has("--clear-pack-size")
     || cli.has("--rest-connections")
     || cli.has("--clear-rest-connections")
+    || cli.has("--read-concurrency")
+    || cli.has("--clear-read-concurrency")
     || cli.has("--repo-quota")
     || cli.has("--clear-repo-quota") {
     if !cli.values("--drive-folder").isEmpty || !cli.values("--photo-album").isEmpty {
-        Console.error("--limit-upload / --pack-size / --rest-connections / --repo-quota (and their --clear-* forms) change the backup set's PERSISTENT tuning; they are not per-run flags (a run reads them from the set — there is no ad-hoc form). Set them on their own first (e.g. `baaackaaab --pack-size 64`), then run the backup separately. Combined with --drive-folder/--photo-album they would silently edit the set and skip the backup.")
+        Console.error("--limit-upload / --pack-size / --rest-connections / --read-concurrency / --repo-quota (and their --clear-* forms) change the backup set's PERSISTENT tuning; they are not per-run flags (a run reads them from the set — there is no ad-hoc form). Set them on their own first (e.g. `baaackaaab --pack-size 64`), then run the backup separately. Combined with --drive-folder/--photo-album they would silently edit the set and skip the backup.")
         exit(1)
     }
 }
 
 // Backup-set management (--list / --add-* / --remove-* / --limit-upload /
-// --pack-size / --rest-connections): edit the set and exit. These are
-// PERSISTENT knobs (like --add-folder), not per-run flags — a backup reads
-// them from the set, never argv.
+// --pack-size / --rest-connections / --read-concurrency): edit the set and
+// exit. These are PERSISTENT knobs (like --add-folder), not per-run flags — a
+// backup reads them from the set, never argv.
 if cli.hasAny(["--list", "--add-folder", "--remove-folder", "--add-album", "--remove-album",
                "--limit-upload", "--clear-limit-upload", "--pack-size", "--clear-pack-size",
                "--rest-connections", "--clear-rest-connections",
+               "--read-concurrency", "--clear-read-concurrency",
                "--repo-quota", "--clear-repo-quota",
                "--add-exclude", "--remove-exclude", "--add-exclude-file", "--remove-exclude-file"]) {
     manageBackupSet(configPath: configPath)
@@ -297,6 +309,7 @@ var configQuotaBytes: Int? = nil
 var configLimitUploadKiBps: Int? = nil
 var configPackSizeMiB: Int? = nil
 var configRestConnections: Int? = nil
+var configReadConcurrency: Int? = nil
 var configExcludes: [String] = []
 var configExcludeFiles: [String] = []
 if driveFolders.isEmpty && photoAlbums.isEmpty
@@ -309,6 +322,7 @@ if driveFolders.isEmpty && photoAlbums.isEmpty
         configLimitUploadKiBps = set.limitUploadKiBps
         configPackSizeMiB = set.packSizeMiB
         configRestConnections = set.restConnections
+        configReadConcurrency = set.readConcurrency
         configExcludes = set.excludes
         configExcludeFiles = set.excludeFiles
     } catch {
@@ -371,6 +385,18 @@ runFmt.dateFormat = "yyyyMMdd-HHmmss"
 let runTag = cli.value("--run-tag") ?? "run-\(runFmt.string(from: Date()))"
 let runStart = Date()
 
+// Single-instance guard: only a REAL backup (bare run, the scheduled timer, or
+// the TUI's "sync now" child) takes the lock — a dry run is a read-only
+// preview and stays unguarded. Two overlapping real backups would race the
+// shared staging tree and duplicate acquisition work, so a second run backs
+// off immediately instead of running alongside the first.
+if !backupDryRun {
+    if case .busy = SingleInstanceLock.acquire() {
+        Console.note("another baaackaaab run is in progress — skipping this run")
+        exit(0)
+    }
+}
+
 // Hand off to the extracted orchestrator: it runs init, quota, Drive, Photos,
 // manifest, summary, run-history and exit codes, then exits the process.
 BackupRun(
@@ -383,6 +409,7 @@ BackupRun(
     configLimitUploadKiBps: configLimitUploadKiBps,
     configPackSizeMiB: configPackSizeMiB,
     configRestConnections: configRestConnections,
+    configReadConcurrency: configReadConcurrency,
     configExcludes: configExcludes,
     configExcludeFiles: configExcludeFiles,
     repoQuotaBytes: repoQuotaBytes,

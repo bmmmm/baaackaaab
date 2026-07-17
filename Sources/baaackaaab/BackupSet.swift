@@ -32,6 +32,11 @@ struct BackupSet: Codable, Equatable {
     /// small store host can 502 under that much concurrency on pack uploads, so
     /// this lets the operator cap it without touching the timer.
     var restConnections: Int?
+    /// Optional restic `--read-concurrency` (how many files restic reads
+    /// concurrently while building the backup). Persisted here so the
+    /// unattended timer uses it too. restic's own default is 2; valid range
+    /// 1…64 (this tool's own sanity bound, not one restic enforces).
+    var readConcurrency: Int?
     /// Extra restic exclude globs, on top of the always-on macOS-junk defaults
     /// (see ResticBackend.junkExcludes). Persisted here so the unattended timer
     /// applies them too. Each is a `restic backup --exclude` pattern — matched on
@@ -47,6 +52,7 @@ struct BackupSet: Codable, Equatable {
     init(driveFolders: [String] = [], photoAlbums: [String] = [],
          quotaBytes: Int? = nil, limitUploadKiBps: Int? = nil,
          packSizeMiB: Int? = nil, restConnections: Int? = nil,
+         readConcurrency: Int? = nil,
          excludes: [String] = [], excludeFiles: [String] = []) {
         self.driveFolders = driveFolders
         self.photoAlbums = photoAlbums
@@ -54,6 +60,7 @@ struct BackupSet: Codable, Equatable {
         self.limitUploadKiBps = limitUploadKiBps
         self.packSizeMiB = packSizeMiB
         self.restConnections = restConnections
+        self.readConcurrency = readConcurrency
         self.excludes = excludes
         self.excludeFiles = excludeFiles
     }
@@ -67,6 +74,7 @@ struct BackupSet: Codable, Equatable {
         case limitUploadKiBps = "limit_upload_kibps"
         case packSizeMiB = "pack_size_mib"
         case restConnections = "rest_connections"
+        case readConcurrency = "read_concurrency"
         case excludes
         case excludeFiles = "exclude_files"
     }
@@ -82,6 +90,7 @@ struct BackupSet: Codable, Equatable {
         limitUploadKiBps = try c.decodeIfPresent(Int.self, forKey: .limitUploadKiBps)
         packSizeMiB = try c.decodeIfPresent(Int.self, forKey: .packSizeMiB)
         restConnections = try c.decodeIfPresent(Int.self, forKey: .restConnections)
+        readConcurrency = try c.decodeIfPresent(Int.self, forKey: .readConcurrency)
         excludes = try c.decodeIfPresent([String].self, forKey: .excludes) ?? []
         excludeFiles = try c.decodeIfPresent([String].self, forKey: .excludeFiles) ?? []
     }
