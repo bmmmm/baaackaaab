@@ -8,6 +8,32 @@ It is a single Swift command-line tool for macOS. A bare run backs up a declarat
 *backup set*; an interactive terminal UI edits that set and shows a remote
 dashboard; a launchd timer runs it unattended.
 
+## Highlights
+
+- **Ransomware-proof by design** — the store is a restic REST server in
+  `--append-only` mode; the Mac holds no delete/prune right at all, and
+  `--doctor` actively *proves* the server enforces it (a harmless DELETE probe).
+- **iCloud-native acquisition** — materializes FileProvider-backed Drive files
+  in place and exports Photos via PhotoKit in byte-budgeted batches, so a small
+  disk can back up a large library.
+- **Safe restore by construction** — always into a fresh directory, never back
+  over live iCloud; previews with `--dry-run`, re-reads with `--verify`.
+- **Trust is scheduled, not assumed** — a monthly restore drill proves a sample
+  decrypts end-to-end; a rotating read-data check re-hashes every stored byte
+  over eight runs to catch bit-rot.
+- **Monitoring that survives a dead Mac** — Healthchecks-style heartbeat,
+  ntfy/webhook pushes, `status.json` + a Prometheus textfile; a source-side
+  anomaly tripwire flags ransomware-shaped mass-rewrite churn.
+- **Multiple destinations & an emergency recovery kit** — independent repos
+  with separate keys, plus an encrypted offline sheet that restores with stock
+  restic on any machine — no baaackaaab, no Mac.
+- **One binary, no daemons** — a single Swift CLI; scheduling is a plain
+  launchd LaunchAgent, secrets live in `0600` files and never touch argv.
+
+Not what you were looking for? The wider restic ecosystem — GUIs, cron
+wrappers, browsers, other backup front-ends — is cataloged at
+[awesome-restic](https://github.com/rubiojr/awesome-restic).
+
 ## Why this exists
 
 A normal backup tool with delete/prune rights is a liability: malware (or a bug)
@@ -128,6 +154,8 @@ when no timer is installed), plus the last restore-drill and integrity-check lin
 Because the Mac can only stage a fraction of the data set at once, Photos are
 exported and uploaded in byte-budgeted batches (each backed up, then deleted), so
 one run produces several restic snapshots that share a `run-<timestamp>` tag.
+`--photo-batch-bytes <n>` sizes a batch (default ~3 GB); `--staging <dir>` moves
+the scratch directory.
 
 ### Restoring
 
@@ -143,6 +171,7 @@ baaackaaab --restore --include path/to/report.pdf   # single-file restore
 baaackaaab --restore --include some/folder          # subtree restore
 baaackaaab --restore                                # full restore (latest)
 baaackaaab --test-restore                           # restore a random sample + verify
+                                                    # (--sample N files, --max-bytes N budget)
 ```
 
 Photos restore to their **original files** (import them back via Photos > File >
@@ -226,12 +255,13 @@ Two things do **not** come for free on those backends, though:
 
 ### Tuning
 
-Two persistent knobs live in the backup set (so the unattended timer uses them too):
+These persistent knobs live in the backup set (so the unattended timer uses them too):
 
 ```sh
 baaackaaab --limit-upload 2048         # cap upload at ~2 MiB/s (KiB/s); --clear-limit-upload lifts it
 baaackaaab --pack-size 64              # restic target pack size in MiB, 4…128; --clear-pack-size resets
 baaackaaab --read-concurrency 4        # files restic reads concurrently, 1…64 (restic default 2); --clear-read-concurrency resets
+baaackaaab --rest-connections 2        # parallel REST-backend connections (restic default 5); --clear-rest-connections resets
 baaackaaab --repo-quota 50000000000    # server quota (bytes) for the pre-flight gauge; --clear-repo-quota
 ```
 
@@ -336,7 +366,7 @@ silent. Both problems need a MONITOR-side dead-man's switch, not another local
 notification.
 
 ```sh
-baaackaaab --set-heartbeat https://hc-ping.com/your-uuid   # or your own Gatus/Uptime-Kuma/healthchecks
+baaackaaab --set-heartbeat https://hc-ping.com/your-uuid   # or your own Gatus/Uptime-Kuma/healthchecks; --clear-heartbeat removes it
 baaackaaab --add-ntfy https://ntfy.sh/your-topic
 baaackaaab --add-webhook https://your-endpoint/hook
 baaackaaab --test-notify                                   # prove the path before you rely on it
@@ -437,6 +467,7 @@ location, the same discipline as the heartbeat/push payloads above. Treat
 other local tool/process that can read the support dir can read it (the
 Prometheus textfile is written with the directory's default permissions, since
 node_exporter itself needs to read it).
+
 ### Catch-up on boot/login
 
 The backup LaunchAgent also sets `RunAtLoad` and carries a `--catch-up` marker, so
@@ -454,6 +485,22 @@ mon/wed/fri → 3 days):
 
 **Existing installs get `RunAtLoad` + `--catch-up` on the next `--install-timer`** —
 the plist is regenerated on every install.
+
+### Scheduled restore drill
+
+A backup you have never restored from is a hope, not a backup. A second
+LaunchAgent runs a **monthly** drill: it restore-verifies a rotating sample (one
+Drive folder + one photo batch) into a temp directory — read-only against the
+store — records the outcome in the run history, and banners **only** on failure.
+The command center and `--doctor` show the last verified restore; `status.json`
+exports it as `last_drill`.
+
+```sh
+baaackaaab --install-drill-timer                       # monthly, day 1 at 03:00
+baaackaaab --install-drill-timer --day 15 --at 05:30   # day-of-month 1…28
+baaackaaab --uninstall-drill-timer
+baaackaaab --restore-drill                             # run one drill by hand (what the timer runs)
+```
 
 ### Rotating integrity check
 
