@@ -78,6 +78,9 @@ extension ConfigTUI {
 
         body.append("")
         body.append(divider("recent runs", cols))
+        // Summary line first: age of the newest successful backup, OVERDUE when it
+        // has slipped past 1.5× the installed schedule's cadence.
+        body.append(homeBackupLine(cols))
         // Drills and integrity checks live in the same history but are shown on
         // their own lines below, so keep the recent-runs list to actual backups.
         let runs = loadRecentRuns().filter { $0.isBackup }
@@ -174,6 +177,24 @@ extension ConfigTUI {
         return c
     }
 
+    /// The newest SUCCESSFUL backup record, cached once — the anchor for the
+    /// "last backup" overdue line. Dropped after a sync so a fresh run shows up.
+    func loadLastSuccessfulBackup() -> RunRecord? {
+        if let cached = lastSuccessfulBackupRecord { return cached }
+        let r = RunHistory.lastSuccessfulBackup()
+        lastSuccessfulBackupRecord = .some(r)
+        return r
+    }
+
+    /// The installed backup timer's intended interval, or nil when no timer is
+    /// installed (no cadence to be overdue against). Reads the plist once, cached.
+    func loadBackupInterval() -> TimeInterval? {
+        if backupIntervalLoaded { return backupIntervalValue }
+        backupIntervalValue = LaunchdTimer.installedSchedule()?.intendedInterval()
+        backupIntervalLoaded = true
+        return backupIntervalValue
+    }
+
     /// The "last verified restore" line: age since the newest recorded drill,
     /// styled like the other status lines — red on a failed drill, yellow when
     /// overdue, dim when fresh or never run. Derived from RunHistory, never
@@ -198,6 +219,20 @@ extension ConfigTUI {
         case .none:   return dim(fit("  " + text, cols))
         case .ok:     return dim(fit("  \u{2713} " + text, cols))
         case .failed: return red(fit("  \u{2717} " + text, cols))
+        }
+    }
+
+    /// The "last backup" line: age of the newest successful backup, turning into an
+    /// OVERDUE warning (yellow, like the drill-staleness line) when it has slipped
+    /// past 1.5× the installed schedule's cadence. With no timer installed there is
+    /// no cadence to violate, so it shows the age only. Pure logic in BackupDashboard.
+    func homeBackupLine(_ cols: Int) -> String {
+        let (level, text) = BackupDashboard.line(
+            lastSuccess: loadLastSuccessfulBackup(), interval: loadBackupInterval(), now: Date())
+        switch level {
+        case .none:    return dim(fit("  " + text, cols))
+        case .ok:      return dim(fit("  " + text, cols))
+        case .overdue: return yellow(fit("  \u{2717} " + text, cols))
         }
     }
 
@@ -307,6 +342,7 @@ extension ConfigTUI {
         emit("\u{1B}[?1049h\u{1B}[?25l")    // back into the alternate screen
         remotes = []; remoteQueried = false  // repos changed — drop the cached status
         recentRuns = nil                     // the run we just did appended a record
+        lastSuccessfulBackupRecord = nil     // and it may be the new newest success
         statusMsg = code == 0 ? "sync finished \u{2014} press r to refresh remote" : "sync failed (code \(code))"
     }
 

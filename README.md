@@ -120,6 +120,9 @@ logs restic's plain output. Explicit `--drive-folder` / `--photo-album` flags
 `baaackaaab` with no arguments in a terminal
 to open the **command center** — the set plus a remote dashboard, with keys to edit,
 sync now, refresh remote status, and check restic / server updates (`u`, contacts GitHub).
+It also surfaces backup health: a **last backup** line that turns **OVERDUE** once the
+newest successful backup is older than 1.5× the installed schedule's cadence (age only
+when no timer is installed), plus the last restore-drill and integrity-check lines.
 
 Because the Mac can only stage a fraction of the data set at once, Photos are
 exported and uploaded in byte-budgeted batches (each backed up, then deleted), so
