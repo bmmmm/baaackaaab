@@ -161,10 +161,12 @@ struct CLIArguments {
         "--list", "--configure", "--clear-limit-upload", "--clear-pack-size", "--clear-rest-connections", "--clear-repo-quota",
         "--list-destinations",
         "--disabled", "--snapshots", "--restore", "--test-restore", "--restore-drill", "--dry-run",
-        "--yes", "--no-verify", "--verify-repo", "--unlock", "--remove-all",
+        "--yes", "--no-verify", "--verify-repo", "--rotate-read-data", "--unlock", "--remove-all",
         "--install-timer", "--uninstall-timer", "--timer-status",
-        "--install-drill-timer", "--uninstall-drill-timer", "--doctor",
-        "--check-updates", "--center", "--help", "-h",
+        "--install-drill-timer", "--uninstall-drill-timer",
+        "--install-check-timer", "--uninstall-check-timer",
+        "--catch-up", "--defer-on-battery", "--no-defer-on-battery",
+        "--doctor", "--check-updates", "--center", "--help", "-h",
     ]
 
     /// Find the first token that is neither a known flag nor a consumed flag

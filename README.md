@@ -251,6 +251,31 @@ The timer runs `baaackaaab --run-tag scheduled`. It needs no Keychain prompt (th
 credential files are read directly); it needs a one-time Photos grant, which a
 stable signature then keeps alive across rebuilds.
 
+#### Rotating integrity check
+
+A second scheduled job re-hashes the *stored bytes* to catch on-disk bit-rot — the
+thing a restore drill (which only samples) cannot. Each run re-reads the next
+rotating **1/8** of the pack data with `restic check --read-data-subset`, so after
+eight runs every pack has been re-read once:
+
+```sh
+baaackaaab --install-check-timer --at 04:00              # daily rotating read-data check
+baaackaaab --install-check-timer --at 04:00 --days sun   # weekly, if daily is too much I/O
+baaackaaab --uninstall-check-timer
+baaackaaab --verify-repo --rotate-read-data              # run one slice by hand (what the timer runs)
+```
+
+It is read-only against the store, records each run in the history (with the slice
+position), and banners **only** on failure. The command center and `--doctor` show
+the last check and its slice (e.g. `integrity check 3/8 · 2d ago`). A plain
+`baaackaaab --verify-repo` (no `--rotate-read-data`) is unchanged — the manual
+structural check, with an optional one-off `--read-data-subset`.
+
+The restore drill and the integrity check are complementary: the **drill** proves a
+sample *decrypts and restores* end-to-end, the **check** proves *all bytes still
+hash correctly* over time. Both install/uninstall independently of the backup timer
+and of each other (`--timer-status` lists all three).
+
 ### Maintenance & diagnostics
 
 ```sh

@@ -85,17 +85,25 @@ if cli.has("--check") {
     exit(0)
 }
 
-// --read-data-subset only has meaning with --verify-repo; on its own it would be
-// silently ignored and the run would fall through to a backup. Fail loudly.
+// --read-data-subset / --rotate-read-data only have meaning with --verify-repo; on
+// their own they would be silently ignored and the run would fall through to a
+// backup. Fail loudly.
 if cli.value("--read-data-subset") != nil && !cli.has("--verify-repo") {
     Console.error("--read-data-subset only applies to --verify-repo — re-run as `baaackaaab --verify-repo --read-data-subset <n%|n/t|nM>`")
     exit(1)
 }
+if cli.has("--rotate-read-data") && !cli.has("--verify-repo") {
+    Console.error("--rotate-read-data only applies to --verify-repo — re-run as `baaackaaab --verify-repo --rotate-read-data` (this is what the integrity-check timer runs)")
+    exit(1)
+}
 
-// Repository integrity check (`restic check`), read-only. Optional
-// --read-data-subset re-reads a fraction of the pack data for bit-rot.
+// Repository integrity check (`restic check`), read-only. With --rotate-read-data
+// it advances a read-data slice (1/8 of the pack data per run) and records a
+// "check" history entry — the scheduled bit-rot detector. Otherwise it is the
+// manual structural check (plus an optional --read-data-subset), unchanged.
 if cli.has("--verify-repo") {
-    verifyRepoCommand()
+    if cli.has("--rotate-read-data") { rotatingCheckCommand() }
+    else { verifyRepoCommand() }
     exit(0)
 }
 
@@ -227,6 +235,19 @@ if cli.has("--install-drill-timer") {
 }
 if cli.has("--uninstall-drill-timer") {
     do { try LaunchdTimer.uninstallDrill(); exit(0) }
+    catch { Console.error("\(error)"); exit(1) }
+}
+
+// Rotating integrity-check launchd timer. Installs/removes a per-user LaunchAgent
+// that runs `baaackaaab --verify-repo --rotate-read-data` on a daily/weekly
+// schedule (--at / --days). Separate label + plist, independent of the backup and
+// drill timers.
+if cli.has("--install-check-timer") {
+    do { try LaunchdTimer.installCheck(schedule: cli.schedule()); exit(0) }
+    catch { Console.error("\(error)"); exit(1) }
+}
+if cli.has("--uninstall-check-timer") {
+    do { try LaunchdTimer.uninstallCheck(); exit(0) }
     catch { Console.error("\(error)"); exit(1) }
 }
 

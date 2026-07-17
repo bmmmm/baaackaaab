@@ -74,6 +74,11 @@ final class ConfigTUI {
     // recent daily backups), so cached separately and only computed once.
     var lastDrillRecord: RunRecord??
 
+    // The newest integrity-check record, for the "last integrity check" line. Same
+    // double-optional caching as lastDrillRecord (nil = not loaded, .some(nil) =
+    // loaded, none on record) — a rotating check may sit far behind recent backups.
+    var lastCheckRecord: RunRecord??
+
     // Local-time stamp for run rows: the record stores an absolute Date, shown in
     // the operator's timezone (unlike the remote's already-formatted ISO string).
     let runStampFmt: DateFormatter = {

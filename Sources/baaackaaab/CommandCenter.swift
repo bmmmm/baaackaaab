@@ -88,8 +88,9 @@ extension ConfigTUI {
         }
 
         body.append("")
-        body.append(divider("restore drill", cols))
+        body.append(divider("verification", cols))
         body.append(homeDrillLine(cols))
+        body.append(homeCheckLine(cols))
 
         body.append("")
         body.append(divider("updates", cols))
@@ -165,6 +166,14 @@ extension ConfigTUI {
         return d
     }
 
+    /// The newest integrity-check record, cached once (see `lastCheckRecord`).
+    func loadLastCheck() -> RunRecord? {
+        if let cached = lastCheckRecord { return cached }
+        let c = RunHistory.lastCheck()
+        lastCheckRecord = .some(c)
+        return c
+    }
+
     /// The "last verified restore" line: age since the newest recorded drill,
     /// styled like the other status lines — red on a failed drill, yellow when
     /// overdue, dim when fresh or never run. Derived from RunHistory, never
@@ -175,6 +184,19 @@ extension ConfigTUI {
         case .none:   return dim(fit("  " + text, cols))
         case .ok:     return dim(fit("  \u{2713} " + text, cols))
         case .stale:  return yellow(fit("  \u{2717} " + text, cols))
+        case .failed: return red(fit("  \u{2717} " + text, cols))
+        }
+    }
+
+    /// The "last integrity check" line: age + rotating slice position (e.g.
+    /// "integrity check 3/8 · 2d ago"), styled dim when passing, red on a failed
+    /// check. Age display only — the slice position shows coverage progress, so no
+    /// overdue judgment. Derived from RunHistory via the pure `CheckDashboard`.
+    func homeCheckLine(_ cols: Int) -> String {
+        let (level, text) = CheckDashboard.line(lastCheck: loadLastCheck(), now: Date())
+        switch level {
+        case .none:   return dim(fit("  " + text, cols))
+        case .ok:     return dim(fit("  \u{2713} " + text, cols))
         case .failed: return red(fit("  \u{2717} " + text, cols))
         }
     }

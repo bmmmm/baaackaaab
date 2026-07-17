@@ -61,6 +61,9 @@ enum LaunchdTimer {
     /// The MONTHLY restore-drill LaunchAgent — a separate label + plist from the
     /// backup timer, so the two schedules install/uninstall independently.
     static let drillLabel = "io.baaackaaab.drill"
+    /// The rotating integrity-check LaunchAgent — again its own label + plist, so
+    /// the check schedule is independent of the backup and drill schedules.
+    static let checkLabel = "io.baaackaaab.check"
 
     private static var home: URL { FileManager.default.homeDirectoryForCurrentUser }
     private static func plistURL(for label: String) -> URL {
@@ -128,6 +131,31 @@ enum LaunchdTimer {
         Console.note("verify:  launchctl print \(domain)/\(drillLabel)\nlogs:    tail -f \(logURL.path)\nremove:  baaackaaab --uninstall-drill-timer")
     }
 
+    /// Install (or rewrite) the rotating integrity-check LaunchAgent. It runs
+    /// `baaackaaab --verify-repo --rotate-read-data`, which advances a read-data
+    /// slice (1/8 of the pack data per run), re-hashes it with `restic check`,
+    /// records the outcome, and banners only on a FAILED check. Reads its
+    /// destinations from the store, so it needs no --config — the check exercises
+    /// the repos, not the backup set. `schedule` is daily/weekly like the backup
+    /// timer (`--at` / `--days`), so the operator picks the re-read cadence.
+    static func installCheck(schedule: Schedule) throws {
+        Console.banner("baaackaaab", tagline: "scheduled integrity check")
+
+        let exe = executablePath()
+        let plist = try writeAndLoad(label: checkLabel, program: [exe, "--verify-repo", "--rotate-read-data"], schedule: schedule)
+
+        Console.section("LaunchAgent", detail: plist.path)
+        Console.info([
+            ("binary", exe),
+            ("schedule", "\(schedule.describe()) (runs at next wake if asleep)"),
+            ("action", "verify-repo --rotate-read-data (read-only; re-reads 1/8 of pack data per run)"),
+            ("log", logURL.path),
+        ])
+        Console.success("integrity-check timer installed and loaded")
+        Console.note("Each run re-reads one rotating eighth of the pack data with `restic check`; after 8 runs every pack has been re-hashed once — the on-disk bit-rot detector the restore drill cannot be. Read-only against the store, banners only on failure.")
+        Console.note("verify:  launchctl print \(domain)/\(checkLabel)\nlogs:    tail -f \(logURL.path)\nremove:  baaackaaab --uninstall-check-timer")
+    }
+
     /// Write the plist for `label` and (re)load it via launchctl. Shared by the
     /// backup and restore-drill installers. Returns the plist path for the caller
     /// to report. Reloads cleanly: bootout any prior instance (ignore "not
@@ -162,6 +190,12 @@ enum LaunchdTimer {
         try uninstall(label: drillLabel, humanName: "restore-drill timer")
     }
 
+    /// Unload the integrity-check job and delete its plist. Idempotent.
+    static func uninstallCheck() throws {
+        Console.banner("baaackaaab", tagline: "scheduled integrity check")
+        try uninstall(label: checkLabel, humanName: "integrity-check timer")
+    }
+
     private static func uninstall(label: String, humanName: String) throws {
         _ = launchctl(["bootout", "\(domain)/\(label)"])
         let plist = plistURL(for: label)
@@ -184,6 +218,16 @@ enum LaunchdTimer {
         Console.info([("plist", "present"), ("log", logURL.path)])
         Console.step("launchctl print \(domain)/\(label):")
         _ = launchctl(["print", "\(domain)/\(label)"])   // inherits stdout, shows live state
+
+        // The companion schedules (restore drill, integrity check) install/uninstall
+        // independently, so surface their presence here too — one place answers
+        // "what is scheduled".
+        Console.section("Companion timers")
+        for (human, st) in [("restore-drill timer", drillState()), ("integrity-check timer", checkState())] {
+            if st.installed && st.loaded { Console.success("\(human): installed and loaded") }
+            else if st.installed { Console.warn("\(human): installed but not loaded — re-run its --install-*-timer to (re)load it") }
+            else { Console.note("\(human): not installed") }
+        }
     }
 
     /// Whether the backup timer plist is on disk and whether launchd has it loaded,
@@ -192,6 +236,9 @@ enum LaunchdTimer {
 
     /// Same probe for the restore-drill timer.
     static func drillState() -> (installed: Bool, loaded: Bool) { stateOf(label: drillLabel) }
+
+    /// Same probe for the integrity-check timer.
+    static func checkState() -> (installed: Bool, loaded: Bool) { stateOf(label: checkLabel) }
 
     private static func stateOf(label: String) -> (installed: Bool, loaded: Bool) {
         let plist = plistURL(for: label)
