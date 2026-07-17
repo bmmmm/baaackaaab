@@ -371,6 +371,18 @@ runFmt.dateFormat = "yyyyMMdd-HHmmss"
 let runTag = cli.value("--run-tag") ?? "run-\(runFmt.string(from: Date()))"
 let runStart = Date()
 
+// Single-instance guard: only a REAL backup (bare run, the scheduled timer, or
+// the TUI's "sync now" child) takes the lock — a dry run is a read-only
+// preview and stays unguarded. Two overlapping real backups would race the
+// shared staging tree and duplicate acquisition work, so a second run backs
+// off immediately instead of running alongside the first.
+if !backupDryRun {
+    if case .busy = SingleInstanceLock.acquire() {
+        Console.note("another baaackaaab run is in progress — skipping this run")
+        exit(0)
+    }
+}
+
 // Hand off to the extracted orchestrator: it runs init, quota, Drive, Photos,
 // manifest, summary, run-history and exit codes, then exits the process.
 BackupRun(
