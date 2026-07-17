@@ -151,6 +151,7 @@ notification.
 ```sh
 baaackaaab --set-heartbeat https://hc-ping.com/your-uuid   # or your own Gatus/Uptime-Kuma/healthchecks; --clear-heartbeat removes it
 baaackaaab --add-ntfy https://ntfy.sh/your-topic
+baaackaaab --add-gotify https://gotify.example.com         # prompts for the app token (input hidden) — no need to hand-build the URL
 baaackaaab --add-webhook https://your-endpoint/hook
 baaackaaab --test-notify                                   # prove the path before you rely on it
 ```
@@ -165,19 +166,25 @@ that stopped happening entirely, which a local banner structurally cannot do
 backup set, so the unattended timer pings it too — that scheduled run is the
 whole point.
 
-**Push channels.** `--add-ntfy` / `--add-webhook` additionally deliver the run
-outcome away from the Mac: ntfy gets a plain-text push (the same summary the
-banner shows, with a `Title:` header and high priority on failure); a webhook
-gets a JSON POST — `{ event, outcome, started, finished, verified, total,
-destinations: [{name, ok}], message }`. Both are repeatable (`--remove-notify
+**Push channels.** `--add-ntfy` / `--add-gotify` / `--add-webhook` additionally
+deliver the run outcome away from the Mac: ntfy gets a plain-text push (the same
+summary the banner shows, with a `Title:` header and high priority on failure);
+Gotify gets a JSON push (`{title, message, priority}`, priority 8 on failure so
+it interrupts, 4 on success); a webhook gets a JSON POST — `{ event, outcome,
+started, finished, verified, total, destinations: [{name, ok}], message }`.
+Gotify's per-app token is a secret, so `--add-gotify` takes just the **server
+URL** and prompts for the token silently (it never touches argv or shell
+history), then assembles the `/message?token=…` endpoint for you — pass the full
+URL yourself only for non-interactive setup. All are repeatable (`--remove-notify
 <url>` drops one by URL) and fire on every terminal outcome, not just failures
 — a heartbeat "success" ping is what resets the monitor's clock.
 
 **Privacy note.** These payloads carry status only — counts, an outcome word, a
 human summary — never a repo URL, a file path, or a credential-file location
 (`destinations` carries only `{name, ok}`, no error text). The heartbeat/ntfy/
-webhook URLs themselves may embed a bearer token (an ntfy topic, a Healthchecks
-UUID, a webhook path secret); `--list` and every log line redact them the same
+gotify/webhook URLs themselves may embed a bearer token (an ntfy topic, a
+Healthchecks UUID, a Gotify app token, a webhook path secret); `--list` and
+every log line redact them the same
 way a repo URL is redacted — `--list` shows only `scheme://host/***`. If you
 don't want any run metadata leaving your infrastructure at all, point these at
 a self-hosted monitor (Gatus, Uptime-Kuma, a self-hosted ntfy, your own webhook

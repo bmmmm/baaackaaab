@@ -24,6 +24,7 @@ struct NotifyChannel: Codable, Equatable {
     enum Kind: String, Codable, Equatable {
         case ntfy
         case webhook
+        case gotify
     }
     var type: Kind
     var url: String
@@ -99,6 +100,46 @@ enum OutboundNotifier {
         req.timeoutInterval = timeout
         req.setValue(title, forHTTPHeaderField: "Title")
         if priorityHigh { req.setValue("high", forHTTPHeaderField: "Priority") }
+        return req
+    }
+
+    // MARK: - gotify
+
+    /// The Gotify push body: `{title, message, priority}`. The app token is NOT
+    /// here — it rides in the URL's `?token=` the operator configured, matching
+    /// how ntfy/webhook carry their secret in the URL.
+    struct GotifyPayload: Codable, Equatable {
+        let title: String
+        let message: String
+        let priority: Int
+    }
+
+    /// Build the Gotify push endpoint from a server base URL + app token:
+    /// `<base>/message?token=<token>`. Accepts either the server root
+    /// (`https://gotify.example.com`) or a URL that already ends in `/message`,
+    /// and trims one trailing slash — so the common path is "paste the token",
+    /// not "hand-assemble the URL". The token is not percent-encoded: Gotify's
+    /// generated app tokens are drawn from a URL-safe alphabet ([A-Za-z0-9._-]).
+    static func gotifyEndpoint(base: String, token: String) -> String {
+        var b = base.trimmingCharacters(in: .whitespacesAndNewlines)
+        if b.hasSuffix("/") { b.removeLast() }
+        if !b.hasSuffix("/message") { b += "/message" }
+        return b + "?token=" + token.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// A Gotify push: JSON `{title, message, priority}` POSTed to the app's
+    /// `/message?token=…` endpoint. Priority follows Gotify's 0–10 scale — 8 on
+    /// failure so it interrupts the phone, 4 on success so it stays a quiet log
+    /// entry, matching ntfy's high/default split.
+    static func gotifyRequest(url: String, title: String, body: String, priorityHigh: Bool) -> URLRequest? {
+        guard isValidHTTPURL(url), let u = URL(string: url),
+              let data = try? JSONEncoder().encode(
+                GotifyPayload(title: title, message: body, priority: priorityHigh ? 8 : 4)) else { return nil }
+        var req = URLRequest(url: u)
+        req.httpMethod = "POST"
+        req.httpBody = data
+        req.timeoutInterval = timeout
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         return req
     }
 
@@ -229,6 +270,12 @@ enum OutboundNotifier {
                     continue
                 }
                 fireAndForget(req) { "ntfy delivery failed (\(redacted)): \($0.detail)" }
+            case .gotify:
+                guard let req = gotifyRequest(url: channel.url, title: title, body: message, priorityHigh: !ok) else {
+                    Console.note("gotify channel has a malformed URL, skipping: \(redacted)")
+                    continue
+                }
+                fireAndForget(req) { "gotify delivery failed (\(redacted)): \($0.detail)" }
             case .webhook:
                 let payload = WebhookPayload(
                     event: "backup_run", outcome: ok ? "success" : "failure",
@@ -262,7 +309,7 @@ enum OutboundNotifier {
 func testNotifyCommand(configPath: URL) {
     Console.banner("baaackaaab", tagline: "test notify")
     guard FileManager.default.fileExists(atPath: configPath.path) else {
-        Console.error("no backup set at \(configPath.path) — configure a channel first: --set-heartbeat <url>, --add-ntfy <url>, or --add-webhook <url>")
+        Console.error("no backup set at \(configPath.path) — configure a channel first: --set-heartbeat <url>, --add-ntfy <url>, --add-gotify <server-url>, or --add-webhook <url>")
         exit(1)
     }
     let set: BackupSet
@@ -272,7 +319,7 @@ func testNotifyCommand(configPath: URL) {
         exit(1)
     }
     guard set.heartbeatURL != nil || !set.notifyChannels.isEmpty else {
-        Console.error("no heartbeat or notify channel configured — add one first: --set-heartbeat <url>, --add-ntfy <url>, or --add-webhook <url>")
+        Console.error("no heartbeat or notify channel configured — add one first: --set-heartbeat <url>, --add-ntfy <url>, --add-gotify <server-url>, or --add-webhook <url>")
         exit(1)
     }
 
@@ -289,6 +336,7 @@ func testNotifyCommand(configPath: URL) {
         }
         failures += 1
         let hint = label == "ntfy" ? "check the topic URL is correct"
+                  : label == "gotify" ? "check the server URL and app token are correct"
                   : label == "webhook" ? "check the webhook URL is correct and reachable"
                   : "check the heartbeat URL is correct and reachable"
         Console.failure("\(label) (\(redacted)) — \(result.detail); \(hint)")
@@ -308,6 +356,9 @@ func testNotifyCommand(configPath: URL) {
         switch channel.type {
         case .ntfy:
             request = OutboundNotifier.ntfyRequest(
+                url: channel.url, title: "baaackaaab test notification", body: sampleMessage, priorityHigh: false)
+        case .gotify:
+            request = OutboundNotifier.gotifyRequest(
                 url: channel.url, title: "baaackaaab test notification", body: sampleMessage, priorityHigh: false)
         case .webhook:
             let payload = OutboundNotifier.WebhookPayload(

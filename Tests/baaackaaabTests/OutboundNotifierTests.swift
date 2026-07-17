@@ -89,6 +89,72 @@ final class OutboundNotifierTests: XCTestCase {
         XCTAssertNil(OutboundNotifier.ntfyRequest(url: "not a url", title: "t", body: "b", priorityHigh: false))
     }
 
+    // MARK: - gotify endpoint / request
+
+    // The friendly path: a bare server URL + token becomes /message?token=….
+    func testGotifyEndpointBuildsMessageURLFromServerRoot() {
+        XCTAssertEqual(
+            OutboundNotifier.gotifyEndpoint(base: "https://gotify.example.com", token: "AbC_123"),
+            "https://gotify.example.com/message?token=AbC_123")
+    }
+
+    // One trailing slash on the server root must not double up.
+    func testGotifyEndpointTrimsOneTrailingSlash() {
+        XCTAssertEqual(
+            OutboundNotifier.gotifyEndpoint(base: "https://gotify.example.com/", token: "tok"),
+            "https://gotify.example.com/message?token=tok")
+    }
+
+    // A URL already ending in /message keeps a single /message (idempotent).
+    func testGotifyEndpointDoesNotDoubleMessageSuffix() {
+        XCTAssertEqual(
+            OutboundNotifier.gotifyEndpoint(base: "https://gotify.example.com/message", token: "tok"),
+            "https://gotify.example.com/message?token=tok")
+    }
+
+    // Surrounding whitespace on a pasted token is stripped.
+    func testGotifyEndpointTrimsTokenWhitespace() {
+        XCTAssertEqual(
+            OutboundNotifier.gotifyEndpoint(base: "https://gotify.example.com", token: "  tok\n"),
+            "https://gotify.example.com/message?token=tok")
+    }
+
+    func testGotifyRequestIsJSONPOSTWithPriorityDefault() throws {
+        let req = OutboundNotifier.gotifyRequest(
+            url: "https://gotify.example.com/message?token=tok",
+            title: "baaackaaab backup succeeded", body: "3/3 verified", priorityHigh: false)
+        XCTAssertEqual(req?.httpMethod, "POST")
+        XCTAssertEqual(req?.value(forHTTPHeaderField: "Content-Type"), "application/json")
+        guard let body = req?.httpBody else { return XCTFail("missing body") }
+        let decoded = try JSONDecoder().decode(OutboundNotifier.GotifyPayload.self, from: body)
+        XCTAssertEqual(decoded, .init(title: "baaackaaab backup succeeded", message: "3/3 verified", priority: 4))
+    }
+
+    // Failure raises Gotify priority to 8 so the push interrupts the phone.
+    func testGotifyRequestUsesHighPriorityOnFailure() throws {
+        let req = OutboundNotifier.gotifyRequest(
+            url: "https://gotify.example.com/message?token=tok", title: "t", body: "b", priorityHigh: true)
+        let decoded = try JSONDecoder().decode(OutboundNotifier.GotifyPayload.self, from: req!.httpBody!)
+        XCTAssertEqual(decoded.priority, 8)
+    }
+
+    func testGotifyRequestNilForMalformedURL() {
+        XCTAssertNil(OutboundNotifier.gotifyRequest(url: "not a url", title: "t", body: "b", priorityHigh: false))
+    }
+
+    func testNotifyChannelGotifyKind() throws {
+        let json = #"{ "type": "gotify", "url": "https://gotify.example.com/message?token=tok" }"#
+        let channel = try JSONDecoder().decode(NotifyChannel.self, from: Data(json.utf8))
+        XCTAssertEqual(channel.type, .gotify)
+    }
+
+    // The token in the URL query is masked in --list / logs (host only kept).
+    func testGotifyURLIsRedactedForDisplay() {
+        XCTAssertEqual(
+            Credentials.redactMonitorURL("https://gotify.example.com/message?token=secret123"),
+            "https://gotify.example.com/***")
+    }
+
     // MARK: - webhook request / payload shape
 
     func testWebhookRequestIsJSONPOST() {

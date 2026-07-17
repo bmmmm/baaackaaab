@@ -25,7 +25,7 @@ dashboard; a launchd timer runs it unattended.
   over eight runs to catch bit-rot
   ([proven against a real flipped byte](docs/poc-bitrot-detection.md)).
 - **Monitoring that survives a dead Mac** — Healthchecks-style heartbeat,
-  ntfy/webhook pushes, `status.json` + a Prometheus textfile; a source-side
+  ntfy/gotify/webhook pushes, `status.json` + a Prometheus textfile; a source-side
   anomaly tripwire flags ransomware-shaped mass-rewrite churn
   ([demonstrated end-to-end](docs/poc-ransomware-detection.md), not just claimed).
 - **Multiple destinations & an emergency recovery kit** — independent repos
@@ -153,7 +153,7 @@ and check for restic / server updates.
   caveat, tuning knobs.
 - **[Health & monitoring](docs/health.md)** — scheduling & catch-up, the restore
   drill, the rotating integrity check, anomaly & large-file tripwires,
-  heartbeat/ntfy/webhook, `status.json` + Prometheus, `--doctor`, staying current.
+  heartbeat/ntfy/gotify/webhook, `status.json` + Prometheus, `--doctor`, staying current.
 - **[Recovery](docs/recovery.md)** — restoring, the emergency recovery kit,
   locks & store usage.
 - **[Development](docs/development.md)** — tests, the pre-push hook, source layout.

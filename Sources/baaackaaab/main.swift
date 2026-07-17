@@ -364,7 +364,7 @@ if cli.hasAny(["--list", "--add-folder", "--remove-folder", "--add-album", "--re
                "--repo-quota", "--clear-repo-quota",
                "--defer-on-battery", "--no-defer-on-battery",
                "--add-exclude", "--remove-exclude", "--add-exclude-file", "--remove-exclude-file",
-               "--set-heartbeat", "--clear-heartbeat", "--add-ntfy", "--add-webhook", "--remove-notify",
+               "--set-heartbeat", "--clear-heartbeat", "--add-ntfy", "--add-gotify", "--add-webhook", "--remove-notify",
                "--set-prom-textfile", "--clear-prom-textfile",
                "--large-file-warn-mib", "--clear-large-file-warn-mib"]) {
     manageBackupSet(configPath: configPath)

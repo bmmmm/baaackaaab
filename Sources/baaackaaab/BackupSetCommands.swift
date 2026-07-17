@@ -236,6 +236,34 @@ func manageBackupSet(configPath: URL) {
         if set.addNotifyChannel(type: .ntfy, url: raw) { changed = true; Console.success("added ntfy channel  \(Credentials.redactMonitorURL(raw))") }
         else { Console.note("ntfy channel already configured: \(Credentials.redactMonitorURL(raw))") }
     }
+    // Gotify: a self-hosted push server. Unlike ntfy/webhook, the secret is a
+    // per-app token — so the friendly path takes just the SERVER URL and prompts
+    // for the token silently (never in argv/shell history), then assembles the
+    // `<server>/message?token=…` endpoint. A URL that already carries `?token=`
+    // is accepted as-is (power user / non-interactive), so scripts still work.
+    if let base = cli.value("--add-gotify") {
+        guard OutboundNotifier.isValidHTTPURL(base) else {
+            Console.error("--add-gotify needs your Gotify server URL — got '\(base)' (e.g. https://gotify.example.com)")
+            exit(1)
+        }
+        let full: String
+        if let comps = URLComponents(string: base), comps.queryItems?.contains(where: { $0.name == "token" }) == true {
+            full = base   // already a complete /message?token=… URL
+        } else {
+            guard let token = promptSecret("Gotify app token (input hidden, paste it): "),
+                  !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                Console.error("no token entered — in Gotify create an Application (Apps → Create Application) and paste its token. Non-interactive? Pass the full URL instead: --add-gotify 'https://gotify.example.com/message?token=…'")
+                exit(1)
+            }
+            full = OutboundNotifier.gotifyEndpoint(base: base, token: token)
+        }
+        guard OutboundNotifier.isValidHTTPURL(full) else {
+            Console.error("--add-gotify produced an invalid endpoint URL — check the server URL")
+            exit(1)
+        }
+        if set.addNotifyChannel(type: .gotify, url: full) { changed = true; Console.success("added gotify channel  \(Credentials.redactMonitorURL(full))") }
+        else { Console.note("gotify channel already configured: \(Credentials.redactMonitorURL(full))") }
+    }
     if let raw = cli.value("--add-webhook") {
         guard OutboundNotifier.isValidHTTPURL(raw) else {
             Console.error("--add-webhook needs an http(s) URL — got '\(raw)'")

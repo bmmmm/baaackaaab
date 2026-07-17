@@ -47,6 +47,28 @@ func ttyRestoreSignalHandler(_ signo: Int32) {
 nonisolated(unsafe) var winchPending: sig_atomic_t = 0
 func winchSignalHandler(_ signo: Int32) { winchPending = 1 }
 
+/// Read a secret (an API/app token) from the TTY WITHOUT echoing it, so it
+/// never lands in the terminal scrollback — the counterpart to passing it as a
+/// CLI argument, which would leak it into shell history and `ps`. The prompt
+/// goes to stderr so stdout stays clean for piping. Returns nil when stdin is
+/// not a TTY (unattended / piped), letting the caller fall back to an explicit
+/// error instead of blocking forever on a read that can never be answered.
+func promptSecret(_ prompt: String) -> String? {
+    guard isatty(STDIN_FILENO) != 0 else { return nil }
+    FileHandle.standardError.write(Data(prompt.utf8))
+    var original = termios()
+    guard tcgetattr(STDIN_FILENO, &original) == 0 else { return nil }
+    var noecho = original
+    noecho.c_lflag &= ~tcflag_t(ECHO)
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &noecho)
+    defer {
+        var o = original
+        tcsetattr(STDIN_FILENO, TCSAFLUSH, &o)
+        FileHandle.standardError.write(Data("\n".utf8))   // the Enter the user pressed wasn't echoed
+    }
+    return readLine(strippingNewline: true)
+}
+
 /// RAII wrapper around the terminal's raw mode. cfmakeraw() turns off echo,
 /// canonical line buffering, signal generation (so Ctrl-C arrives as a byte we
 /// handle) and output post-processing — we position the cursor absolutely, so

@@ -155,7 +155,7 @@ struct CLIArguments {
         "--read-data-subset", "--at", "--days", "--day", "--repo-quota-bytes",
         "--quota-warn-fraction", "--materialize-test", "--evict-test",
         "--history", "--read-concurrency",
-        "--set-heartbeat", "--add-ntfy", "--add-webhook", "--remove-notify",
+        "--set-heartbeat", "--add-ntfy", "--add-gotify", "--add-webhook", "--remove-notify",
         "--set-prom-textfile",
         "--large-file-warn-mib", "--export-recovery-kit", "--export-recovery-kit-plain",
     ]

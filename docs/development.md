@@ -86,5 +86,5 @@ git push --no-verify
 | `UpdateCheck.swift` | restic + REST-server version checks (offline baseline / online latest) |
 | `AppendOnlyProbe.swift` | `--doctor`'s active append-only enforcement DELETE probe |
 | `Notifier.swift` | the local macOS banner (osascript), failure-only |
-| `OutboundNotifier.swift` | outbound heartbeat + ntfy/webhook push, best-effort, every terminal outcome |
+| `OutboundNotifier.swift` | outbound heartbeat + ntfy/gotify/webhook push, best-effort, every terminal outcome |
 | `StatusExport.swift` | status.json (stable contract) + the Prometheus node_exporter textfile |
