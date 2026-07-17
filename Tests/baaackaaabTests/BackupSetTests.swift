@@ -99,6 +99,19 @@ final class BackupSetTests: XCTestCase {
         XCTAssertTrue(try saved(BackupSet(driveFolders: ["~/x"], deferOnBattery: true)).contains("defer_on_battery"))
     }
 
+    // large_file_warn_mib mirrors pack_size_mib/rest_connections in shape, but
+    // unlike them its ABSENCE means "use the default" (4 GiB), not "off" — the
+    // effective-threshold tests in LargeFileWarningTests pin that distinction.
+    func testDecodeLargeFileWarnMiB() throws {
+        let set = try decode(#"{ "large_file_warn_mib": 8192 }"#)
+        XCTAssertEqual(set.largeFileWarnMiB, 8192)
+    }
+
+    func testDecodeLargeFileWarnMiBExplicitZero() throws {
+        let set = try decode(#"{ "large_file_warn_mib": 0 }"#)
+        XCTAssertEqual(set.largeFileWarnMiB, 0)
+    }
+
     // MARK: - Round-trip through disk
 
     func testSaveLoadRoundTrip() throws {
@@ -108,7 +121,8 @@ final class BackupSetTests: XCTestCase {
         let original = BackupSet(driveFolders: ["~/a", "~/b"], photoAlbums: ["Album"],
                                  quotaBytes: 42, limitUploadKiBps: 512, packSizeMiB: 64,
                                  restConnections: 2, readConcurrency: 4,
-                                 excludes: ["*.tmp"], excludeFiles: ["~/ex.txt"])
+                                 excludes: ["*.tmp"], excludeFiles: ["~/ex.txt"],
+                                 largeFileWarnMiB: 8192)
         try original.save(to: url)
         XCTAssertEqual(try BackupSet.load(from: url), original)
     }
@@ -124,6 +138,7 @@ final class BackupSetTests: XCTestCase {
         XCTAssertFalse(text.contains("pack_size_mib"))
         XCTAssertFalse(text.contains("rest_connections"))
         XCTAssertFalse(text.contains("read_concurrency"))
+        XCTAssertFalse(text.contains("large_file_warn_mib"))
         XCTAssertFalse(text.contains("\\/"))                // slashes not escaped
         XCTAssertTrue(text.hasSuffix("\n"))                 // trailing newline
     }

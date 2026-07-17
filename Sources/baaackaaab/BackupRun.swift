@@ -18,6 +18,10 @@ struct BackupRun {
     let configReadConcurrency: Int?
     let configExcludes: [String]
     let configExcludeFiles: [String]
+    /// Warn-only large-file threshold (MiB; 0 disables), already resolved
+    /// against the persisted default by main.swift. Never excludes anything or
+    /// changes the run outcome — see `LargeFileWarning`.
+    let configLargeFileWarnMiB: Int
     let repoQuotaBytes: Int?
     let quotaWarnFraction: Double
     let driveFolders: [String]
@@ -247,6 +251,22 @@ struct BackupRun {
             // progress bar, off a TTY it yields one concise tally line per backup.
             // A dry run (file-list preview) keeps restic's plain output.
             let showProgress = isatty(STDOUT_FILENO) != 0 && !backupDryRun
+
+            // Warn-only large-file notice: print one Console.warn per newly-staged
+            // item over the configured threshold. `items` is the SLICE added since
+            // the last call (drive: one folder; photos: one batch), so each source
+            // reports independently. Never excludes anything and never changes the
+            // run outcome — purely informational.
+            func warnLargeFiles(_ items: ArraySlice<AcquiredItem>) {
+                let large = LargeFileWarning.filter(
+                    items.map { (path: $0.stagedPath, bytes: $0.byteCount) },
+                    thresholdMiB: configLargeFileWarnMiB)
+                for item in large {
+                    let size = ByteCountFormatter.string(fromByteCount: Int64(item.bytes), countStyle: .file)
+                    Console.warn("\(item.path) (\(size)) exceeds the large-file threshold — it will be baked permanently into the append-only store; add an exclude if unwanted")
+                }
+            }
+
             func backupToAll(paths: [URL], tags: [String], label: String) throws {
                 for run in ready {
                     if BackupCancellation.shared.isCancelled { throw RunCancelled() }
@@ -334,6 +354,7 @@ struct BackupRun {
                             }
                             continue
                         }
+                        let beforeCount = staging.items.count
                         do {
                             try DriveAcquirer().materializeAndVerify(folder: url, into: staging)
                         } catch {
@@ -341,6 +362,7 @@ struct BackupRun {
                             Console.failure("drive folder skipped: \(url.path) — \(error)")
                             continue
                         }
+                        warnLargeFiles(staging.items[beforeCount...])
                         try backupToAll(paths: [url], tags: [runTag, "drive"], label: url.lastPathComponent)
 
                         // Re-eviction guard: materialize proved real bytes before
@@ -383,6 +405,7 @@ struct BackupRun {
                     for album in photoAlbums {
                         Console.section("iCloud Photos", detail: "album '\(album)' (batch budget \(photoBatchBytes) bytes)")
                         var lastIdx = -1
+                        var priorItemCount = staging.items.count
                         do {
                             try PhotosAcquirer().acquireBatched(
                                 albumTitle: album,
@@ -390,6 +413,11 @@ struct BackupRun {
                                 into: staging
                             ) { batchDir, idx in
                                 lastIdx = idx
+                                // acquireBatched already recorded this batch's items into
+                                // `staging` before invoking us, so the slice since the
+                                // last batch (or the album's start) is exactly this one.
+                                warnLargeFiles(staging.items[priorItemCount...])
+                                priorItemCount = staging.items.count
                                 // backupToAll only throws RunCancelled — a single
                                 // destination's plain failure does not abort the album's
                                 // remaining batches; the batch is still deleted, peak holds.

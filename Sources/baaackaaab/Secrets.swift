@@ -162,6 +162,24 @@ enum Credentials {
         return "\(scheme)://\(host)\(port)/***"
     }
 
+    /// Extract the CLEARTEXT endpoint (htpasswd) password embedded in a
+    /// `rest:https://user:PASS@host/…` URL's userinfo, for the recovery kit —
+    /// the one place this tool is deliberately allowed to surface it in plain
+    /// text. Mirrors `redact`'s masking boundary exactly (see
+    /// `userinfoDelimiter`) so the two can never disagree about what counts as
+    /// userinfo. Returns nil when there is no `user:pass` pair — no userinfo at
+    /// all (a local path, sftp/s3/b2 URL with no embedded credential) or a
+    /// token-as-username URL with no colon — so the caller can note "not
+    /// applicable" instead of a bogus empty password.
+    static func endpointPassword(from repoURL: String) -> String? {
+        guard let scheme = repoURL.range(of: "://") else { return nil }
+        let afterScheme = scheme.upperBound
+        guard let at = userinfoDelimiter(in: repoURL[afterScheme...]) else { return nil }
+        let userinfo = repoURL[afterScheme..<at]
+        guard let colon = userinfo.firstIndex(of: ":") else { return nil }
+        return String(userinfo[userinfo.index(after: colon)...])
+    }
+
     /// Compute the bcrypt `user:$2y$…` htpasswd line for the server. The
     /// cleartext password is fed to htpasswd over stdin (never argv); only the
     /// one-way hash is returned.

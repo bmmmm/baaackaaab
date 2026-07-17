@@ -16,6 +16,8 @@ func printUsage() {
         ("--init-credentials", "generate + store both secrets in 0600 files, print the server hash (refuses if files exist; --force overwrites + ORPHANS the repo)"),
         ("--migrate-credentials", "move existing Keychain secrets into 0600 files (one last Keychain prompt)"),
         ("--check", "verify the server is reachable, init the repo, then exit"),
+        ("--export-recovery-kit <path>", "write an OFFLINE recovery sheet (every destination's repo URL + password), AES-256 encrypted, then exit"),
+        ("--export-recovery-kit-plain <path>", "same, but UNENCRYPTED (extra-loud warning) — for when you'll encrypt it yourself"),
     ])
 
     Console.section("Sources")
@@ -50,6 +52,8 @@ func printUsage() {
         ("--no-defer-on-battery", "restore the default — scheduled runs proceed on battery too"),
         ("--repo-quota <bytes>", "persist the server quota for the pre-flight gauge (the timer warns too)"),
         ("--clear-repo-quota", "remove the persisted quota gauge"),
+        ("--large-file-warn-mib <n>", "persist a warn-only large-file threshold in MiB (default 4096; 0 disables)"),
+        ("--clear-large-file-warn-mib", "reset the large-file warning threshold to the default"),
         ("--set-heartbeat <url>", "persist a dead-man's-switch heartbeat URL, pinged at run start/success/fail"),
         ("--clear-heartbeat", "remove the heartbeat URL"),
         ("--add-ntfy <url>", "persist an ntfy topic URL to push the run outcome to (repeatable)"),
@@ -59,8 +63,9 @@ func printUsage() {
         ("--clear-prom-textfile", "stop writing the Prometheus textfile"),
         ("--config <path>", "backup-set file (default ~/.config/baaackaaab/backup-set.json)"),
     ])
-    Console.note("A bare `baaackaaab` (no source flags) backs up the set; the launchd timer runs exactly that. Any explicit --drive-folder/--photo-album REPLACES the whole set for that run (folders AND albums), it does not add to it. Add --dry-run to preview a backup (reports what would upload, writes nothing; Photos are skipped in a dry run). On a terminal a real backup shows a live progress bar (percent, bytes, ETA); piped or under the timer it logs restic's plain output.")
+    Console.note("A bare `baaackaaab` (no source flags) backs up the set; the launchd timer runs exactly that. Any explicit --drive-folder/--photo-album REPLACES the whole set for that run (folders AND albums), it does not add to it. Add --dry-run to preview a backup (reports what would upload, writes nothing; Photos are skipped in a dry run). On a terminal a real backup shows a live progress bar (percent, bytes, ETA); piped or under the timer it logs one concise tally line per backup (a dry run keeps restic's plain file-list output).")
     Console.note("Every backup already excludes macOS junk (.DS_Store, .Trashes, .Spotlight-V100, …) and CACHEDIR.TAG-tagged caches — important on an append-only store the Mac can never prune. --add-exclude / --add-exclude-file add your own patterns on top.")
+    Console.note("--large-file-warn-mib is WARN-ONLY: it never excludes anything or changes a run's outcome. Any acquired Drive/Photos file over the threshold prints a warning after acquisition so you can decide whether to --add-exclude it — once a file is snapshotted, the append-only store can never shed it.")
 
     Console.section("Monitoring & notifications", detail: "outbound heartbeat + push — a macOS banner is invisible when you're away")
     Console.info([
@@ -113,13 +118,14 @@ func printUsage() {
     ])
     Console.note("Three restore modes: full (--restore), subtree (--restore --include <folder>), single-file (--find <name> to locate, then --restore --include <path>). Restore never writes back into iCloud Drive or Photos — it lands in a fresh directory you then move things back from.")
 
-    Console.section("Maintenance (repo health; read-only except --unlock)")
+    Console.section("Maintenance & diagnostics (repo health; read-only except --unlock)")
     Console.info([
         ("--verify-repo", "run `restic check` per destination (structure; read-only), then exit"),
         ("--read-data-subset <s>", "with --verify-repo, also re-read this fraction of pack data (5%, 1/10, 10M)"),
         ("--rotate-read-data", "with --verify-repo, re-read the NEXT rotating 1/8 slice of pack data + record it (what the check timer runs); full coverage every 8 runs"),
         ("--unlock", "remove STALE locks for --destination — the only delete op (lock files only)"),
         ("--remove-all", "with --unlock, remove ALL locks (only when no backup is running)"),
+        ("--repo-usage", "what fills the permanent store: aggregated sizes from the latest snapshot, per destination"),
     ])
     Console.note("--verify-repo only READS the repo. A damaged repo is repaired SERVER-side (the Mac has no delete/prune right). --unlock is the single exception: it deletes lock files only (never snapshots/data), removes stale locks by default, and needs --destination + a confirm (or --yes).")
 

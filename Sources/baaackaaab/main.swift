@@ -79,6 +79,19 @@ if cli.has("--migrate-credentials") {
     catch { Console.error("\(error)"); exit(1) }
 }
 
+// Emergency recovery kit: an offline Markdown sheet with every destination's
+// repo URL + encryption password + plain-restic recovery steps, so the backup
+// is recoverable even if this Mac (and its 0600 credential files) is lost.
+// Encrypted by default; --export-recovery-kit-plain skips encryption.
+if cli.has("--export-recovery-kit") {
+    exportRecoveryKitCommand(plain: false)
+    exit(0)
+}
+if cli.has("--export-recovery-kit-plain") {
+    exportRecoveryKitCommand(plain: true)
+    exit(0)
+}
+
 // Connectivity + auth + repo-init check, then exit.
 if cli.has("--check") {
     checkRemote()
@@ -163,6 +176,13 @@ if cli.has("--ls") {
 // Compare two snapshots (read-only): what changed between them.
 if cli.has("--diff") {
     diffCommand()
+    exit(0)
+}
+
+// Read-only view of what fills the permanent store: aggregated file sizes from
+// the latest snapshot, per destination.
+if cli.has("--repo-usage") {
+    repoUsageCommand()
     exit(0)
 }
 
@@ -320,15 +340,17 @@ if cli.has("--limit-upload")
     || cli.has("--set-prom-textfile")
     || cli.has("--clear-prom-textfile")
     || cli.has("--defer-on-battery")
-    || cli.has("--no-defer-on-battery") {
+    || cli.has("--no-defer-on-battery")
+    || cli.has("--large-file-warn-mib")
+    || cli.has("--clear-large-file-warn-mib") {
     if !cli.values("--drive-folder").isEmpty || !cli.values("--photo-album").isEmpty {
-        Console.error("--limit-upload / --pack-size / --rest-connections / --read-concurrency / --repo-quota / --set-prom-textfile / --defer-on-battery (and their --clear-* / --no-* forms) change the backup set's PERSISTENT tuning; they are not per-run flags (a run reads them from the set — there is no ad-hoc form). Set them on their own first (e.g. `baaackaaab --pack-size 64`), then run the backup separately. Combined with --drive-folder/--photo-album they would silently edit the set and skip the backup.")
+        Console.error("--limit-upload / --pack-size / --rest-connections / --read-concurrency / --repo-quota / --set-prom-textfile / --defer-on-battery / --large-file-warn-mib (and their --clear-* / --no-* forms) change the backup set's PERSISTENT tuning; they are not per-run flags (a run reads them from the set — there is no ad-hoc form). Set them on their own first (e.g. `baaackaaab --pack-size 64`), then run the backup separately. Combined with --drive-folder/--photo-album they would silently edit the set and skip the backup.")
         exit(1)
     }
 }
 
 // Backup-set management (--list / --add-* / --remove-* / --limit-upload /
-// --pack-size / --rest-connections / --read-concurrency): edit the set and
+// --pack-size / --rest-connections / --read-concurrency / --large-file-warn-mib): edit the set and
 // exit. These are PERSISTENT knobs (like --add-folder), not per-run flags — a
 // backup reads them from the set, never argv.
 if cli.hasAny(["--list", "--add-folder", "--remove-folder", "--add-album", "--remove-album",
@@ -339,7 +361,8 @@ if cli.hasAny(["--list", "--add-folder", "--remove-folder", "--add-album", "--re
                "--defer-on-battery", "--no-defer-on-battery",
                "--add-exclude", "--remove-exclude", "--add-exclude-file", "--remove-exclude-file",
                "--set-heartbeat", "--clear-heartbeat", "--add-ntfy", "--add-webhook", "--remove-notify",
-               "--set-prom-textfile", "--clear-prom-textfile"]) {
+               "--set-prom-textfile", "--clear-prom-textfile",
+               "--large-file-warn-mib", "--clear-large-file-warn-mib"]) {
     manageBackupSet(configPath: configPath)
     exit(0)
 }
@@ -360,6 +383,7 @@ var configHeartbeatURL: String? = nil
 var configNotifyChannels: [NotifyChannel] = []
 var configPromTextfileDir: String? = nil
 var configDeferOnBattery = false
+var configLargeFileWarnMiB = BackupSet.defaultLargeFileWarnMiB
 if driveFolders.isEmpty && photoAlbums.isEmpty
     && FileManager.default.fileExists(atPath: configPath.path) {
     do {
@@ -377,6 +401,7 @@ if driveFolders.isEmpty && photoAlbums.isEmpty
         configNotifyChannels = set.notifyChannels
         configPromTextfileDir = set.promTextfileDir
         configDeferOnBattery = set.deferOnBattery
+        configLargeFileWarnMiB = set.largeFileWarnMiBEffective
     } catch {
         Console.error("backup set at \(configPath.path) is unreadable — fix or delete it: \(error)")
         exit(1)
@@ -487,6 +512,7 @@ BackupRun(
     configReadConcurrency: configReadConcurrency,
     configExcludes: configExcludes,
     configExcludeFiles: configExcludeFiles,
+    configLargeFileWarnMiB: configLargeFileWarnMiB,
     repoQuotaBytes: repoQuotaBytes,
     quotaWarnFraction: quotaWarnFraction,
     driveFolders: driveFolders,

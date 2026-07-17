@@ -412,4 +412,45 @@ final class ResticIntegrationTests: XCTestCase {
         XCTAssertNotNil(size, "raw-data size should be readable after a backup")
         XCTAssertGreaterThan(size ?? 0, 0)
     }
+
+    // MARK: - --repo-usage (lsDetailed + RepoUsage.aggregate against a real snapshot)
+
+    /// `lsDetailed` (the `restic ls -l --json` helper) plus the pure
+    /// `RepoUsage.aggregate` reproduce the exact `--repo-usage` command path
+    /// against a real snapshot. The temp source tree's absolute path depth is an
+    /// implementation detail we don't hard-code (unlike a production iCloud
+    /// path, $TMPDIR can be deeply nested), so the assertions are invariants
+    /// that hold regardless of depth: the top-level buckets account for every
+    /// byte, both levels are sorted descending, and the secondary table only
+    /// ever drills into the reported largest top bucket.
+    func testRepoUsageAggregatesRealSnapshot() throws {
+        let backend = makeBackend()
+        try backend.ensureInitialized()
+        let src = try makeSource("src", files: [
+            "alice/small.txt": "hi",                                  // 2 bytes
+            "bob/big.bin": String(repeating: "x", count: 10_000),      // 10,000 bytes
+        ])
+        try backend.backup(paths: [src], tags: ["t"], host: "testhost")
+
+        let entries = try backend.lsDetailed(snapshot: "latest")
+        let files = entries.filter { $0.type == "file" }
+        XCTAssertTrue(files.contains { $0.name == "small.txt" })
+        XCTAssertTrue(files.contains { $0.name == "big.bin" })
+        let totalFileBytes = files.reduce(0) { $0 + ($1.size ?? 0) }
+        XCTAssertGreaterThanOrEqual(totalFileBytes, 10_002)
+
+        let (top, secondaryOf, secondary) = RepoUsage.aggregate(entries: entries)
+        XCTAssertFalse(top.isEmpty)
+        XCTAssertEqual(top.reduce(0) { $0 + $1.bytes }, totalFileBytes,
+                       "every file byte must land in exactly one top-level bucket")
+        for i in 1..<top.count {
+            XCTAssertGreaterThanOrEqual(top[i - 1].bytes, top[i].bytes, "top buckets must sort descending")
+        }
+        if let secondaryOf {
+            XCTAssertTrue(top.contains { $0.path == secondaryOf }, "the drill-down must name an actual top bucket")
+            for i in 1..<secondary.count {
+                XCTAssertGreaterThanOrEqual(secondary[i - 1].bytes, secondary[i].bytes, "secondary buckets must sort descending")
+            }
+        }
+    }
 }

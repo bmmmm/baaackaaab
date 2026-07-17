@@ -47,10 +47,15 @@ func listBackupSet(_ set: BackupSet, path: URL, existed: Bool) {
     // backup would run against) — a set with only tuning knobs, excludes, or
     // monitoring configured must still print THOSE, not the "empty" hint. Gate
     // on whether there is anything to show at all, not on that narrower flag.
+    // (The always-shown large-file-warn default line is appended AFTER this
+    // gate for exactly that reason — it must not defeat the "empty" hint.)
     if pairs.isEmpty {
         Console.note("empty — add folders with --add-folder <dir>, albums with --add-album <name>")
         return
     }
+    let lfw = set.largeFileWarnMiBEffective
+    let lfwSuffix = set.largeFileWarnMiB == nil ? " (default)" : ""
+    pairs.append(("large-file-warn", lfw == 0 ? "disabled" : "\(lfw) MiB\(lfwSuffix)"))
     Console.info(pairs)
     Console.note("Plus always-on defaults: macOS junk (\(ResticBackend.junkExcludes.joined(separator: ", "))) and CACHEDIR.TAG-tagged caches are excluded on every backup.")
 }
@@ -253,6 +258,25 @@ func manageBackupSet(configPath: URL) {
     if cli.has("--clear-prom-textfile") {
         if set.clearPromTextfileDir() { changed = true; Console.success("Prometheus textfile dir cleared") }
         else { Console.note("no Prometheus textfile dir was set") }
+    }
+    // Large-file warning threshold: warn-only, never excludes anything itself.
+    // 0 is a valid, explicit "disabled" — distinct from an absent flag, which
+    // leaves the persisted value (nil = the 4 GiB default) untouched.
+    if let raw = cli.value("--large-file-warn-mib") {
+        guard let n = Int(raw), n >= 0 else {
+            Console.error("--large-file-warn-mib needs a non-negative integer (MiB) — got '\(raw)' (0 disables the warning)")
+            exit(1)
+        }
+        if set.largeFileWarnMiB != n {
+            set.largeFileWarnMiB = n; changed = true
+            Console.success(n == 0 ? "large-file warning disabled" : "large-file warning threshold set to \(n) MiB")
+        } else { Console.note("large-file warning threshold already \(n) MiB") }
+    }
+    if cli.has("--clear-large-file-warn-mib") {
+        if set.largeFileWarnMiB != nil {
+            set.largeFileWarnMiB = nil; changed = true
+            Console.success("large-file warning threshold reset to the default (\(BackupSet.defaultLargeFileWarnMiB) MiB)")
+        } else { Console.note("large-file warning threshold already at the default") }
     }
 
     if changed {

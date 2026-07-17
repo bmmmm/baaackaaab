@@ -65,6 +65,21 @@ struct BackupSet: Codable, Equatable {
     /// up) while the Mac is on battery. Default false (always back up). Encoded only
     /// when true, so an existing file that never set it stays byte-identical.
     var deferOnBattery: Bool
+    /// Warn-only large-file threshold in MiB, persisted so the timer applies it
+    /// too. nil means "use the default" (`defaultLargeFileWarnMiB`); 0 disables
+    /// the warning entirely — that must be set explicitly via
+    /// `--large-file-warn-mib 0`, it is never the unset-in-JSON meaning. Never
+    /// excludes or alters the run outcome — purely informational (see
+    /// `LargeFileWarning`).
+    var largeFileWarnMiB: Int?
+
+    /// The default large-file warning threshold: 4 GiB. Files at or under this
+    /// size never warn; nothing this tool does treats it as a hard limit.
+    static let defaultLargeFileWarnMiB = 4096
+
+    /// The threshold actually in effect: the persisted value, or the default
+    /// when unset. 0 (persisted or default) disables the warning.
+    var largeFileWarnMiBEffective: Int { largeFileWarnMiB ?? Self.defaultLargeFileWarnMiB }
 
     init(driveFolders: [String] = [], photoAlbums: [String] = [],
          quotaBytes: Int? = nil, limitUploadKiBps: Int? = nil,
@@ -72,7 +87,8 @@ struct BackupSet: Codable, Equatable {
          readConcurrency: Int? = nil,
          excludes: [String] = [], excludeFiles: [String] = [],
          heartbeatURL: String? = nil, notifyChannels: [NotifyChannel] = [],
-         promTextfileDir: String? = nil, deferOnBattery: Bool = false) {
+         promTextfileDir: String? = nil, deferOnBattery: Bool = false,
+         largeFileWarnMiB: Int? = nil) {
         self.driveFolders = driveFolders
         self.photoAlbums = photoAlbums
         self.quotaBytes = quotaBytes
@@ -86,6 +102,7 @@ struct BackupSet: Codable, Equatable {
         self.notifyChannels = notifyChannels
         self.promTextfileDir = promTextfileDir
         self.deferOnBattery = deferOnBattery
+        self.largeFileWarnMiB = largeFileWarnMiB
     }
 
     // Stable snake_case keys, written explicitly so the on-disk file stays
@@ -104,6 +121,7 @@ struct BackupSet: Codable, Equatable {
         case notifyChannels = "notify_channels"
         case promTextfileDir = "prom_textfile_dir"
         case deferOnBattery = "defer_on_battery"
+        case largeFileWarnMiB = "large_file_warn_mib"
     }
 
     // Tolerant decode: a hand-edited file may omit an array entirely (e.g. only
@@ -124,6 +142,7 @@ struct BackupSet: Codable, Equatable {
         notifyChannels = try c.decodeIfPresent([NotifyChannel].self, forKey: .notifyChannels) ?? []
         promTextfileDir = try c.decodeIfPresent(String.self, forKey: .promTextfileDir)
         deferOnBattery = try c.decodeIfPresent(Bool.self, forKey: .deferOnBattery) ?? false
+        largeFileWarnMiB = try c.decodeIfPresent(Int.self, forKey: .largeFileWarnMiB)
     }
 
     // Custom encode so `defer_on_battery` is written ONLY when true — an existing
@@ -145,6 +164,7 @@ struct BackupSet: Codable, Equatable {
         try c.encode(notifyChannels, forKey: .notifyChannels)
         try c.encodeIfPresent(promTextfileDir, forKey: .promTextfileDir)
         if deferOnBattery { try c.encode(true, forKey: .deferOnBattery) }
+        try c.encodeIfPresent(largeFileWarnMiB, forKey: .largeFileWarnMiB)
     }
 
     // A set with no sources contributes nothing to a run.

@@ -785,6 +785,29 @@ final class ResticBackend {
         return entries
     }
 
+    /// List every entry in `snapshot` via `restic ls -l --json`, for the
+    /// `--repo-usage` size aggregation. Distinct from `ls(snapshot:path:)` (the
+    /// restore-discovery browser) so a future change to either one's shape
+    /// doesn't have to worry about the other's callers, even though today they
+    /// parse the same node JSON. `-l` (long) is restic's flag for including
+    /// full file metadata in the listing; read-only like every other query here.
+    func lsDetailed(snapshot: String) throws -> [LsEntry] {
+        let out = try runCapturing(["ls", "-l", "--json", "--", snapshot], command: "ls", timeout: Self.probeTimeout)
+        var entries: [LsEntry] = []
+        for line in out.split(separator: "\n") {
+            guard let data = line.data(using: .utf8),
+                  let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  (o["struct_type"] as? String) == "node" || (o["message_type"] as? String) == "node"
+            else { continue }
+            entries.append(LsEntry(
+                name: (o["name"] as? String) ?? "",
+                path: (o["path"] as? String) ?? "",
+                type: (o["type"] as? String) ?? "",
+                size: (o["size"] as? NSNumber)?.intValue))
+        }
+        return entries
+    }
+
     /// One changed path from `restic diff`. `modifier` is restic's single-char
     /// code: `+` added, `-` removed, `M` content changed, `T` type changed,
     /// `U` metadata-only.

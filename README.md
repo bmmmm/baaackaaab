@@ -114,7 +114,8 @@ baaackaaab --dry-run       # preview what would upload; writes nothing
 ```
 
 On a terminal a real backup shows a live progress bar; piped or under the timer it
-logs restic's plain output. Explicit `--drive-folder` / `--photo-album` flags
+logs one concise tally line per backup (a dry run keeps restic's plain file-list
+output). Explicit `--drive-folder` / `--photo-album` flags
 **replace the whole set for that run** — folders *and* albums; a single
 `--photo-album Extra` backs up only that album, not the set plus one album. Run
 `baaackaaab` with no arguments in a terminal
@@ -159,6 +160,39 @@ baaackaaab --list-destinations
 
 A run backs up to every enabled destination, primary-first. The Mac stays read +
 append only toward all of them.
+
+### Emergency recovery kit
+
+The two secrets — the repo URL and the restic encryption password — live only in
+`0600` files on this Mac. If the Mac dies, so do they, and the append-only store
+becomes permanently undecryptable with them; the server never holds a copy of the
+encryption key. `--export-recovery-kit` writes a single offline Markdown sheet
+that fixes that: every destination's full repo URL, its restic encryption
+password, the endpoint (htpasswd) password (extracted from the URL where
+present), and terse plain-`restic` recovery steps that need nothing but stock
+restic on any machine — no baaackaaab, no Mac.
+
+```sh
+baaackaaab --export-recovery-kit ~/Desktop/baaackaaab-recovery.md.enc
+```
+
+The sheet is encrypted by default (`openssl enc -aes-256-cbc -pbkdf2 -iter 600000
+-salt`), with an interactive, non-echoed passphrase prompt (min 10 characters,
+never on argv or in the environment). Decrypt it on any machine with stock
+openssl:
+
+```sh
+openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -in baaackaaab-recovery.md.enc
+```
+
+`--export-recovery-kit-plain <path>` skips encryption for a printable sheet
+(extra-loud warning — treat the plaintext file itself as the master key). Either
+way, **get this file OFF the Mac immediately**: print it, put it in a password
+manager, or seal it on a USB stick — never a synced folder (that is exactly the
+compromised-source domain this backup exists to survive), never git. Both
+variants refuse to write into live iCloud Drive / Photos. A destination whose
+credential files are missing/unreadable at export time is noted as incomplete in
+the sheet rather than failing the whole export.
 
 ### Backends & the immutability caveat
 
@@ -266,6 +300,19 @@ This is deliberately **warn-only**: it never changes the run's exit code and nev
 touches eviction — a false positive costs a banner, never a backup. It stays silent
 until at least three baseline runs exist, so early runs don't false-alarm, and it
 persists nothing new (the baseline is derived from the existing run history each run).
+
+**Large-file warning.** Because anything snapshotted is permanent, a single huge
+file landing in the set unnoticed can quietly commit the store to it forever. Any
+acquired Drive or Photos file over a configurable threshold (default 4 GiB) prints
+a warning after acquisition — **warn-only**: it never excludes anything and never
+changes the run's outcome, it just gives you the chance to `--add-exclude` it on
+purpose.
+
+```sh
+baaackaaab --large-file-warn-mib 8192      # warn above 8 GiB instead of the 4 GiB default
+baaackaaab --large-file-warn-mib 0         # disable the warning
+baaackaaab --clear-large-file-warn-mib     # back to the 4 GiB default
+```
 
 ### Scheduling
 
@@ -455,6 +502,7 @@ baaackaaab --doctor          # restic, destinations, append-only, disk, Photos, 
 baaackaaab --verify-repo     # restic check per destination (read-only)
 baaackaaab --check-updates   # compare restic + the REST server against the latest releases
 baaackaaab --unlock --destination offsite   # remove STALE locks (the only delete op)
+baaackaaab --repo-usage                     # what fills the permanent store (per destination)
 ```
 
 `--doctor`'s "Append-only enforcement" section actively PROVES the core safety
@@ -467,6 +515,14 @@ considered or accepted the delete — a hard finding, since a rest-server starte
 without `--append-only` is otherwise indistinguishable from a correctly
 configured one. Non-`rest:` destinations can't be checked at this protocol
 level; see [Backends & the immutability caveat](#backends--the-immutability-caveat).
+
+`--repo-usage` aggregates the **latest** snapshot's file sizes per top-level path
+component (plus a drill-down one level deeper under the largest bucket) and prints
+a table sorted descending, with each bucket's share of the total. Sizes are
+**logical** (pre-dedup/compression), not the deduplicated repo size `--doctor`
+reports. Because the store is append-only, anything already snapshotted is
+permanent — this tells you what to `--add-exclude` to stop *future* growth; it
+cannot shrink what is already stored.
 
 ### Staying current
 
@@ -504,12 +560,14 @@ parsing/comparison and the server-endpoint extraction behind the update check, t
 append-only DELETE probe's status-code classification and rest:-URL/credential
 derivation, the launchd schedule round-trip, staging-path sanitizing, notification
 escaping, the heartbeat/ntfy/webhook request construction and monitor-URL
-redaction, and the on-disk destination and run-history stores. Store tests relocate
-to a throwaway directory via `BAAACKAAAB_SUPPORT_DIR`, so they never touch the real
-credential store. The live GitHub query, the HTTP header probe, the append-only
-DELETE probe, and the heartbeat/ntfy/webhook network sends touch the network, so
-they are not unit-tested — all degrade to nil/unreachable (or, for outbound
-monitoring, a logged no-op that never changes the run's exit code) by construction.
+redaction, the recovery-kit sheet composition and passphrase validation, the
+repo-usage size aggregation, the large-file warning threshold, and the on-disk
+destination and run-history stores. Store tests relocate to a throwaway directory
+via `BAAACKAAAB_SUPPORT_DIR`, so they never touch the real credential store. The
+live GitHub query, the HTTP header probe, the append-only DELETE probe, and the
+heartbeat/ntfy/webhook network sends touch the network, so they are not
+unit-tested — all degrade to nil/unreachable (or, for outbound monitoring, a
+logged no-op that never changes the run's exit code) by construction.
 
 A second layer of **live restic integration tests** (`ResticIntegrationTests`)
 drives the real `restic` binary against a throwaway *local* repository — no
@@ -518,8 +576,8 @@ exit-code mapping (repo absent / locked / wrong password), `--skip-if-unchanged`
 `--pack-size`, the **excludes** (macOS-junk defaults, `--exclude-caches`, and custom
 globs are all kept out of the snapshot), a full **backup → restore → verify
 roundtrip**, `find` / `ls` / `diff`, the exit-3 partial snapshot (an unreadable file
-still yields a valid snapshot of the rest), `check`, `unlock`, and snapshot/stats
-parsing. They are
+still yields a valid snapshot of the rest), `check`, `unlock`, snapshot/stats
+parsing, and the `--repo-usage` aggregation against a real snapshot. They are
 skipped automatically when `restic` isn't on `PATH`, so the suite still passes
 without it.
 
