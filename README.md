@@ -653,6 +653,11 @@ directly onto how baaackaaab drives it:
 - [Removing backup snapshots](https://restic.readthedocs.io/en/stable/060_forget.html) — `forget`/`prune`, which run **server-side only**; the Mac never holds this right.
 - [Scripting restic](https://restic.readthedocs.io/en/stable/075_scripting.html) — the typed exit codes (10 absent, 11 locked, 12 wrong password) baaackaaab keys its init/probe/check logic off.
 
+## Support
+
+If baaackaaab is useful to you, you can support its development on
+[ko-fi.com/bmabma](https://ko-fi.com/bmabma).
+
 ## License
 
 GPL-3.0. See [LICENSE](LICENSE).
