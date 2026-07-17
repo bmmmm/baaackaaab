@@ -26,6 +26,7 @@ struct BackupRun {
     let photoBatchBytes: Int
     let heartbeatURL: String?
     let notifyChannels: [NotifyChannel]
+    let promTextfileDir: String?
 
     func execute() {
         // Fire a macOS failure banner, but ONLY when our output is invisible (launchd or
@@ -68,10 +69,18 @@ struct BackupRun {
                 OutboundNotifier.fireHeartbeat(base: heartbeatURL, event: .start)
             }
             let runs = destinations.map { DestinationRun($0) }
+            // Set only when the quota pre-flight below actually samples the repo
+            // size — reused for status.json's `repo` block instead of a second
+            // network round-trip. nil (and the block simply omitted) when no
+            // --repo-quota is configured; `--status-export` probes it explicitly
+            // on demand instead.
+            var repoSizeBytesForStatus: Int64? = nil
 
             // Append one NDJSON history record, then exit. Built from the live `runs` so
             // every terminal path (no-destination, nothing-acquired, partial, success)
             // records the same shape. Best-effort: a failed write never blocks the exit.
+            // Also rebuilds status.json (+ the Prometheus textfile, if configured) from
+            // the history it just appended to — same best-effort contract, never blocks.
             func recordRun(exitCode: Int, verified: Int, total: Int, sourceFailures: Int) {
                 let dests = runs.map { r -> RunRecord.Dest in
                     let c = r.churn
@@ -87,6 +96,9 @@ struct BackupRun {
                                        exitCode: exitCode, verified: verified, total: total,
                                        sourceFailures: sourceFailures, destinations: dests)
                 try? RunHistory.append(record)
+                StatusExport.exportAfterRun(repoSizeBytes: repoSizeBytesForStatus,
+                                            quotaBytes: repoQuotaBytes.map(Int64.init),
+                                            promTextfileDir: promTextfileDir)
             }
 
             // Arm cancellation BEFORE the first restic child (the init probe): a Ctrl-C /
@@ -261,6 +273,7 @@ struct BackupRun {
             if let quota = repoQuotaBytes, quota > 0 {
                 Console.section("Quota")
                 if let used = ready[0].backend.repoSizeBytes() {
+                    repoSizeBytesForStatus = Int64(used)
                     let frac = Double(used) / Double(quota)
                     let pct = Int((frac * 100).rounded())
                     let usedGB = String(format: "%.2f", Double(used) / 1_000_000_000)
@@ -502,6 +515,8 @@ struct BackupRun {
             try? RunHistory.append(RunRecord(runTag: runTag, start: runStart, end: Date(),
                                              exitCode: 1, verified: 0, total: 0,
                                              sourceFailures: 0, destinations: []))
+            StatusExport.exportAfterRun(repoSizeBytes: nil, quotaBytes: repoQuotaBytes.map(Int64.init),
+                                        promTextfileDir: promTextfileDir)
             notifyOnFailure("\(error)")
             sendOutboundOutcome(ok: false, message: "\(error)", verified: 0, total: 0, destStatuses: [])
             exit(1)

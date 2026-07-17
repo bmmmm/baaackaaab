@@ -37,6 +37,9 @@ func listBackupSet(_ set: BackupSet, path: URL, existed: Bool) {
     for ch in set.notifyChannels {
         pairs.append(("notify", "\(ch.type.rawValue): \(Credentials.redactMonitorURL(ch.url))"))
     }
+    if let dir = set.promTextfileDir {
+        pairs.append(("prom-textfile", "\(dir)/baaackaaab.prom"))
+    }
     // `set.isEmpty` only means "no drive folders/photo albums" (the sources a
     // backup would run against) — a set with only tuning knobs, excludes, or
     // monitoring configured must still print THOSE, not the "empty" hint. Gate
@@ -225,6 +228,17 @@ func manageBackupSet(configPath: URL) {
     if let raw = cli.value("--remove-notify") {
         if set.removeNotifyChannel(url: raw) { changed = true; Console.success("removed notify channel  \(Credentials.redactMonitorURL(raw))") }
         else { Console.note("no notify channel matches that URL: \(Credentials.redactMonitorURL(raw))") }
+    }
+    // Prometheus textfile-collector directory: persisted so the timer keeps
+    // baaackaaab.prom current too. Existence isn't checked here — see
+    // BackupSet.setPromTextfileDir.
+    if let raw = cli.value("--set-prom-textfile") {
+        if set.setPromTextfileDir(raw) { changed = true; Console.success("Prometheus textfile dir set to  \(raw)") }
+        else { Console.note("Prometheus textfile dir already set to that value") }
+    }
+    if cli.has("--clear-prom-textfile") {
+        if set.clearPromTextfileDir() { changed = true; Console.success("Prometheus textfile dir cleared") }
+        else { Console.note("no Prometheus textfile dir was set") }
     }
 
     if changed {

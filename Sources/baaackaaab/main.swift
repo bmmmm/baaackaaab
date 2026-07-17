@@ -219,6 +219,14 @@ if cli.has("--test-notify") {
     exit(0)
 }
 
+// Rebuild status.json (and the Prometheus textfile, if configured) on demand
+// from RunHistory + the backup set, without waiting for the next scheduled run.
+// Read-only towards the repo (a bounded repo-size probe, like --doctor).
+if cli.has("--status-export") {
+    statusExportCommand(configPath: configPath)
+    exit(0)
+}
+
 // Scheduled-backup launchd timer. Installs/removes a per-user LaunchAgent that
 // runs `baaackaaab --run-tag scheduled` (non-bare, so it backs up the set under
 // launchd without a TTY). These touch the user's launchd, not the repo.
@@ -287,9 +295,11 @@ if cli.has("--limit-upload")
     || cli.has("--read-concurrency")
     || cli.has("--clear-read-concurrency")
     || cli.has("--repo-quota")
-    || cli.has("--clear-repo-quota") {
+    || cli.has("--clear-repo-quota")
+    || cli.has("--set-prom-textfile")
+    || cli.has("--clear-prom-textfile") {
     if !cli.values("--drive-folder").isEmpty || !cli.values("--photo-album").isEmpty {
-        Console.error("--limit-upload / --pack-size / --rest-connections / --read-concurrency / --repo-quota (and their --clear-* forms) change the backup set's PERSISTENT tuning; they are not per-run flags (a run reads them from the set — there is no ad-hoc form). Set them on their own first (e.g. `baaackaaab --pack-size 64`), then run the backup separately. Combined with --drive-folder/--photo-album they would silently edit the set and skip the backup.")
+        Console.error("--limit-upload / --pack-size / --rest-connections / --read-concurrency / --repo-quota / --set-prom-textfile (and their --clear-* forms) change the backup set's PERSISTENT tuning; they are not per-run flags (a run reads them from the set — there is no ad-hoc form). Set them on their own first (e.g. `baaackaaab --pack-size 64`), then run the backup separately. Combined with --drive-folder/--photo-album they would silently edit the set and skip the backup.")
         exit(1)
     }
 }
@@ -304,7 +314,8 @@ if cli.hasAny(["--list", "--add-folder", "--remove-folder", "--add-album", "--re
                "--read-concurrency", "--clear-read-concurrency",
                "--repo-quota", "--clear-repo-quota",
                "--add-exclude", "--remove-exclude", "--add-exclude-file", "--remove-exclude-file",
-               "--set-heartbeat", "--clear-heartbeat", "--add-ntfy", "--add-webhook", "--remove-notify"]) {
+               "--set-heartbeat", "--clear-heartbeat", "--add-ntfy", "--add-webhook", "--remove-notify",
+               "--set-prom-textfile", "--clear-prom-textfile"]) {
     manageBackupSet(configPath: configPath)
     exit(0)
 }
@@ -323,6 +334,7 @@ var configExcludes: [String] = []
 var configExcludeFiles: [String] = []
 var configHeartbeatURL: String? = nil
 var configNotifyChannels: [NotifyChannel] = []
+var configPromTextfileDir: String? = nil
 if driveFolders.isEmpty && photoAlbums.isEmpty
     && FileManager.default.fileExists(atPath: configPath.path) {
     do {
@@ -338,6 +350,7 @@ if driveFolders.isEmpty && photoAlbums.isEmpty
         configExcludeFiles = set.excludeFiles
         configHeartbeatURL = set.heartbeatURL
         configNotifyChannels = set.notifyChannels
+        configPromTextfileDir = set.promTextfileDir
     } catch {
         Console.error("backup set at \(configPath.path) is unreadable — fix or delete it: \(error)")
         exit(1)
@@ -432,5 +445,6 @@ BackupRun(
     stagingURL: stagingURL,
     photoBatchBytes: photoBatchBytes,
     heartbeatURL: configHeartbeatURL,
-    notifyChannels: configNotifyChannels
+    notifyChannels: configNotifyChannels,
+    promTextfileDir: configPromTextfileDir
 ).execute()

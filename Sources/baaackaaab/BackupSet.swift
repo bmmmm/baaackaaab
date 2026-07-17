@@ -57,13 +57,18 @@ struct BackupSet: Codable, Equatable {
     /// Push channels (ntfy / webhook) notified with the run outcome, on top of the
     /// local macOS banner. Persisted so the unattended timer pushes too.
     var notifyChannels: [NotifyChannel]
+    /// Optional directory for the node_exporter textfile-collector export
+    /// (`<dir>/baaackaaab.prom`), written alongside status.json after every real
+    /// run. Persisted so the unattended timer keeps it current too.
+    var promTextfileDir: String?
 
     init(driveFolders: [String] = [], photoAlbums: [String] = [],
          quotaBytes: Int? = nil, limitUploadKiBps: Int? = nil,
          packSizeMiB: Int? = nil, restConnections: Int? = nil,
          readConcurrency: Int? = nil,
          excludes: [String] = [], excludeFiles: [String] = [],
-         heartbeatURL: String? = nil, notifyChannels: [NotifyChannel] = []) {
+         heartbeatURL: String? = nil, notifyChannels: [NotifyChannel] = [],
+         promTextfileDir: String? = nil) {
         self.driveFolders = driveFolders
         self.photoAlbums = photoAlbums
         self.quotaBytes = quotaBytes
@@ -75,6 +80,7 @@ struct BackupSet: Codable, Equatable {
         self.excludeFiles = excludeFiles
         self.heartbeatURL = heartbeatURL
         self.notifyChannels = notifyChannels
+        self.promTextfileDir = promTextfileDir
     }
 
     // Stable snake_case keys, written explicitly so the on-disk file stays
@@ -91,6 +97,7 @@ struct BackupSet: Codable, Equatable {
         case excludeFiles = "exclude_files"
         case heartbeatURL = "heartbeat_url"
         case notifyChannels = "notify_channels"
+        case promTextfileDir = "prom_textfile_dir"
     }
 
     // Tolerant decode: a hand-edited file may omit an array entirely (e.g. only
@@ -109,6 +116,7 @@ struct BackupSet: Codable, Equatable {
         excludeFiles = try c.decodeIfPresent([String].self, forKey: .excludeFiles) ?? []
         heartbeatURL = try c.decodeIfPresent(String.self, forKey: .heartbeatURL)
         notifyChannels = try c.decodeIfPresent([NotifyChannel].self, forKey: .notifyChannels) ?? []
+        promTextfileDir = try c.decodeIfPresent(String.self, forKey: .promTextfileDir)
     }
 
     // A set with no sources contributes nothing to a run.
@@ -255,6 +263,23 @@ struct BackupSet: Codable, Equatable {
         let u = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let i = notifyChannels.firstIndex(where: { $0.url == u }) else { return false }
         notifyChannels.remove(at: i)
+        return true
+    }
+
+    /// Set (or replace) the Prometheus textfile-collector directory. Existence is
+    /// checked only at WRITE time (the directory may not exist yet, or may live on
+    /// a volume that isn't mounted at setup time) — a pure trim + compare here,
+    /// like every other mutation.
+    mutating func setPromTextfileDir(_ raw: String) -> Bool {
+        let d = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !d.isEmpty, promTextfileDir != d else { return false }
+        promTextfileDir = d
+        return true
+    }
+
+    mutating func clearPromTextfileDir() -> Bool {
+        guard promTextfileDir != nil else { return false }
+        promTextfileDir = nil
         return true
     }
 }
