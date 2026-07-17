@@ -68,4 +68,32 @@ final class RedactTests: XCTestCase {
         XCTAssertEqual(Credentials.redact("not-a-url"), "not-a-url")
         XCTAssertEqual(Credentials.redact(""), "")
     }
+
+    // MARK: - redactMonitorURL (heartbeat / ntfy / webhook URLs)
+
+    // Unlike a restic repo URL, a monitor URL's secret usually sits in the PATH
+    // (an ntfy topic name, a Healthchecks UUID) or the QUERY (a webhook token) —
+    // not a clearly-scoped userinfo. So this masks everything past the host.
+    func testRedactMonitorURLMasksPathAndQuery() {
+        XCTAssertEqual(
+            Credentials.redactMonitorURL("https://hc-ping.com/2c4d5e6f-uuid"),
+            "https://hc-ping.com/***")
+        XCTAssertEqual(
+            Credentials.redactMonitorURL("https://ntfy.sh/my-secret-topic-name"),
+            "https://ntfy.sh/***")
+        XCTAssertEqual(
+            Credentials.redactMonitorURL("https://gatus.example/api/v1/push?token=abc123"),
+            "https://gatus.example/***")
+    }
+
+    func testRedactMonitorURLKeepsSchemeHostAndPort() {
+        XCTAssertEqual(
+            Credentials.redactMonitorURL("http://localhost:8080/ping/uuid"),
+            "http://localhost:8080/***")
+    }
+
+    func testRedactMonitorURLUnchangedForNonURLString() {
+        XCTAssertEqual(Credentials.redactMonitorURL("not-a-url"), "not-a-url")
+        XCTAssertEqual(Credentials.redactMonitorURL(""), "")
+    }
 }

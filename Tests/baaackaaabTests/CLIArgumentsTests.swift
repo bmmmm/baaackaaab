@@ -142,6 +142,23 @@ final class CLIArgumentsTests: XCTestCase {
         XCTAssertTrue(CLIArguments(tokens: ["--clear-rest-connections"]).has("--clear-rest-connections"))
     }
 
+    // MARK: - Monitoring & notification flags
+
+    /// The heartbeat/notify flags mirror the exclude-glob shape: repeatable value
+    /// flags (--set-heartbeat, --add-ntfy, --add-webhook, --remove-notify) plus a
+    /// standalone clear flag and a standalone test flag.
+    func testMonitoringFlagsAreRecognizedAndParsed() {
+        XCTAssertNil(CLIArguments.unknownArgument(in: ["baaackaaab", "--set-heartbeat", "https://hc-ping.com/uuid"]))
+        XCTAssertNil(CLIArguments.unknownArgument(in: ["baaackaaab", "--clear-heartbeat"]))
+        XCTAssertNil(CLIArguments.unknownArgument(in: ["baaackaaab", "--add-ntfy", "https://ntfy.sh/topic"]))
+        XCTAssertNil(CLIArguments.unknownArgument(in: ["baaackaaab", "--add-webhook", "https://example.com/hook"]))
+        XCTAssertNil(CLIArguments.unknownArgument(in: ["baaackaaab", "--remove-notify", "https://ntfy.sh/topic"]))
+        XCTAssertNil(CLIArguments.unknownArgument(in: ["baaackaaab", "--test-notify"]))
+        XCTAssertEqual(CLIArguments(tokens: ["--set-heartbeat", "https://hc-ping.com/uuid"]).value("--set-heartbeat"),
+                       "https://hc-ping.com/uuid")
+        XCTAssertTrue(CLIArguments(tokens: ["--test-notify"]).has("--test-notify"))
+    }
+
     /// A flag value may legitimately start with '-' or look like a bare word — it
     /// is consumed by its flag, never checked. `--diff` consumes two.
     func testUnknownArgumentSkipsFlagValues() {
