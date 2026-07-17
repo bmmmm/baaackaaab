@@ -142,6 +142,9 @@ extension ConfigTUI {
         for src in r.sources {
             parts.append(src.source + " " + (src.latestTime.map(shortTime) ?? "\u{2014}"))
         }
+        if let oldest = r.oldestTime, let date = parseResticTime(oldest) {
+            parts.append("oldest " + relativeTime(from: date))
+        }
         return parts.joined(separator: "  \u{2022}  ")
     }
 
@@ -558,6 +561,17 @@ extension ConfigTUI {
     /// "2026-06-24T17:30:32.1+02:00" -> "2026-06-24 17:30".
     func shortTime(_ iso: String) -> String {
         String(iso.prefix(16)).replacingOccurrences(of: "T", with: " ")
+    }
+
+    /// Parse restic's ISO8601 time string down to whole-second precision — its
+    /// fractional seconds are variable-length (up to nanoseconds), which
+    /// `ISO8601DateFormatter` cannot parse directly; sub-second precision buys
+    /// nothing for a relative-age display anyway. nil on anything unparseable.
+    func parseResticTime(_ iso: String) -> Date? {
+        guard iso.count >= 19 else { return nil }
+        let secondsPart = iso.prefix(19)   // "yyyy-MM-ddTHH:mm:ss"
+        let offset = iso.dropFirst(19).drop { $0 == "." || $0.isNumber }
+        return ISO8601DateFormatter().date(from: String(secondsPart + offset))
     }
 
     /// Human-friendly age: "just now", "5m ago", "3h ago", "2d ago";

@@ -592,6 +592,9 @@ final class ResticBackend {
         var snapshotCount = 0
         var latestTime: String?
         var latestTags: [String] = []
+        /// The oldest snapshot's time, for the dashboard's "oldest <age>" line —
+        /// how far back this destination's history actually reaches.
+        var oldestTime: String?
         var sizeBytes: Int?
         var error: String?
         /// Per-source breakdown (drive / photos), so the dashboard can show one
@@ -633,11 +636,13 @@ final class ResticBackend {
             let snaps = try snapshotsJSON(timeout: Self.probeTimeout)
             status.reachable = true
             status.snapshotCount = snaps.count
-            // restic lists snapshots oldest → newest, so the last one is latest.
+            // restic lists snapshots oldest → newest (verified against `restic
+            // snapshots --json`), so the first one is oldest, the last is latest.
             if let latest = snaps.last {
                 status.latestTime = latest["time"] as? String
                 status.latestTags = (latest["tags"] as? [String]) ?? []
             }
+            status.oldestTime = snaps.first?["time"] as? String
             status.sources = Self.sourceBreakdown(snaps)
             status.sizeBytes = repoSizeBytes(timeout: Self.probeTimeout)
         } catch {
