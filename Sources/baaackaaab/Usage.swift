@@ -160,6 +160,7 @@ func printUsage() {
         ("--materialize-test <file>", "prove a dataless stub re-materializes, then exit"),
         ("--evict-test <file>", "prove the evict/re-download round-trip, then exit"),
         ("-h, --help", "show this help and exit"),
+        ("--version", "print the version and exit"),
     ])
     Console.note("--doctor also checks restic + the REST server against the versions baaackaaab is tested against (offline, no GitHub); --check-updates additionally asks GitHub for the newest releases. The unattended timer posts a banner when restic / the server has fallen behind the tested baseline.")
 

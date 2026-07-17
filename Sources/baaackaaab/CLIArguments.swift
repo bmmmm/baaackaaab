@@ -171,7 +171,7 @@ struct CLIArguments {
         "--install-drill-timer", "--uninstall-drill-timer",
         "--install-check-timer", "--uninstall-check-timer",
         "--catch-up", "--defer-on-battery", "--no-defer-on-battery",
-        "--doctor", "--check-updates", "--center", "--help", "-h",
+        "--doctor", "--check-updates", "--center", "--help", "-h", "--version",
         "--clear-heartbeat", "--test-notify",
         "--clear-prom-textfile", "--status-export",
         "--repo-usage", "--clear-large-file-warn-mib",

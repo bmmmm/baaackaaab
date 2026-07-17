@@ -40,6 +40,10 @@ if cli.has("--help") || cli.has("-h")
     printUsage()
     exit(0)
 }
+if cli.has("--version") {
+    print("baaackaaab \(BuildInfo.version)")
+    exit(0)
+}
 
 // Reject an unknown flag up front, before any dispatch — a typo must fail loudly,
 // never fall through to a backup of the set.
