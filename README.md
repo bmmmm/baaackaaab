@@ -402,6 +402,8 @@ destinations     [ { name, ok, data_added, bytes_processed } ]   — the last ru
 repo             { size_bytes, quota_bytes, quota_fraction }     — present only when the repo size was sampled
 last_drill       { time, ok, bytes, snapshots }                  — present only once a restore drill has run;
                  snapshots is the sampled-snapshot COUNT, not their ids
+last_check       { time, ok, slice, of }                         — present only once a rotating integrity
+                 check has run; slice/of is the read-data rotation position
 ```
 
 `last_run`/`repo`/`last_drill` are each entirely absent (not `null`-filled)
@@ -421,7 +423,8 @@ Gauges: `baaackaaab_last_run_timestamp_seconds`, `baaackaaab_last_run_success`
 (0/1), `baaackaaab_last_run_exit_code`, `baaackaaab_verified_files`,
 `baaackaaab_total_files`, `baaackaaab_dest_ok{dest="…"}`,
 `baaackaaab_dest_data_added_bytes{dest="…"}`, `baaackaaab_repo_size_bytes`,
-`baaackaaab_repo_quota_bytes`, `baaackaaab_last_drill_timestamp_seconds`. A
+`baaackaaab_repo_quota_bytes`, `baaackaaab_last_drill_timestamp_seconds`,
+`baaackaaab_last_check_timestamp_seconds`. A
 metric with no known value (e.g. the repo size was never sampled) is omitted
 entirely rather than emitted as 0. If the directory doesn't exist or isn't
 writable, a run logs one actionable warning and continues — this never fails a

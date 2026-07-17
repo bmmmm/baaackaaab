@@ -44,6 +44,14 @@ final class StatusExportTests: XCTestCase {
                   kind: "drill", bytes: 4096, snapshots: ["a1b2", "c3d4"])
     }
 
+    private func checkRecord(ok: Bool = true, slice: Int = 3,
+                             end: Date = Date(timeIntervalSince1970: 1_700_200_000)) -> RunRecord {
+        RunRecord(runTag: "check", start: end.addingTimeInterval(-60), end: end,
+                  exitCode: ok ? 0 : 2, verified: ok ? 1 : 0, total: 1, sourceFailures: 0,
+                  destinations: [RunRecord.Dest(name: "default", ok: ok, error: nil)],
+                  kind: "check", slice: slice)
+    }
+
     // MARK: - outcome() mapping
 
     func testOutcomeMapsKnownExitCodes() {
@@ -65,8 +73,10 @@ final class StatusExportTests: XCTestCase {
         XCTAssertNil(snap.lastDrill)
     }
 
-    func testBuildTakesNewestNonDrillRecordAsLastRun() {
-        let records = [record("run-2", exit: 2), drillRecord(), record("run-1", exit: 0)]   // newest-first, like RunHistory.recent
+    func testBuildTakesNewestBackupRecordAsLastRun() {
+        // Newest-first, like RunHistory.recent. Drill AND check records must be
+        // skipped — only a backup-kind record may become `last_run`.
+        let records = [checkRecord(), record("run-2", exit: 2), drillRecord(), record("run-1", exit: 0)]
         let snap = StatusExport.build(records: records, lastDrill: nil, repoSizeBytes: nil, quotaBytes: nil)
         XCTAssertEqual(snap.lastRun?.tag, "run-2")
         XCTAssertEqual(snap.lastRun?.outcome, "partial")
@@ -114,18 +124,34 @@ final class StatusExportTests: XCTestCase {
         XCTAssertEqual(snap.lastDrill?.ok, false)
     }
 
+    func testBuildCheckBlockCarriesSliceAndTotal() {
+        let none = StatusExport.build(records: [], lastDrill: nil, repoSizeBytes: nil, quotaBytes: nil)
+        XCTAssertNil(none.lastCheck)
+
+        let snap = StatusExport.build(records: [], lastDrill: nil, repoSizeBytes: nil, quotaBytes: nil,
+                                      lastCheck: checkRecord(ok: true, slice: 5))
+        XCTAssertEqual(snap.lastCheck?.ok, true)
+        XCTAssertEqual(snap.lastCheck?.slice, 5)
+        XCTAssertEqual(snap.lastCheck?.of, RotatingCheck.slices)
+
+        let failed = StatusExport.build(records: [], lastDrill: nil, repoSizeBytes: nil, quotaBytes: nil,
+                                        lastCheck: checkRecord(ok: false))
+        XCTAssertEqual(failed.lastCheck?.ok, false)
+    }
+
     // MARK: - Stable key pinning (the public-contract guarantee)
 
     func testStatusJSONTopLevelKeysAreStable() throws {
         let snap = StatusExport.build(
             records: [record("run-1", dataAdded: 10, bytesProcessed: 20)],
-            lastDrill: drillRecord(), repoSizeBytes: 100, quotaBytes: 200)
+            lastDrill: drillRecord(), repoSizeBytes: 100, quotaBytes: 200,
+            lastCheck: checkRecord())
         let enc = JSONEncoder()
         enc.dateEncodingStrategy = .iso8601
         let data = try enc.encode(snap)
         let json = try JSONSerialization.jsonObject(with: data) as! [String: Any]
         XCTAssertEqual(Set(json.keys),
-                       Set(["schema_version", "generated_at", "last_run", "destinations", "repo", "last_drill"]))
+                       Set(["schema_version", "generated_at", "last_run", "destinations", "repo", "last_drill", "last_check"]))
 
         let lastRun = json["last_run"] as! [String: Any]
         XCTAssertEqual(Set(lastRun.keys),
@@ -139,6 +165,9 @@ final class StatusExportTests: XCTestCase {
 
         let drill = json["last_drill"] as! [String: Any]
         XCTAssertEqual(Set(drill.keys), Set(["time", "ok", "bytes", "snapshots"]))
+
+        let check = json["last_check"] as! [String: Any]
+        XCTAssertEqual(Set(check.keys), Set(["time", "ok", "slice", "of"]))
     }
 
     // A destination with no churn metrics omits those keys entirely rather than

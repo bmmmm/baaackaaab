@@ -32,6 +32,8 @@ struct StatusSnapshot: Codable, Equatable {
     let repo: RepoStatus?
     /// nil when no restore drill has run yet.
     let lastDrill: DrillStatus?
+    /// nil when no rotating integrity check has run yet.
+    let lastCheck: CheckStatus?
 
     struct LastRun: Codable, Equatable {
         let tag: String
@@ -96,6 +98,19 @@ struct StatusSnapshot: Codable, Equatable {
         }
     }
 
+    struct CheckStatus: Codable, Equatable {
+        let time: Date
+        let ok: Bool
+        /// The 1-based rotating `--read-data-subset` slice this check covered,
+        /// out of `of` (after `of` checks every pack has been re-read once).
+        let slice: Int?
+        let of: Int
+
+        enum CodingKeys: String, CodingKey {
+            case time, ok, slice, of
+        }
+    }
+
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
         case generatedAt = "generated_at"
@@ -103,6 +118,7 @@ struct StatusSnapshot: Codable, Equatable {
         case destinations
         case repo
         case lastDrill = "last_drill"
+        case lastCheck = "last_check"
     }
 }
 
@@ -146,8 +162,11 @@ enum StatusExport {
     /// touches the network.
     static func build(records: [RunRecord], lastDrill: RunRecord?,
                        repoSizeBytes: Int64?, quotaBytes: Int64?,
+                       lastCheck: RunRecord? = nil,
                        now: Date = Date()) -> StatusSnapshot {
-        let last = records.first { !$0.isDrill }
+        // Backup-kind records only: drill AND integrity-check records share the
+        // same history file and must never masquerade as `last_run`.
+        let last = records.first { $0.isBackup }
         let lastRun = last.map { rec in
             StatusSnapshot.LastRun(
                 tag: rec.runTag, start: rec.start, end: rec.end, exitCode: rec.exitCode,
@@ -166,8 +185,13 @@ enum StatusExport {
             StatusSnapshot.DrillStatus(time: d.end, ok: d.clean,
                                        bytes: d.bytes.map(Int64.init), snapshotCount: d.snapshots?.count)
         }
+        let check: StatusSnapshot.CheckStatus? = lastCheck.map { c in
+            StatusSnapshot.CheckStatus(time: c.end, ok: c.exitCode == 0,
+                                       slice: c.slice, of: RotatingCheck.slices)
+        }
         return StatusSnapshot(schemaVersion: schemaVersion, generatedAt: now,
-                              lastRun: lastRun, destinations: destinations, repo: repo, lastDrill: drill)
+                              lastRun: lastRun, destinations: destinations, repo: repo,
+                              lastDrill: drill, lastCheck: check)
     }
 
     private static func encoder() -> JSONEncoder {
@@ -212,7 +236,8 @@ enum StatusExport {
                                promTextfileDir: String?) -> StatusSnapshot? {
         let records = RunHistory.recent(historyLookback)
         let snapshot = build(records: records, lastDrill: RunHistory.lastDrill(),
-                            repoSizeBytes: repoSizeBytes, quotaBytes: quotaBytes)
+                            repoSizeBytes: repoSizeBytes, quotaBytes: quotaBytes,
+                            lastCheck: RunHistory.lastCheck())
         try? write(snapshot)
         if let dir = promTextfileDir, !dir.isEmpty {
             do {
@@ -313,6 +338,12 @@ enum PrometheusTextfile {
             gauge("baaackaaab_last_drill_timestamp_seconds",
                   help: "Unix timestamp of the last restore drill.",
                   value: String(Int(drill.time.timeIntervalSince1970)))
+        }
+
+        if let check = snapshot.lastCheck {
+            gauge("baaackaaab_last_check_timestamp_seconds",
+                  help: "Unix timestamp of the last rotating integrity check.",
+                  value: String(Int(check.time.timeIntervalSince1970)))
         }
 
         return lines.isEmpty ? "" : lines.joined(separator: "\n") + "\n"
