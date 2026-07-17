@@ -210,6 +210,7 @@ final class ResticBackend {
     func backup(paths: [URL], tags: [String], host: String?,
                 dryRun: Bool = false, limitUploadKiBps: Int? = nil,
                 packSizeMiB: Int? = nil, restConnections: Int? = nil,
+                readConcurrency: Int? = nil,
                 excludes: [String] = [], excludeFiles: [String] = [],
                 showProgress: Bool = false) throws {
         // `--skip-if-unchanged`: when a source is byte-for-byte identical to its
@@ -236,6 +237,14 @@ final class ResticBackend {
         // target is 16 MiB when unset.
         if let packSizeMiB, packSizeMiB > 0 {
             args += ["--pack-size", String(packSizeMiB)]
+        }
+        // How many files restic reads concurrently while building the backup.
+        // restic's own default is 2 ($RESTIC_READ_CONCURRENCY); raising it can
+        // help saturate a fast local disk, lowering it eases CPU/IO pressure
+        // from many small iCloud Drive files. Optional, same guarded pattern as
+        // --pack-size / rest.connections.
+        if let readConcurrency, readConcurrency > 0 {
+            args += ["--read-concurrency", String(readConcurrency)]
         }
         if dryRun { args += ["--dry-run", "--verbose"] }
         if let host { args += ["--host", host] }

@@ -187,6 +187,25 @@ final class ResticIntegrationTests: XCTestCase {
         XCTAssertFalse(check.lockedOut)
     }
 
+    // MARK: - --read-concurrency
+
+    /// A backup with a configured read-concurrency is accepted by restic (a bad
+    /// flag would fail the run) and produces a snapshot that passes an
+    /// integrity check. Same syntactic-acceptance scope as the pack-size /
+    /// rest-connections tests above: the concurrency EFFECT is not observable
+    /// against a tiny local test repo.
+    func testReadConcurrencyBackupIsAcceptedAndVerifies() throws {
+        let backend = makeBackend()
+        try backend.ensureInitialized()
+        let src = try makeSource("src", files: ["doc.txt": "hello"])
+        try backend.backup(paths: [src], tags: ["concurrent"], host: "testhost", readConcurrency: 4)
+        XCTAssertEqual(try backend.listSnapshots().count, 1)
+
+        let check = backend.checkRepo(readDataSubset: "100%")
+        XCTAssertTrue(check.clean, "repo should pass check after a read-concurrency backup:\n\(check.output)")
+        XCTAssertFalse(check.lockedOut)
+    }
+
     // MARK: - check / locks
 
     /// A healthy freshly-backed-up repo checks clean, reports no locks, and unlock

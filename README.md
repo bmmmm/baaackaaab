@@ -194,6 +194,7 @@ Two persistent knobs live in the backup set (so the unattended timer uses them t
 ```sh
 baaackaaab --limit-upload 2048         # cap upload at ~2 MiB/s (KiB/s); --clear-limit-upload lifts it
 baaackaaab --pack-size 64              # restic target pack size in MiB, 4…128; --clear-pack-size resets
+baaackaaab --read-concurrency 4        # files restic reads concurrently, 1…64 (restic default 2); --clear-read-concurrency resets
 baaackaaab --repo-quota 50000000000    # server quota (bytes) for the pre-flight gauge; --clear-repo-quota
 ```
 

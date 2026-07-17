@@ -71,6 +71,13 @@ final class BackupSetTests: XCTestCase {
         XCTAssertEqual(set.restConnections, 2)
     }
 
+    // read_concurrency mirrors rest_connections: same optional-Int, tolerant-
+    // decode shape, a different persisted restic knob (concurrent file reads).
+    func testDecodeReadConcurrency() throws {
+        let set = try decode(#"{ "read_concurrency": 4 }"#)
+        XCTAssertEqual(set.readConcurrency, 4)
+    }
+
     // MARK: - Round-trip through disk
 
     func testSaveLoadRoundTrip() throws {
@@ -79,7 +86,7 @@ final class BackupSetTests: XCTestCase {
             .appendingPathComponent("backup-set.json")
         let original = BackupSet(driveFolders: ["~/a", "~/b"], photoAlbums: ["Album"],
                                  quotaBytes: 42, limitUploadKiBps: 512, packSizeMiB: 64,
-                                 restConnections: 2,
+                                 restConnections: 2, readConcurrency: 4,
                                  excludes: ["*.tmp"], excludeFiles: ["~/ex.txt"])
         try original.save(to: url)
         XCTAssertEqual(try BackupSet.load(from: url), original)
@@ -95,6 +102,7 @@ final class BackupSetTests: XCTestCase {
         XCTAssertFalse(text.contains("limit_upload_kibps"))
         XCTAssertFalse(text.contains("pack_size_mib"))
         XCTAssertFalse(text.contains("rest_connections"))
+        XCTAssertFalse(text.contains("read_concurrency"))
         XCTAssertFalse(text.contains("\\/"))                // slashes not escaped
         XCTAssertTrue(text.hasSuffix("\n"))                 // trailing newline
     }

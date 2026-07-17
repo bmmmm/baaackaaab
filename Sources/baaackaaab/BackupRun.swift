@@ -15,6 +15,7 @@ struct BackupRun {
     let configLimitUploadKiBps: Int?
     let configPackSizeMiB: Int?
     let configRestConnections: Int?
+    let configReadConcurrency: Int?
     let configExcludes: [String]
     let configExcludeFiles: [String]
     let repoQuotaBytes: Int?
@@ -94,6 +95,9 @@ struct BackupRun {
             }
             if let rc = configRestConnections, rc > 0, !backupDryRun {
                 info.append(("rest-connections", "\(rc)"))
+            }
+            if let rcc = configReadConcurrency, rcc > 0, !backupDryRun {
+                info.append(("read-concurrency", "\(rcc)"))
             }
             // Excludes are always active (the macOS-junk defaults + caches), so this
             // line shows on every run — plus any set globs / exclude-files, so it's
@@ -185,6 +189,7 @@ struct BackupRun {
                                                dryRun: backupDryRun, limitUploadKiBps: configLimitUploadKiBps,
                                                packSizeMiB: configPackSizeMiB,
                                                restConnections: configRestConnections,
+                                               readConcurrency: configReadConcurrency,
                                                excludes: configExcludes, excludeFiles: excludeFilesResolved,
                                                showProgress: showProgress)
                     } catch {
