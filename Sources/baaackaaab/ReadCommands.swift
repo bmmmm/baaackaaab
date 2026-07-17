@@ -136,6 +136,53 @@ func diffCommand() {
     }
 }
 
+/// Print one usage table: path, human size, share of `totalBytes`, sorted
+/// (already sorted by the caller) descending. `prefix` prepends a parent path
+/// for the secondary (drill-down) table so each row reads as a full path.
+private func printUsageTable(_ buckets: [RepoUsage.Bucket], totalBytes: Int, prefix: String? = nil) {
+    let labels = buckets.map { bucket in prefix.map { "\($0)/\(bucket.path)" } ?? bucket.path }
+    let width = labels.map { $0.count }.max() ?? 0
+    for (b, label) in zip(buckets, labels) {
+        let size = ByteCountFormatter.string(fromByteCount: Int64(b.bytes), countStyle: .file)
+        let pct = totalBytes > 0 ? Double(b.bytes) / Double(totalBytes) * 100 : 0
+        let padded = label.padding(toLength: width, withPad: " ", startingAt: 0)
+        Console.detail("\(padded)  \(size)  \(String(format: "%.1f%%", pct))")
+    }
+}
+
+/// Read-only view of what fills the permanent store: aggregates the LATEST
+/// snapshot's file sizes per top-level path component (and a secondary
+/// breakdown one level deeper under the largest bucket), per destination — all,
+/// or just `--destination <name>`. The store is append-only (the Mac holds no
+/// prune right), so anything already snapshotted here is permanent; this is the
+/// diagnostic for deciding what to `--add-exclude` before it grows further.
+func repoUsageCommand() {
+    Console.banner("baaackaaab", tagline: "repo usage — what fills the permanent store")
+    let dests = destinationsForCommand()
+    let failures = forEachDestination(dests) { dest in
+        let entries = try ResticBackend(destination: dest).lsDetailed(snapshot: "latest")
+        guard entries.contains(where: { $0.type == "file" }) else {
+            Console.note("no files in the latest snapshot")
+            return true
+        }
+        let (top, secondaryOf, secondary) = RepoUsage.aggregate(entries: entries)
+        let totalBytes = top.reduce(0) { $0 + $1.bytes }
+        let totalHuman = ByteCountFormatter.string(fromByteCount: Int64(totalBytes), countStyle: .file)
+        Console.step("latest snapshot — \(totalHuman) logical, by top-level path:")
+        printUsageTable(top, totalBytes: totalBytes)
+        if let secondaryOf, !secondary.isEmpty {
+            Console.step("inside the largest bucket, '\(secondaryOf)':")
+            printUsageTable(secondary, totalBytes: totalBytes, prefix: secondaryOf)
+        }
+        return true
+    }
+    Console.note("Sizes are LOGICAL (pre-dedup/compression) totals from the LATEST snapshot only — not the deduplicated repo size `--doctor`/`--check` report. Anything already snapshotted here is PERMANENT (the Mac holds no prune right), so this only tells you what to `--add-exclude` to stop FUTURE growth; it will not shrink what is already stored.")
+    if failures > 0 {
+        Console.error("\(failures)/\(dests.count) destination(s) could not be queried — see above")
+        exit(1)
+    }
+}
+
 /// The honest "what you actually got" note for a restored snapshot, keyed off its
 /// source tag. A Photos restore returns the ORIGINAL exported files, NOT a
 /// re-importable .photoslibrary; a Drive restore is a plain file tree to move

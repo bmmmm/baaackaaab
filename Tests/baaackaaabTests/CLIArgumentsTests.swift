@@ -150,6 +150,16 @@ final class CLIArgumentsTests: XCTestCase {
         XCTAssertEqual(CLIArguments(tokens: ["--export-recovery-kit", "/x/kit.enc"]).value("--export-recovery-kit"), "/x/kit.enc")
     }
 
+    // MARK: - --repo-usage
+
+    func testRepoUsageFlagIsRecognizedAndComposesWithDestination() {
+        XCTAssertNil(CLIArguments.unknownArgument(in: ["baaackaaab", "--repo-usage"]))
+        XCTAssertNil(CLIArguments.unknownArgument(in: ["baaackaaab", "--repo-usage", "--destination", "offsite"]))
+        let cli = CLIArguments(tokens: ["--repo-usage", "--destination", "offsite"])
+        XCTAssertTrue(cli.has("--repo-usage"))
+        XCTAssertEqual(cli.value("--destination"), "offsite")
+    }
+
     /// A flag value may legitimately start with '-' or look like a bare word — it
     /// is consumed by its flag, never checked. `--diff` consumes two.
     func testUnknownArgumentSkipsFlagValues() {

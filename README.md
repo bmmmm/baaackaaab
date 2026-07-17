@@ -291,7 +291,16 @@ baaackaaab --doctor          # restic, destinations, disk, Photos, timer, update
 baaackaaab --verify-repo     # restic check per destination (read-only)
 baaackaaab --check-updates   # compare restic + the REST server against the latest releases
 baaackaaab --unlock --destination offsite   # remove STALE locks (the only delete op)
+baaackaaab --repo-usage                     # what fills the permanent store (per destination)
 ```
+
+`--repo-usage` aggregates the **latest** snapshot's file sizes per top-level path
+component (plus a drill-down one level deeper under the largest bucket) and prints
+a table sorted descending, with each bucket's share of the total. Sizes are
+**logical** (pre-dedup/compression), not the deduplicated repo size `--doctor`
+reports. Because the store is append-only, anything already snapshotted is
+permanent — this tells you what to `--add-exclude` to stop *future* growth; it
+cannot shrink what is already stored.
 
 ### Staying current
 
@@ -327,7 +336,8 @@ The suite covers the headless pure-logic surface — argument parsing, the backu
 model, restore path-safety, secret redaction and credential generation, version
 parsing/comparison and the server-endpoint extraction behind the update check, the
 launchd schedule round-trip, staging-path sanitizing, notification escaping, the
-recovery-kit sheet composition and passphrase validation, and
+recovery-kit sheet composition and passphrase validation, the repo-usage size
+aggregation, and
 the on-disk destination and run-history stores. Store tests relocate to a throwaway directory via
 `BAAACKAAAB_SUPPORT_DIR`, so they never touch the real credential store. The live
 GitHub query and HTTP header probe touch the network, so they are not unit-tested —
@@ -340,8 +350,8 @@ exit-code mapping (repo absent / locked / wrong password), `--skip-if-unchanged`
 `--pack-size`, the **excludes** (macOS-junk defaults, `--exclude-caches`, and custom
 globs are all kept out of the snapshot), a full **backup → restore → verify
 roundtrip**, `find` / `ls` / `diff`, the exit-3 partial snapshot (an unreadable file
-still yields a valid snapshot of the rest), `check`, `unlock`, and snapshot/stats
-parsing. They are
+still yields a valid snapshot of the rest), `check`, `unlock`, snapshot/stats
+parsing, and the `--repo-usage` aggregation against a real snapshot. They are
 skipped automatically when `restic` isn't on `PATH`, so the suite still passes
 without it.
 

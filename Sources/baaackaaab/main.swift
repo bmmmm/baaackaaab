@@ -162,6 +162,13 @@ if cli.has("--diff") {
     exit(0)
 }
 
+// Read-only view of what fills the permanent store: aggregated file sizes from
+// the latest snapshot, per destination.
+if cli.has("--repo-usage") {
+    repoUsageCommand()
+    exit(0)
+}
+
 // Restore a snapshot into a fresh directory (safe by construction). Previews,
 // confirms, restores, verifies. Never writes into live iCloud Drive / Photos.
 if cli.has("--restore") {

@@ -95,12 +95,13 @@ func printUsage() {
     ])
     Console.note("Three restore modes: full (--restore), subtree (--restore --include <folder>), single-file (--find <name> to locate, then --restore --include <path>). Restore never writes back into iCloud Drive or Photos — it lands in a fresh directory you then move things back from.")
 
-    Console.section("Maintenance (repo health; read-only except --unlock)")
+    Console.section("Maintenance & diagnostics (repo health; read-only except --unlock)")
     Console.info([
         ("--verify-repo", "run `restic check` per destination (structure; read-only), then exit"),
         ("--read-data-subset <s>", "with --verify-repo, also re-read this fraction of pack data (5%, 1/10, 10M)"),
         ("--unlock", "remove STALE locks for --destination — the only delete op (lock files only)"),
         ("--remove-all", "with --unlock, remove ALL locks (only when no backup is running)"),
+        ("--repo-usage", "what fills the permanent store: aggregated sizes from the latest snapshot, per destination"),
     ])
     Console.note("--verify-repo only READS the repo. A damaged repo is repaired SERVER-side (the Mac has no delete/prune right). --unlock is the single exception: it deletes lock files only (never snapshots/data), removes stale locks by default, and needs --destination + a confirm (or --yes).")
 
