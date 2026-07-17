@@ -207,11 +207,16 @@ final class ResticBackend {
         ".fseventsd", ".DocumentRevisions-V100", ".TemporaryItems",
     ]
 
+    /// Returns the parsed restic `summary` for a real backup (nil on a dry run, or
+    /// when restic wrote no snapshot — e.g. `--skip-if-unchanged` skipped it — so no
+    /// summary was emitted). The caller aggregates these per destination to persist
+    /// the run's churn metrics and feed the anomaly tripwire.
+    @discardableResult
     func backup(paths: [URL], tags: [String], host: String?,
                 dryRun: Bool = false, limitUploadKiBps: Int? = nil,
                 packSizeMiB: Int? = nil, restConnections: Int? = nil,
                 excludes: [String] = [], excludeFiles: [String] = [],
-                showProgress: Bool = false) throws {
+                showProgress: Bool = false) throws -> ResticSummary? {
         // `--skip-if-unchanged`: when a source is byte-for-byte identical to its
         // parent snapshot, restic creates NO new snapshot. On the append-only
         // store — which the Mac can never prune — this stops every scheduled run
@@ -260,18 +265,46 @@ final class ResticBackend {
         let mode = dryRun ? " (dry run — nothing uploaded)" : ""
         Console.step("restic: backup [\(names)] tags=\(tags.joined(separator: ","))\(mode)")
 
-        if showProgress && !dryRun {
-            let bar = BackupProgressBar(label: destinationName)
-            let code = try runBackupJSON(args + ["--json"],
-                                         onStatus: { bar.update($0) },
-                                         onSummary: { bar.finish($0) })
-            bar.clear()   // wipe a half-drawn bar if no summary arrived (cancel/fail)
+        // A dry run keeps restic's plain `--verbose` output — its value there is the
+        // file list, not a progress bar or a churn tally — and produces no snapshot,
+        // so there is no summary to capture.
+        if dryRun {
+            let code = try run(args)
             try finishBackup(code: code)
-            return
+            return nil
         }
 
-        let code = try run(args)
+        // A real backup always runs `--json` so the churn summary (files/bytes/data
+        // added) can be captured for the anomaly baseline — which MUST work under the
+        // unattended timer, where stdout is not a TTY. On a TTY the summary also
+        // drives the live progress bar; off a TTY (launchd / a pipe) we render no bar
+        // but print one concise tally line, because restic's own plain summary now
+        // goes to the JSON pipe we consume rather than to the log.
+        let bar = showProgress ? BackupProgressBar(label: destinationName) : nil
+        var captured: ResticSummary?
+        let code = try runBackupJSON(args + ["--json"],
+                                     onStatus: { bar?.update($0) },
+                                     onSummary: { summary in
+                                         captured = summary
+                                         if let bar {
+                                             bar.finish(summary)
+                                         } else {
+                                             Self.logSummaryLine(summary, label: destinationName)
+                                         }
+                                     })
+        bar?.clear()   // wipe a half-drawn bar if no summary arrived (cancel/fail)
         try finishBackup(code: code)
+        return captured
+    }
+
+    /// One concise completion line for the non-TTY real-backup path (launchd / a
+    /// pipe), where the progress bar is suppressed but the log should still carry a
+    /// human-readable tally. Mirrors the bar's finish line.
+    private static func logSummaryLine(_ sum: ResticSummary, label: String) {
+        let added = ByteCountFormatter.string(fromByteCount: Int64(sum.dataAdded), countStyle: .file)
+        let snap = sum.snapshotID.map { " → " + String($0.prefix(8)) } ?? ""
+        let prefix = label.isEmpty ? "" : label + ": "
+        Console.detail("\(prefix)\(added) new (\(sum.filesNew) new, \(sum.filesChanged) changed)\(snap)")
     }
 
     /// Interpret a `restic backup` exit code. 0 is a clean success. Exit 3 means
@@ -364,7 +397,9 @@ final class ResticBackend {
         case "summary":
             onSummary(ResticSummary(
                 filesNew: int("files_new"), filesChanged: int("files_changed"),
-                dataAdded: int("data_added"), totalDuration: dbl("total_duration"),
+                dataAdded: int("data_added"),
+                totalBytesProcessed: int("total_bytes_processed"),
+                totalDuration: dbl("total_duration"),
                 snapshotID: obj["snapshot_id"] as? String))
         case "error":
             let msg = (obj["error"] as? [String: Any])?["message"] as? String

@@ -24,10 +24,15 @@ struct ResticStatus {
 }
 
 /// A decoded `summary` message: the final tally when the snapshot is written.
+/// `totalBytesProcessed` is restic's `total_bytes_processed` — the whole source
+/// size restic walked this run (new + unchanged), which the churn tripwire uses
+/// to spot a source that suddenly shrank; `dataAdded` is only the newly-uploaded
+/// delta.
 struct ResticSummary {
     let filesNew: Int
     let filesChanged: Int
     let dataAdded: Int
+    let totalBytesProcessed: Int
     let totalDuration: Double
     let snapshotID: String?
 }

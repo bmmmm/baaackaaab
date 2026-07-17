@@ -380,6 +380,10 @@ final class DestinationRun {
     var initError: String?
     var backupFailures = 0
     var firstBackupError: String?
+    /// This run's churn aggregated across every restic snapshot written to this
+    /// destination (Drive folders + Photo batches). Persisted into the history
+    /// record and fed to the warn-only anomaly tripwire.
+    var churn = ChurnMetrics()
 
     init(_ destination: Destination) {
         self.destination = destination

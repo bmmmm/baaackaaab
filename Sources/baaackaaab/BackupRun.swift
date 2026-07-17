@@ -43,9 +43,15 @@ struct BackupRun {
             // every terminal path (no-destination, nothing-acquired, partial, success)
             // records the same shape. Best-effort: a failed write never blocks the exit.
             func recordRun(exitCode: Int, verified: Int, total: Int, sourceFailures: Int) {
-                let dests = runs.map { r in
-                    RunRecord.Dest(name: r.destination.name, ok: r.ok,
-                                   error: r.initError ?? r.firstBackupError)
+                let dests = runs.map { r -> RunRecord.Dest in
+                    let c = r.churn
+                    return RunRecord.Dest(
+                        name: r.destination.name, ok: r.ok,
+                        error: r.initError ?? r.firstBackupError,
+                        dataAdded: c.hasData ? c.dataAdded : nil,
+                        filesChanged: c.hasData ? c.filesChanged : nil,
+                        filesNew: c.hasData ? c.filesNew : nil,
+                        bytesProcessed: c.hasData ? c.bytesProcessed : nil)
                 }
                 let record = RunRecord(runTag: runTag, start: runStart, end: Date(),
                                        exitCode: exitCode, verified: verified, total: total,
@@ -181,12 +187,18 @@ struct BackupRun {
                 for run in ready {
                     if BackupCancellation.shared.isCancelled { throw RunCancelled() }
                     do {
-                        try run.backend.backup(paths: paths, tags: tags, host: host,
-                                               dryRun: backupDryRun, limitUploadKiBps: configLimitUploadKiBps,
-                                               packSizeMiB: configPackSizeMiB,
-                                               restConnections: configRestConnections,
-                                               excludes: configExcludes, excludeFiles: excludeFilesResolved,
-                                               showProgress: showProgress)
+                        // Aggregate the per-snapshot churn summary into this
+                        // destination's running total (nil on a dry run / a skipped
+                        // backup that wrote no snapshot). Persisted + fed to the tripwire.
+                        if let summary = try run.backend.backup(
+                                paths: paths, tags: tags, host: host,
+                                dryRun: backupDryRun, limitUploadKiBps: configLimitUploadKiBps,
+                                packSizeMiB: configPackSizeMiB,
+                                restConnections: configRestConnections,
+                                excludes: configExcludes, excludeFiles: excludeFilesResolved,
+                                showProgress: showProgress) {
+                            run.churn.add(summary)
+                        }
                     } catch {
                         // A cancel interrupts restic into a non-zero (130) exit; treat that
                         // as cancellation, not as this destination's own backup failure.
