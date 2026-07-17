@@ -154,11 +154,13 @@ struct CLIArguments {
         "--target", "--include", "--sample", "--max-bytes", "--destination",
         "--read-data-subset", "--at", "--days", "--day", "--repo-quota-bytes",
         "--quota-warn-fraction", "--materialize-test", "--evict-test",
+        "--history", "--read-concurrency",
     ]
     /// Flags that stand alone (no value).
     static let boolFlags: Set<String> = [
         "--init-credentials", "--migrate-credentials", "--force", "--check",
         "--list", "--configure", "--clear-limit-upload", "--clear-pack-size", "--clear-rest-connections", "--clear-repo-quota",
+        "--clear-read-concurrency",
         "--list-destinations",
         "--disabled", "--snapshots", "--restore", "--test-restore", "--restore-drill", "--dry-run",
         "--yes", "--no-verify", "--verify-repo", "--unlock", "--remove-all",

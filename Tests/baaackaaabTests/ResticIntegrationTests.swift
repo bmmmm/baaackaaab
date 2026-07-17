@@ -273,6 +273,28 @@ final class ResticIntegrationTests: XCTestCase {
         XCTAssertTrue(entries.contains { $0.name == "hay.txt" })
     }
 
+    /// A file changed between two backups produces two versions once find()'s
+    /// hits are grouped by snapshot (the --history command's core data path):
+    /// newest-first by mtime, each carrying its own size.
+    func testHistoryGroupsHitsPerSnapshotNewestFirst() throws {
+        let backend = makeBackend()
+        try backend.ensureInitialized()
+        let src = try makeSource("src", files: ["doc.txt": "v1"])
+        try backend.backup(paths: [src], tags: ["t"], host: "testhost")
+        Thread.sleep(forTimeInterval: 1.1)   // a distinct, later mtime for the second write
+        try "version-two".write(to: src.appendingPathComponent("doc.txt"), atomically: true, encoding: .utf8)
+        try backend.backup(paths: [src], tags: ["t"], host: "testhost")
+
+        let hits = try backend.find(pattern: "doc.txt", snapshot: nil)
+        let versions = groupHistoryBySnapshot(hits)
+        XCTAssertEqual(versions.count, 2, "the file should have one version per snapshot")
+        XCTAssertNotEqual(versions.first?.snapshot, versions.last?.snapshot)
+        XCTAssertEqual(versions.first?.size, 11, "newest version ('version-two', 11 bytes) should lead")
+        XCTAssertEqual(versions.last?.size, 2, "oldest version ('v1', 2 bytes) should trail")
+        XCTAssertNotNil(versions.first?.mtime)
+        XCTAssertNotNil(versions.last?.mtime)
+    }
+
     /// diff between two snapshots reports the modified file with the "M" modifier
     /// and non-zero changed-file statistics.
     func testDiffReportsChange() throws {

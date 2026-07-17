@@ -135,6 +135,15 @@ if cli.has("--find") {
     exit(0)
 }
 
+// Show a file's version history across ALL snapshots (read-only): every
+// version's size + mtime, newest first. Dispatch on presence like --find, so a
+// forgotten path argument fails loudly inside historyCommand rather than
+// falling through to a backup of the set.
+if cli.has("--history") {
+    historyCommand()
+    exit(0)
+}
+
 // Browse a snapshot's contents (read-only). The listed paths feed --restore --include.
 // `--ls` with no id is valid (defaults to the latest snapshot); dispatch on
 // presence so a bare `--ls` browses latest instead of falling through to a backup.

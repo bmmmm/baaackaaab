@@ -660,12 +660,16 @@ final class ResticBackend {
 
     /// One file found by `restic find`, for the single-file restore flow: its
     /// full path inside the snapshot (which is exactly what `--include` then takes),
-    /// its type, size, and which snapshot it was found in.
+    /// its type, size, which snapshot it was found in, and its mtime there (the
+    /// `--history` command's per-version timestamp; restic's ISO8601 string, kept
+    /// raw rather than parsed — every other display path in this tool truncates
+    /// the same raw string instead of round-tripping through Date).
     struct Found {
         let path: String
         let type: String
         let size: Int?
         let snapshot: String
+        let mtime: String?
     }
 
     /// Search `snapshot` (default: all snapshots when nil) for files matching
@@ -691,7 +695,8 @@ final class ResticBackend {
                     path: (m["path"] as? String) ?? "",
                     type: (m["type"] as? String) ?? "",
                     size: (m["size"] as? NSNumber)?.intValue,
-                    snapshot: snap
+                    snapshot: snap,
+                    mtime: m["mtime"] as? String
                 ))
             }
         }

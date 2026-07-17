@@ -134,6 +134,7 @@ back into iCloud), previews with `--dry-run`, and re-reads every file with
 ```sh
 baaackaaab --snapshots                              # browse snapshots, newest first
 baaackaaab --find report.pdf --snapshot latest      # locate a single file
+baaackaaab --history report.pdf                     # every version of a file across ALL snapshots
 baaackaaab --restore --include path/to/report.pdf   # single-file restore
 baaackaaab --restore --include some/folder          # subtree restore
 baaackaaab --restore                                # full restore (latest)

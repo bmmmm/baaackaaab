@@ -78,6 +78,7 @@ func printUsage() {
         ("--ls <id>", "list a snapshot's files (browse / restore discovery); --include limits the subtree"),
         ("--diff <a> <b>", "show what changed between two snapshots (needs one --destination), then exit"),
         ("--find <pattern>", "locate a file in a snapshot (single-file restore discovery), then exit"),
+        ("--history <path>", "show a file's version history across ALL snapshots (size + mtime per version), then exit"),
         ("--restore", "restore a snapshot into a fresh directory (preview → confirm → verify)"),
         ("--test-restore", "restore a random file sample into a temp dir + verify (proves restorability), then exit"),
         ("--restore-drill", "scheduled drill: restore-verify a rotating sample (one drive folder + one photo batch) into a temp dir, record the outcome, then exit"),
