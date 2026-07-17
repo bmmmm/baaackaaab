@@ -29,6 +29,15 @@ struct BackupRun {
     let promTextfileDir: String?
 
     func execute() {
+        // Hold off IDLE system sleep for the whole real backup, so a long overnight
+        // upload isn't cut short by the idle-sleep timer (a lid close still sleeps —
+        // this is PreventUserIdleSystemSleep, not PreventSystemSleep). A dry run
+        // uploads nothing, so it takes no assertion. The defer covers the normal
+        // return; the kernel releases the assertion on process exit for the many
+        // exit() paths below (documented in SleepHold).
+        let sleepHold = backupDryRun ? nil : SleepHold(reason: "baaackaaab backup in progress")
+        defer { sleepHold?.release() }
+
         // Fire a macOS failure banner, but ONLY when our output is invisible (launchd or
         // piped): an interactive run already shows the summary on screen, so a banner
         // there would be noise. This is the unattended timer's one human-visible failure

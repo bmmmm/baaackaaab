@@ -27,9 +27,11 @@ enum RunHistoryError: Error, CustomStringConvertible {
 /// A restore-drill run is stored in the SAME history with `kind == "drill"` and
 /// the drill-only fields (`bytes`, `snapshots`) set — the dashboard keeps drills
 /// out of the "recent runs" list and counts them separately for the "last
-/// verified restore" line. The three added fields are optionals encoded with
-/// `encodeIfPresent`, so a backup record's on-disk JSON is byte-identical to
-/// before (no new keys) — the append-only history stays forward/backward-readable.
+/// verified restore" line. A scheduled integrity check is stored likewise with
+/// `kind == "check"` and `slice` set to the 1-based read-data slice it covered.
+/// The added fields are optionals encoded with `encodeIfPresent`, so a backup
+/// record's on-disk JSON is byte-identical to before (no new keys) — the
+/// append-only history stays forward/backward-readable.
 struct RunRecord: Codable {
     let runTag: String
     let start: Date
@@ -39,12 +41,17 @@ struct RunRecord: Codable {
     let total: Int
     let sourceFailures: Int
     let destinations: [Dest]
-    /// nil / "backup" = a normal backup run; "drill" = a scheduled restore drill.
+    /// nil / "backup" = a normal backup run; "drill" = a scheduled restore drill;
+    /// "check" = a scheduled rotating integrity check.
     let kind: String?
     /// Restore-drill only: total bytes restored + byte-verified this drill.
     let bytes: Int?
     /// Restore-drill only: the snapshot ids the drill exercised.
     let snapshots: [String]?
+    /// Integrity-check only: the 1-based read-data slice (i of t) this run
+    /// re-read, so the next run can advance the rotation and the dashboard can
+    /// show the coverage position.
+    let slice: Int?
 
     /// Per-destination outcome for the run. `error` is nil on success; on failure
     /// it is the restic error description (already redacted, never a secret).
@@ -95,14 +102,16 @@ struct RunRecord: Codable {
         case verified, total
         case sourceFailures = "source_failures"
         case destinations
-        case kind, bytes, snapshots
+        case kind, bytes, snapshots, slice
     }
 
-    // Explicit init so the drill fields default to nil — existing backup call
-    // sites (BackupRun, the crash-early path, the tests) keep compiling unchanged.
+    // Explicit init so the drill/check fields default to nil — existing backup
+    // call sites (BackupRun, the crash-early path, the tests) keep compiling
+    // unchanged.
     init(runTag: String, start: Date, end: Date, exitCode: Int, verified: Int, total: Int,
          sourceFailures: Int, destinations: [Dest],
-         kind: String? = nil, bytes: Int? = nil, snapshots: [String]? = nil) {
+         kind: String? = nil, bytes: Int? = nil, snapshots: [String]? = nil,
+         slice: Int? = nil) {
         self.runTag = runTag
         self.start = start
         self.end = end
@@ -114,14 +123,23 @@ struct RunRecord: Codable {
         self.kind = kind
         self.bytes = bytes
         self.snapshots = snapshots
+        self.slice = slice
     }
 
     /// True when every destination got every byte and nothing was skipped (for a
-    /// drill: every sampled file restored + verified).
+    /// drill: every sampled file restored + verified; for a check: every
+    /// destination passed `restic check`).
     var clean: Bool { exitCode == 0 }
 
     /// A restore-drill record rather than a backup run.
     var isDrill: Bool { kind == "drill" }
+
+    /// A scheduled integrity-check record rather than a backup run.
+    var isCheck: Bool { kind == "check" }
+
+    /// A real backup run (not a drill or an integrity check) — what the dashboard
+    /// counts as an actual backup for the "recent runs" list and the overdue gate.
+    var isBackup: Bool { !isDrill && !isCheck }
 }
 
 enum RunHistory {
@@ -224,5 +242,20 @@ enum RunHistory {
     /// uses to advance its sampled source across successive runs.
     static func drillCount() -> Int {
         allRecords().reduce(0) { $0 + ($1.isDrill ? 1 : 0) }
+    }
+
+    /// The newest scheduled integrity-check record, or nil if none has run — the
+    /// source for the dashboard's "last integrity check" line and the rotation
+    /// cursor the next check advances from. Scans the whole history: a check may
+    /// sit behind more frequent backup records.
+    static func lastCheck() -> RunRecord? {
+        allRecords().last { $0.isCheck }
+    }
+
+    /// The newest SUCCESSFUL backup run (exit 0, not a drill or check), or nil if
+    /// none — the anchor for the catch-up staleness gate and the dashboard's
+    /// overdue judgment. A partial/failed backup does not count as "backed up".
+    static func lastSuccessfulBackup() -> RunRecord? {
+        allRecords().last { $0.isBackup && $0.clean }
     }
 }

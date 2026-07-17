@@ -61,6 +61,10 @@ struct BackupSet: Codable, Equatable {
     /// (`<dir>/baaackaaab.prom`), written alongside status.json after every real
     /// run. Persisted so the unattended timer keeps it current too.
     var promTextfileDir: String?
+    /// Opt-in: when true, a SCHEDULED / catch-up run defers (exits without backing
+    /// up) while the Mac is on battery. Default false (always back up). Encoded only
+    /// when true, so an existing file that never set it stays byte-identical.
+    var deferOnBattery: Bool
 
     init(driveFolders: [String] = [], photoAlbums: [String] = [],
          quotaBytes: Int? = nil, limitUploadKiBps: Int? = nil,
@@ -68,7 +72,7 @@ struct BackupSet: Codable, Equatable {
          readConcurrency: Int? = nil,
          excludes: [String] = [], excludeFiles: [String] = [],
          heartbeatURL: String? = nil, notifyChannels: [NotifyChannel] = [],
-         promTextfileDir: String? = nil) {
+         promTextfileDir: String? = nil, deferOnBattery: Bool = false) {
         self.driveFolders = driveFolders
         self.photoAlbums = photoAlbums
         self.quotaBytes = quotaBytes
@@ -81,6 +85,7 @@ struct BackupSet: Codable, Equatable {
         self.heartbeatURL = heartbeatURL
         self.notifyChannels = notifyChannels
         self.promTextfileDir = promTextfileDir
+        self.deferOnBattery = deferOnBattery
     }
 
     // Stable snake_case keys, written explicitly so the on-disk file stays
@@ -98,11 +103,12 @@ struct BackupSet: Codable, Equatable {
         case heartbeatURL = "heartbeat_url"
         case notifyChannels = "notify_channels"
         case promTextfileDir = "prom_textfile_dir"
+        case deferOnBattery = "defer_on_battery"
     }
 
     // Tolerant decode: a hand-edited file may omit an array entirely (e.g. only
     // photo_albums set). Treat any missing list as empty instead of failing the
-    // whole load. Encode stays synthesized (omits nil knobs, keeps both lists).
+    // whole load. defer_on_battery defaults false when absent.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         driveFolders = try c.decodeIfPresent([String].self, forKey: .driveFolders) ?? []
@@ -117,6 +123,28 @@ struct BackupSet: Codable, Equatable {
         heartbeatURL = try c.decodeIfPresent(String.self, forKey: .heartbeatURL)
         notifyChannels = try c.decodeIfPresent([NotifyChannel].self, forKey: .notifyChannels) ?? []
         promTextfileDir = try c.decodeIfPresent(String.self, forKey: .promTextfileDir)
+        deferOnBattery = try c.decodeIfPresent(Bool.self, forKey: .deferOnBattery) ?? false
+    }
+
+    // Custom encode so `defer_on_battery` is written ONLY when true — an existing
+    // file that never touched it stays byte-identical (no new key). Optionals use
+    // encodeIfPresent (nil knobs omitted); the source/exclude/channel lists are
+    // always written, matching the prior synthesized encoding.
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(driveFolders, forKey: .driveFolders)
+        try c.encode(photoAlbums, forKey: .photoAlbums)
+        try c.encodeIfPresent(quotaBytes, forKey: .quotaBytes)
+        try c.encodeIfPresent(limitUploadKiBps, forKey: .limitUploadKiBps)
+        try c.encodeIfPresent(packSizeMiB, forKey: .packSizeMiB)
+        try c.encodeIfPresent(restConnections, forKey: .restConnections)
+        try c.encodeIfPresent(readConcurrency, forKey: .readConcurrency)
+        try c.encode(excludes, forKey: .excludes)
+        try c.encode(excludeFiles, forKey: .excludeFiles)
+        try c.encodeIfPresent(heartbeatURL, forKey: .heartbeatURL)
+        try c.encode(notifyChannels, forKey: .notifyChannels)
+        try c.encodeIfPresent(promTextfileDir, forKey: .promTextfileDir)
+        if deferOnBattery { try c.encode(true, forKey: .deferOnBattery) }
     }
 
     // A set with no sources contributes nothing to a run.

@@ -723,6 +723,15 @@ func doctorCommand() {
     } else {
         Console.note("restore-drill timer: not installed (optional) — `--install-drill-timer` schedules a monthly restore drill")
     }
+    let checkTimer = LaunchdTimer.checkState()
+    if checkTimer.installed && checkTimer.loaded {
+        Console.success("integrity-check timer: installed and loaded")
+    } else if checkTimer.installed {
+        Console.warn("integrity-check timer: installed but not loaded — re-run `--install-check-timer` to (re)load it")
+        warnings += 1
+    } else {
+        Console.note("integrity-check timer: not installed (optional) — `--install-check-timer` schedules a rotating read-data check")
+    }
 
     Console.section("Restore verification")
     if let last = RunHistory.lastDrill() {
@@ -740,6 +749,20 @@ func doctorCommand() {
     } else {
         Console.warn("no restore drill has run yet — a backup that is never restore-tested is unproven; run `--restore-drill` (or `--install-drill-timer`)")
         warnings += 1
+    }
+
+    Console.section("Integrity check")
+    if let lastCheck = RunHistory.lastCheck() {
+        let (level, text) = CheckDashboard.line(lastCheck: lastCheck, now: Date())
+        switch level {
+        case .failed:
+            Console.failure(text)
+            problems += 1
+        default:
+            Console.success(text)
+        }
+    } else {
+        Console.note("no integrity check has run yet — `--install-check-timer` schedules a rotating read-data check that re-hashes 1/8 of the pack data per run (bit-rot detection)")
     }
 
     Console.section("Updates")

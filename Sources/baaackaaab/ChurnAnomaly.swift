@@ -107,13 +107,13 @@ enum ChurnAnomaly {
     }
 
     /// Build the baseline for `destination` from history: successful backup-kind
-    /// records (not drills, exit 0) whose entry for that destination succeeded and
-    /// carries churn metrics. Drills, failures, and pre-metrics records are skipped,
-    /// so an old runs.ndjson simply yields a smaller (possibly insufficient)
-    /// baseline rather than a wrong one.
+    /// records (not drills or integrity checks, exit 0) whose entry for that
+    /// destination succeeded and carries churn metrics. Drills, checks, failures,
+    /// and pre-metrics records are skipped, so an old runs.ndjson simply yields a
+    /// smaller (possibly insufficient) baseline rather than a wrong one.
     static func baseline(from records: [RunRecord], destination: String) -> [ChurnMetrics] {
         records.compactMap { rec -> ChurnMetrics? in
-            guard !rec.isDrill, rec.exitCode == 0 else { return nil }
+            guard rec.isBackup, rec.exitCode == 0 else { return nil }
             guard let d = rec.destinations.first(where: { $0.name == destination }),
                   d.ok, let processed = d.bytesProcessed else { return nil }
             return ChurnMetrics(

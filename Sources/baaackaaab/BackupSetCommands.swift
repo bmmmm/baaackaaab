@@ -29,6 +29,9 @@ func listBackupSet(_ set: BackupSet, path: URL, existed: Bool) {
     if let rcc = set.readConcurrency {
         pairs.append(("read-concurrency", "\(rcc)"))
     }
+    if set.deferOnBattery {
+        pairs.append(("defer-on-battery", "on (scheduled runs skip while on battery)"))
+    }
     for e in set.excludes { pairs.append(("exclude", e)) }
     for f in set.excludeFiles { pairs.append(("exclude-file", f)) }
     if let hb = set.heartbeatURL {
@@ -146,6 +149,17 @@ func manageBackupSet(configPath: URL) {
     if cli.has("--clear-read-concurrency") {
         if set.readConcurrency != nil { set.readConcurrency = nil; changed = true; Console.success("read concurrency cleared (restic default, 2)") }
         else { Console.note("no read concurrency was set") }
+    }
+    // Battery-defer knob: opt-in, persisted so the unattended timer reads it. When
+    // on, a scheduled/catch-up run exits without backing up while on battery power
+    // (interactive runs always proceed). --no-defer-on-battery restores the default.
+    if cli.has("--defer-on-battery") {
+        if !set.deferOnBattery { set.deferOnBattery = true; changed = true; Console.success("defer-on-battery on — scheduled runs skip while on battery power") }
+        else { Console.note("defer-on-battery already on") }
+    }
+    if cli.has("--no-defer-on-battery") {
+        if set.deferOnBattery { set.deferOnBattery = false; changed = true; Console.success("defer-on-battery off — scheduled runs proceed on battery") }
+        else { Console.note("defer-on-battery already off (the default)") }
     }
     // Repo-quota gauge: persisted in the set so the UNATTENDED timer warns too
     // — that run is the whole point of the pre-flight gauge, and it reads only

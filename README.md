@@ -120,6 +120,9 @@ logs restic's plain output. Explicit `--drive-folder` / `--photo-album` flags
 `baaackaaab` with no arguments in a terminal
 to open the **command center** — the set plus a remote dashboard, with keys to edit,
 sync now, refresh remote status, and check restic / server updates (`u`, contacts GitHub).
+It also surfaces backup health: a **last backup** line that turns **OVERDUE** once the
+newest successful backup is older than 1.5× the installed schedule's cadence (age only
+when no timer is installed), plus the last restore-drill and integrity-check lines.
 
 Because the Mac can only stage a fraction of the data set at once, Photos are
 exported and uploaded in byte-budgeted batches (each backed up, then deleted), so
@@ -384,6 +387,66 @@ location, the same discipline as the heartbeat/push payloads above. Treat
 other local tool/process that can read the support dir can read it (the
 Prometheus textfile is written with the directory's default permissions, since
 node_exporter itself needs to read it).
+### Catch-up on boot/login
+
+The backup LaunchAgent also sets `RunAtLoad` and carries a `--catch-up` marker, so
+it fires once when launchd loads it (login/boot) on top of the calendar schedule.
+A `--catch-up` run first evaluates a staleness gate against the **installed
+schedule's interval** (daily → 1 day; a weekday list → its largest gap, e.g.
+mon/wed/fri → 3 days):
+
+- **Fresh** — a successful backup younger than the interval is on record: it exits
+  0 with one quiet line. This is what makes the extra login/boot fire cheap, and it
+  swallows the duplicate fire right after a normal calendar run.
+- **Overdue / no history** — the Mac was off over a scheduled slot (or never backed
+  up): it prints `backup is N days overdue — catching up now`, posts a banner (the
+  same unattended gate as the failure banner), and runs the backup.
+
+**Existing installs get `RunAtLoad` + `--catch-up` on the next `--install-timer`** —
+the plist is regenerated on every install.
+
+### Rotating integrity check
+
+A second scheduled job re-hashes the *stored bytes* to catch on-disk bit-rot — the
+thing a restore drill (which only samples) cannot. Each run re-reads the next
+rotating **1/8** of the pack data with `restic check --read-data-subset`, so after
+eight runs every pack has been re-read once:
+
+```sh
+baaackaaab --install-check-timer --at 04:00              # daily rotating read-data check
+baaackaaab --install-check-timer --at 04:00 --days sun   # weekly, if daily is too much I/O
+baaackaaab --uninstall-check-timer
+baaackaaab --verify-repo --rotate-read-data              # run one slice by hand (what the timer runs)
+```
+
+It is read-only against the store, records each run in the history (with the slice
+position), and banners **only** on failure. The command center and `--doctor` show
+the last check and its slice (e.g. `integrity check 3/8 · 2d ago`). A plain
+`baaackaaab --verify-repo` (no `--rotate-read-data`) is unchanged — the manual
+structural check, with an optional one-off `--read-data-subset`.
+
+The restore drill and the integrity check are complementary: the **drill** proves a
+sample *decrypts and restores* end-to-end, the **check** proves *all bytes still
+hash correctly* over time. Both install/uninstall independently of the backup timer
+and of each other (`--timer-status` lists all three).
+
+### Power
+
+- **Sleep-hold (always on).** During a real backup and during a rotating integrity
+  check, baaackaaab takes an IOKit power assertion
+  (`kIOPMAssertionTypePreventUserIdleSystemSleep`) so a long unattended upload or
+  re-read isn't cut short by the idle-sleep timer. Pure IOKit — no `caffeinate`
+  child. Honest scope: this holds off **idle** sleep only; **closing the lid (or an
+  explicit Sleep) still sleeps the machine**. It is harmless outside a run, so there
+  is no knob.
+- **Battery-defer (opt-in).** `--defer-on-battery` makes *scheduled and catch-up*
+  runs exit without backing up while the Mac is on battery (interactive runs always
+  proceed); `--no-defer-on-battery` restores the default. It is persisted in the set
+  (so the timer honors it) and shown in `--list`. A deferred run exits **before** any
+  backup work begins, so — by design — it **looks like a missed run**: the next
+  scheduled slot on wall power (or the login/boot catch-up) picks it up. If you use
+  the heartbeat (`--set-heartbeat`, above), a battery-deferred run registers as a
+  miss on the monitor too — no start ping is sent — which is the correct signal.
 
 ### Maintenance & diagnostics
 

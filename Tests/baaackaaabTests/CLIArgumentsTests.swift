@@ -181,6 +181,28 @@ final class CLIArgumentsTests: XCTestCase {
         XCTAssertTrue(CLIArguments(tokens: ["--test-notify"]).has("--test-notify"))
     }
 
+    // MARK: - Slice F flags (integrity check, catch-up, battery-defer)
+
+    /// The new standalone flags must be recognized (not rejected as unknown
+    /// arguments), so the dispatch reaches their handlers instead of falling
+    /// through to a backup.
+    func testSliceFFlagsAreRecognized() {
+        for flag in ["--rotate-read-data", "--install-check-timer", "--uninstall-check-timer",
+                     "--catch-up", "--defer-on-battery", "--no-defer-on-battery"] {
+            XCTAssertNil(CLIArguments.unknownArgument(in: ["baaackaaab", flag]),
+                         "\(flag) should be a recognized flag")
+            XCTAssertTrue(CLIArguments(tokens: [flag]).has(flag))
+        }
+    }
+
+    /// --rotate-read-data pairs with --verify-repo and both parse together.
+    func testVerifyRepoWithRotateReadDataParses() {
+        XCTAssertNil(CLIArguments.unknownArgument(in: ["baaackaaab", "--verify-repo", "--rotate-read-data"]))
+        let cli = CLIArguments(tokens: ["--verify-repo", "--rotate-read-data"])
+        XCTAssertTrue(cli.has("--verify-repo"))
+        XCTAssertTrue(cli.has("--rotate-read-data"))
+    }
+
     /// A flag value may legitimately start with '-' or look like a bare word — it
     /// is consumed by its flag, never checked. `--diff` consumes two.
     func testUnknownArgumentSkipsFlagValues() {

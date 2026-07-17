@@ -85,17 +85,25 @@ if cli.has("--check") {
     exit(0)
 }
 
-// --read-data-subset only has meaning with --verify-repo; on its own it would be
-// silently ignored and the run would fall through to a backup. Fail loudly.
+// --read-data-subset / --rotate-read-data only have meaning with --verify-repo; on
+// their own they would be silently ignored and the run would fall through to a
+// backup. Fail loudly.
 if cli.value("--read-data-subset") != nil && !cli.has("--verify-repo") {
     Console.error("--read-data-subset only applies to --verify-repo — re-run as `baaackaaab --verify-repo --read-data-subset <n%|n/t|nM>`")
     exit(1)
 }
+if cli.has("--rotate-read-data") && !cli.has("--verify-repo") {
+    Console.error("--rotate-read-data only applies to --verify-repo — re-run as `baaackaaab --verify-repo --rotate-read-data` (this is what the integrity-check timer runs)")
+    exit(1)
+}
 
-// Repository integrity check (`restic check`), read-only. Optional
-// --read-data-subset re-reads a fraction of the pack data for bit-rot.
+// Repository integrity check (`restic check`), read-only. With --rotate-read-data
+// it advances a read-data slice (1/8 of the pack data per run) and records a
+// "check" history entry — the scheduled bit-rot detector. Otherwise it is the
+// manual structural check (plus an optional --read-data-subset), unchanged.
 if cli.has("--verify-repo") {
-    verifyRepoCommand()
+    if cli.has("--rotate-read-data") { rotatingCheckCommand() }
+    else { verifyRepoCommand() }
     exit(0)
 }
 
@@ -255,6 +263,19 @@ if cli.has("--uninstall-drill-timer") {
     catch { Console.error("\(error)"); exit(1) }
 }
 
+// Rotating integrity-check launchd timer. Installs/removes a per-user LaunchAgent
+// that runs `baaackaaab --verify-repo --rotate-read-data` on a daily/weekly
+// schedule (--at / --days). Separate label + plist, independent of the backup and
+// drill timers.
+if cli.has("--install-check-timer") {
+    do { try LaunchdTimer.installCheck(schedule: cli.schedule()); exit(0) }
+    catch { Console.error("\(error)"); exit(1) }
+}
+if cli.has("--uninstall-check-timer") {
+    do { try LaunchdTimer.uninstallCheck(); exit(0) }
+    catch { Console.error("\(error)"); exit(1) }
+}
+
 // Bare `baaackaaab` on a real terminal → the interactive command center: the
 // full-screen TUI opens on its home dashboard (backup set + remote status) and
 // ties set-editing, sync, and the remote dashboard together in one raw loop. The
@@ -297,9 +318,11 @@ if cli.has("--limit-upload")
     || cli.has("--repo-quota")
     || cli.has("--clear-repo-quota")
     || cli.has("--set-prom-textfile")
-    || cli.has("--clear-prom-textfile") {
+    || cli.has("--clear-prom-textfile")
+    || cli.has("--defer-on-battery")
+    || cli.has("--no-defer-on-battery") {
     if !cli.values("--drive-folder").isEmpty || !cli.values("--photo-album").isEmpty {
-        Console.error("--limit-upload / --pack-size / --rest-connections / --read-concurrency / --repo-quota / --set-prom-textfile (and their --clear-* forms) change the backup set's PERSISTENT tuning; they are not per-run flags (a run reads them from the set — there is no ad-hoc form). Set them on their own first (e.g. `baaackaaab --pack-size 64`), then run the backup separately. Combined with --drive-folder/--photo-album they would silently edit the set and skip the backup.")
+        Console.error("--limit-upload / --pack-size / --rest-connections / --read-concurrency / --repo-quota / --set-prom-textfile / --defer-on-battery (and their --clear-* / --no-* forms) change the backup set's PERSISTENT tuning; they are not per-run flags (a run reads them from the set — there is no ad-hoc form). Set them on their own first (e.g. `baaackaaab --pack-size 64`), then run the backup separately. Combined with --drive-folder/--photo-album they would silently edit the set and skip the backup.")
         exit(1)
     }
 }
@@ -313,6 +336,7 @@ if cli.hasAny(["--list", "--add-folder", "--remove-folder", "--add-album", "--re
                "--rest-connections", "--clear-rest-connections",
                "--read-concurrency", "--clear-read-concurrency",
                "--repo-quota", "--clear-repo-quota",
+               "--defer-on-battery", "--no-defer-on-battery",
                "--add-exclude", "--remove-exclude", "--add-exclude-file", "--remove-exclude-file",
                "--set-heartbeat", "--clear-heartbeat", "--add-ntfy", "--add-webhook", "--remove-notify",
                "--set-prom-textfile", "--clear-prom-textfile"]) {
@@ -335,6 +359,7 @@ var configExcludeFiles: [String] = []
 var configHeartbeatURL: String? = nil
 var configNotifyChannels: [NotifyChannel] = []
 var configPromTextfileDir: String? = nil
+var configDeferOnBattery = false
 if driveFolders.isEmpty && photoAlbums.isEmpty
     && FileManager.default.fileExists(atPath: configPath.path) {
     do {
@@ -351,6 +376,7 @@ if driveFolders.isEmpty && photoAlbums.isEmpty
         configHeartbeatURL = set.heartbeatURL
         configNotifyChannels = set.notifyChannels
         configPromTextfileDir = set.promTextfileDir
+        configDeferOnBattery = set.deferOnBattery
     } catch {
         Console.error("backup set at \(configPath.path) is unreadable — fix or delete it: \(error)")
         exit(1)
@@ -411,11 +437,34 @@ runFmt.dateFormat = "yyyyMMdd-HHmmss"
 let runTag = cli.value("--run-tag") ?? "run-\(runFmt.string(from: Date()))"
 let runStart = Date()
 
+// Catch-up gate (RunAtLoad / boot). With `--catch-up`, exit quietly when a recent
+// successful backup is already on record; otherwise announce the catch-up (and
+// banner it unattended) and fall through to the normal backup below. A no-op
+// without the marker. Evaluated here, before any backup work begins.
+catchUpGateOrProceed()
+
+// Battery-defer gate (opt-in). ONLY for scheduled / catch-up invocations — an
+// interactive run always proceeds. When the knob is set and we are on battery,
+// exit 0 without backing up (and BEFORE any backup work / heartbeat begins): a
+// deferred run deliberately looks like a missed run, and the next scheduled fire
+// (or the catch-up on AC) picks it up.
+let isScheduledRun = runTag == "scheduled" || cli.has("--catch-up")
+if !backupDryRun,
+   ScheduledBackup.shouldDeferOnBattery(isScheduled: isScheduledRun,
+                                        deferConfigured: configDeferOnBattery,
+                                        onBattery: PowerSource.onBattery()) {
+    Console.note("on battery — deferring scheduled backup (defer-on-battery is on); it will run on the next scheduled slot on wall power")
+    exit(0)
+}
+
 // Single-instance guard: only a REAL backup (bare run, the scheduled timer, or
 // the TUI's "sync now" child) takes the lock — a dry run is a read-only
 // preview and stays unguarded. Two overlapping real backups would race the
 // shared staging tree and duplicate acquisition work, so a second run backs
-// off immediately instead of running alongside the first.
+// off immediately instead of running alongside the first. Taken AFTER the
+// catch-up/battery gates (a gated exit needs no lock) and BEFORE the heartbeat
+// start ping inside the run (a lock-skipped run must look like a skip, not a
+// started-then-died run, to the dead-man's switch).
 if !backupDryRun {
     if case .busy = SingleInstanceLock.acquire() {
         Console.note("another baaackaaab run is in progress — skipping this run")
