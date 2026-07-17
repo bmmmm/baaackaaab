@@ -53,6 +53,8 @@ func printUsage() {
         ("--add-ntfy <url>", "persist an ntfy topic URL to push the run outcome to (repeatable)"),
         ("--add-webhook <url>", "persist a webhook URL to POST the run outcome to as JSON (repeatable)"),
         ("--remove-notify <url>", "drop a previously-added ntfy/webhook channel by its URL"),
+        ("--set-prom-textfile <dir>", "persist a node_exporter textfile-collector dir; every real run writes <dir>/baaackaaab.prom"),
+        ("--clear-prom-textfile", "stop writing the Prometheus textfile"),
         ("--config <path>", "backup-set file (default ~/.config/baaackaaab/backup-set.json)"),
     ])
     Console.note("A bare `baaackaaab` (no source flags) backs up the set; the launchd timer runs exactly that. Any explicit --drive-folder/--photo-album REPLACES the whole set for that run (folders AND albums), it does not add to it. Add --dry-run to preview a backup (reports what would upload, writes nothing; Photos are skipped in a dry run). On a terminal a real backup shows a live progress bar (percent, bytes, ETA); piped or under the timer it logs restic's plain output.")
@@ -61,8 +63,10 @@ func printUsage() {
     Console.section("Monitoring & notifications", detail: "outbound heartbeat + push — a macOS banner is invisible when you're away")
     Console.info([
         ("--test-notify", "fire a sample message through every configured channel + a heartbeat ping, report delivered/failed, then exit"),
+        ("--status-export", "rebuild status.json (+ the Prometheus textfile, if configured) on demand, print its path, then exit"),
     ])
     Console.note("The heartbeat is a Healthchecks-style dead-man's switch: GET <url>/start at run begin, GET <url> on success, GET <url>/fail on failure. The alarm fires on the MONITOR side when a ping goes missing — the only way to catch a run that stopped happening entirely (crashed, unplugged, timer disabled), not just one that failed while running. Push channels (ntfy/webhook) additionally deliver the outcome away from the Mac. Both are best-effort: a delivery failure never changes a run's exit code. --test-notify proves the whole path before you rely on it.")
+    Console.note("Every REAL run (never a dry run) also writes status.json under the support dir — a stable, documented machine-readable snapshot (last run, per-destination churn, repo size/quota, last restore drill) for scripts/dashboards that would rather poll a file than parse console output. --set-prom-textfile additionally writes a node_exporter textfile-collector file alongside it. Both are best-effort like the heartbeat/push channels above.")
 
     Console.section("Restic target")
     Console.info([

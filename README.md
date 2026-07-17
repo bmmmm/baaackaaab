@@ -328,6 +328,63 @@ through every configured channel plus a heartbeat ping, synchronously, and
 reports delivered/failed per channel with an actionable reason (e.g. "ntfy
 returned HTTP 404 — check the topic URL is correct").
 
+### Machine-readable status
+
+Heartbeat/push notify on a run's *outcome*; sometimes you want to poll a file
+instead — a status widget, a `cron`-driven check, a Prometheus scrape. Every
+REAL run (never a dry run — it wrote nothing worth reporting) writes
+`status.json` under the support dir (`~/Library/Application Support/baaackaaab/`,
+or `$BAAACKAAAB_SUPPORT_DIR`). `baaackaaab --status-export` rebuilds it (and the
+Prometheus textfile below, if configured) on demand and prints its path,
+without waiting for the next scheduled run.
+
+Unlike `runs.ndjson` (an internal implementation detail, free to change shape),
+`status.json` is a **stable, documented contract** — additions are additive
+only. Top-level keys:
+
+```
+schema_version   integer, currently 1
+generated_at     ISO-8601 timestamp this file was written
+last_run         { tag, start, end, exit_code, outcome, verified, total, source_failures }
+                 outcome is one of "ok" | "partial" | "failed" | "cancelled"
+destinations     [ { name, ok, data_added, bytes_processed } ]   — the last run's per-destination churn;
+                 data_added/bytes_processed are OMITTED (not null) when that run had no metrics for it
+repo             { size_bytes, quota_bytes, quota_fraction }     — present only when the repo size was sampled
+last_drill       { time, ok, bytes, snapshots }                  — present only once a restore drill has run;
+                 snapshots is the sampled-snapshot COUNT, not their ids
+```
+
+`last_run`/`repo`/`last_drill` are each entirely absent (not `null`-filled)
+until there is something to report — no backup run yet, no quota configured
+and no `--status-export` probe run, no restore drill yet, respectively.
+
+```sh
+baaackaaab --set-prom-textfile /usr/local/etc/node_exporter/textfile_collector
+baaackaaab --clear-prom-textfile
+```
+
+**Prometheus.** With a directory configured, the same moments that write
+status.json also write `<dir>/baaackaaab.prom` in node_exporter's
+[textfile-collector](https://github.com/prometheus/node_exporter#textfile-collector)
+format — point `node_exporter --collector.textfile.directory=<dir>` at it.
+Gauges: `baaackaaab_last_run_timestamp_seconds`, `baaackaaab_last_run_success`
+(0/1), `baaackaaab_last_run_exit_code`, `baaackaaab_verified_files`,
+`baaackaaab_total_files`, `baaackaaab_dest_ok{dest="…"}`,
+`baaackaaab_dest_data_added_bytes{dest="…"}`, `baaackaaab_repo_size_bytes`,
+`baaackaaab_repo_quota_bytes`, `baaackaaab_last_drill_timestamp_seconds`. A
+metric with no known value (e.g. the repo size was never sampled) is omitted
+entirely rather than emitted as 0. If the directory doesn't exist or isn't
+writable, a run logs one actionable warning and continues — this never fails a
+backup, matching the heartbeat/push contract above.
+
+**Privacy note.** Both files carry status only — counts, booleans, byte
+figures, an outcome word — never a repo URL, a file path, or a credential-file
+location, the same discipline as the heartbeat/push payloads above. Treat
+`status.json` as world-visible content even though it is written `0600`: any
+other local tool/process that can read the support dir can read it (the
+Prometheus textfile is written with the directory's default permissions, since
+node_exporter itself needs to read it).
+
 ### Maintenance & diagnostics
 
 ```sh
@@ -442,6 +499,7 @@ git push --no-verify
 | `AppendOnlyProbe.swift` | `--doctor`'s active append-only enforcement DELETE probe |
 | `Notifier.swift` | the local macOS banner (osascript), failure-only |
 | `OutboundNotifier.swift` | outbound heartbeat + ntfy/webhook push, best-effort, every terminal outcome |
+| `StatusExport.swift` | status.json (stable contract) + the Prometheus node_exporter textfile |
 
 ## Security notes
 
