@@ -154,6 +154,7 @@ struct CLIArguments {
         "--target", "--include", "--sample", "--max-bytes", "--destination",
         "--read-data-subset", "--at", "--days", "--day", "--repo-quota-bytes",
         "--quota-warn-fraction", "--materialize-test", "--evict-test",
+        "--export-recovery-kit", "--export-recovery-kit-plain",
     ]
     /// Flags that stand alone (no value).
     static let boolFlags: Set<String> = [

@@ -16,6 +16,8 @@ func printUsage() {
         ("--init-credentials", "generate + store both secrets in 0600 files, print the server hash (refuses if files exist; --force overwrites + ORPHANS the repo)"),
         ("--migrate-credentials", "move existing Keychain secrets into 0600 files (one last Keychain prompt)"),
         ("--check", "verify the server is reachable, init the repo, then exit"),
+        ("--export-recovery-kit <path>", "write an OFFLINE recovery sheet (every destination's repo URL + password), AES-256 encrypted, then exit"),
+        ("--export-recovery-kit-plain <path>", "same, but UNENCRYPTED (extra-loud warning) — for when you'll encrypt it yourself"),
     ])
 
     Console.section("Sources")

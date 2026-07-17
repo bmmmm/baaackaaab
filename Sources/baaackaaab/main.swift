@@ -79,6 +79,19 @@ if cli.has("--migrate-credentials") {
     catch { Console.error("\(error)"); exit(1) }
 }
 
+// Emergency recovery kit: an offline Markdown sheet with every destination's
+// repo URL + encryption password + plain-restic recovery steps, so the backup
+// is recoverable even if this Mac (and its 0600 credential files) is lost.
+// Encrypted by default; --export-recovery-kit-plain skips encryption.
+if cli.has("--export-recovery-kit") {
+    exportRecoveryKitCommand(plain: false)
+    exit(0)
+}
+if cli.has("--export-recovery-kit-plain") {
+    exportRecoveryKitCommand(plain: true)
+    exit(0)
+}
+
 // Connectivity + auth + repo-init check, then exit.
 if cli.has("--check") {
     checkRemote()

@@ -43,6 +43,17 @@ enum RestoreEngine {
         ]
     }
 
+    /// True when `path` is at or under one of the live iCloud Drive / Photos
+    /// roots this tool must never write into (see `forbiddenRoots`). Shared by
+    /// `validateTarget` (restore targets) and the recovery-kit export, which
+    /// must refuse the same roots — a recovery kit synced back into the
+    /// compromised-source domain defeats its purpose. Same case-insensitive,
+    /// symlink-resolved comparison as the restore gate.
+    static func isInsideForbiddenRoot(_ path: URL) -> Bool {
+        let resolved = canonicalize(path)
+        return forbiddenRoots().contains { isAtOrUnder(resolved, canonicalize($0)) }
+    }
+
     /// Hard safety gate on the restore target. Rejects the filesystem root and
     /// near-root paths, the home directory itself, anything inside live iCloud
     /// Drive / Photos, and any existing non-empty directory. A non-existent path

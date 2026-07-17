@@ -156,6 +156,39 @@ baaackaaab --list-destinations
 A run backs up to every enabled destination, primary-first. The Mac stays read +
 append only toward all of them.
 
+### Emergency recovery kit
+
+The two secrets — the repo URL and the restic encryption password — live only in
+`0600` files on this Mac. If the Mac dies, so do they, and the append-only store
+becomes permanently undecryptable with them; the server never holds a copy of the
+encryption key. `--export-recovery-kit` writes a single offline Markdown sheet
+that fixes that: every destination's full repo URL, its restic encryption
+password, the endpoint (htpasswd) password (extracted from the URL where
+present), and terse plain-`restic` recovery steps that need nothing but stock
+restic on any machine — no baaackaaab, no Mac.
+
+```sh
+baaackaaab --export-recovery-kit ~/Desktop/baaackaaab-recovery.md.enc
+```
+
+The sheet is encrypted by default (`openssl enc -aes-256-cbc -pbkdf2 -iter 600000
+-salt`), with an interactive, non-echoed passphrase prompt (min 10 characters,
+never on argv or in the environment). Decrypt it on any machine with stock
+openssl:
+
+```sh
+openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -in baaackaaab-recovery.md.enc
+```
+
+`--export-recovery-kit-plain <path>` skips encryption for a printable sheet
+(extra-loud warning — treat the plaintext file itself as the master key). Either
+way, **get this file OFF the Mac immediately**: print it, put it in a password
+manager, or seal it on a USB stick — never a synced folder (that is exactly the
+compromised-source domain this backup exists to survive), never git. Both
+variants refuse to write into live iCloud Drive / Photos. A destination whose
+credential files are missing/unreadable at export time is noted as incomplete in
+the sheet rather than failing the whole export.
+
 ### Backends & the immutability caveat
 
 A destination is just a restic repository URL plus its own encryption key, so
@@ -293,7 +326,8 @@ make test     # or: swift test
 The suite covers the headless pure-logic surface — argument parsing, the backup-set
 model, restore path-safety, secret redaction and credential generation, version
 parsing/comparison and the server-endpoint extraction behind the update check, the
-launchd schedule round-trip, staging-path sanitizing, notification escaping, and
+launchd schedule round-trip, staging-path sanitizing, notification escaping, the
+recovery-kit sheet composition and passphrase validation, and
 the on-disk destination and run-history stores. Store tests relocate to a throwaway directory via
 `BAAACKAAAB_SUPPORT_DIR`, so they never touch the real credential store. The live
 GitHub query and HTTP header probe touch the network, so they are not unit-tested —

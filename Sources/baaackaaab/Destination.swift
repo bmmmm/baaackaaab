@@ -86,6 +86,22 @@ struct Destination {
         case .unset: return false
         }
     }
+
+    /// The CLEARTEXT encryption password — for the recovery kit only. Every
+    /// other consumer of a destination must stay redacted/path-only; this exists
+    /// solely to compose an intentionally-plaintext offline recovery sheet. nil
+    /// when the file is missing/unreadable/empty, so the caller can note the
+    /// destination is incomplete rather than exporting a blank password.
+    var passwordValue: String? {
+        switch password {
+        case .value(let v): return v.isEmpty ? nil : v
+        case .file(let u):
+            guard let data = FileManager.default.contents(atPath: u.path) else { return nil }
+            let s = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return (s?.isEmpty ?? true) ? nil : s
+        case .unset: return nil
+        }
+    }
 }
 
 /// On-disk metadata for a stored destination (everything that isn't a secret).

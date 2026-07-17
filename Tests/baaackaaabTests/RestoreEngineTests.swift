@@ -101,6 +101,18 @@ final class RestoreEngineTests: XCTestCase {
         assertRejected(file, "a plain file at the target path is refused")
     }
 
+    // MARK: - isInsideForbiddenRoot (shared with the recovery-kit export gate)
+
+    func testIsInsideForbiddenRootTrueForICloudDrive() {
+        XCTAssertTrue(RestoreEngine.isInsideForbiddenRoot(
+            home.appendingPathComponent("Library/Mobile Documents/com~apple~CloudDocs/x")))
+    }
+
+    func testIsInsideForbiddenRootFalseForOrdinaryPath() {
+        XCTAssertFalse(RestoreEngine.isInsideForbiddenRoot(
+            URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("recovery-kit-\(UUID().uuidString)")))
+    }
+
     // MARK: - defaultTarget
 
     func testDefaultTargetIsDeterministicUnderHome() {

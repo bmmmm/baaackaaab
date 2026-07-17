@@ -142,6 +142,14 @@ final class CLIArgumentsTests: XCTestCase {
         XCTAssertTrue(CLIArguments(tokens: ["--clear-rest-connections"]).has("--clear-rest-connections"))
     }
 
+    // MARK: - --export-recovery-kit / --export-recovery-kit-plain
+
+    func testRecoveryKitFlagsAreRecognizedAndParsed() {
+        XCTAssertNil(CLIArguments.unknownArgument(in: ["baaackaaab", "--export-recovery-kit", "~/Desktop/kit.md.enc"]))
+        XCTAssertNil(CLIArguments.unknownArgument(in: ["baaackaaab", "--export-recovery-kit-plain", "~/Desktop/kit.md"]))
+        XCTAssertEqual(CLIArguments(tokens: ["--export-recovery-kit", "/x/kit.enc"]).value("--export-recovery-kit"), "/x/kit.enc")
+    }
+
     /// A flag value may legitimately start with '-' or look like a bare word — it
     /// is consumed by its flag, never checked. `--diff` consumes two.
     func testUnknownArgumentSkipsFlagValues() {
