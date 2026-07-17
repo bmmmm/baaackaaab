@@ -32,6 +32,31 @@ struct Schedule {
         return names[((wd % 7) + 7) % 7]
     }
 
+    /// The intended interval between scheduled runs — the anchor for the catch-up
+    /// staleness gate and the dashboard's overdue judgment. Daily (or monthly)
+    /// collapses to its base period; a weekday list uses the LARGEST gap between
+    /// consecutive scheduled days, so a run is only "overdue" once the longest
+    /// normal quiet stretch has passed (mon/wed/fri → 3 days, from Fri to Mon).
+    /// Times-of-day are ignored: day granularity is what the boot catch-up needs.
+    func intendedInterval() -> TimeInterval {
+        let day: TimeInterval = 86_400
+        if dayOfMonth != nil { return 30 * day }        // monthly (drill/check use their own gates)
+        if weekdays.isEmpty { return day }              // daily
+        return Double(Self.maxWeekdayGap(weekdays)) * day
+    }
+
+    /// The largest gap (in days) between consecutive scheduled weekdays, treating
+    /// the week as a cycle (so a single day → 7, and the wrap from the last day
+    /// back to the first is included). Pure — directly unit-testable.
+    static func maxWeekdayGap(_ weekdays: [Int]) -> Int {
+        let ds = Set(weekdays.map { (($0 % 7) + 7) % 7 }).sorted()
+        guard let first = ds.first, let last = ds.last else { return 1 }
+        if ds.count == 1 { return 7 }
+        var gap = (first + 7) - last                    // wrap-around gap
+        for i in 1..<ds.count { gap = max(gap, ds[i] - ds[i - 1]) }
+        return gap
+    }
+
     /// Human-readable summary, e.g. "daily at 12:00", "Mon, Wed, Fri at 09:00,
     /// 18:00", or "monthly on day 1 at 03:00".
     func describe() -> String {
@@ -83,12 +108,17 @@ enum LaunchdTimer {
         Console.banner("baaackaaab", tagline: "scheduled backup")
 
         let exe = executablePath()
-        var program = [exe, "--run-tag", "scheduled"]
+        // `--catch-up` + RunAtLoad make the job also fire once at login/boot and
+        // catch up a backup missed while the Mac was off. The marker gates the run
+        // through a staleness check first (fresh → quiet skip; overdue → back up),
+        // so the extra login/boot fire is cheap and the duplicate right after a
+        // normal calendar run is swallowed.
+        var program = [exe, "--run-tag", "scheduled", "--catch-up"]
         if configPath.path != BackupSet.defaultPath().path {
             program += ["--config", configPath.path]
         }
 
-        let plist = try writeAndLoad(label: label, program: program, schedule: schedule)
+        let plist = try writeAndLoad(label: label, program: program, schedule: schedule, runAtLoad: true)
 
         Console.section("LaunchAgent", detail: plist.path)
         Console.info([
@@ -161,12 +191,13 @@ enum LaunchdTimer {
     /// to report. Reloads cleanly: bootout any prior instance (ignore "not
     /// loaded"), then bootstrap; fall back to the legacy load/unload verbs where
     /// bootstrap is unavailable.
-    private static func writeAndLoad(label: String, program: [String], schedule: Schedule) throws -> URL {
+    private static func writeAndLoad(label: String, program: [String], schedule: Schedule,
+                                     runAtLoad: Bool = false) throws -> URL {
         let plist = plistURL(for: label)
         try ensureDir(plist.deletingLastPathComponent())
         try ensureDir(logURL.deletingLastPathComponent())
 
-        let xml = plistXML(label: label, program: program, schedule: schedule, log: logURL.path)
+        let xml = plistXML(label: label, program: program, schedule: schedule, log: logURL.path, runAtLoad: runAtLoad)
         try xml.write(to: plist, atomically: true, encoding: .utf8)
 
         _ = launchctl(["bootout", "\(domain)/\(label)"])
@@ -350,8 +381,13 @@ enum LaunchdTimer {
         return Schedule(times: times, weekdays: weekdays.sorted(), dayOfMonth: dayOfMonth)
     }
 
-    static func plistXML(label: String, program: [String], schedule: Schedule, log: String) -> String {
+    static func plistXML(label: String, program: [String], schedule: Schedule, log: String,
+                         runAtLoad: Bool = false) -> String {
         let args = program.map { "        <string>\(xmlEscape($0))</string>" }.joined(separator: "\n")
+        // RunAtLoad fires the job once when launchd loads it (login/boot) in
+        // addition to the calendar schedule — the boot catch-up path. Only the
+        // backup timer sets it; the drill/check timers stay purely calendar-driven.
+        let runAtLoadXML = runAtLoad ? "    <key>RunAtLoad</key>\n    <true/>\n" : ""
         return """
         <?xml version="1.0" encoding="UTF-8"?>
         <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -363,7 +399,7 @@ enum LaunchdTimer {
             <array>
         \(args)
             </array>
-            <key>StartCalendarInterval</key>
+        \(runAtLoadXML)    <key>StartCalendarInterval</key>
         \(calendarIntervalXML(schedule))
             <key>StandardOutPath</key>
             <string>\(xmlEscape(log))</string>

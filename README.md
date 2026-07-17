@@ -251,6 +251,24 @@ The timer runs `baaackaaab --run-tag scheduled`. It needs no Keychain prompt (th
 credential files are read directly); it needs a one-time Photos grant, which a
 stable signature then keeps alive across rebuilds.
 
+#### Catch-up on boot/login
+
+The backup LaunchAgent also sets `RunAtLoad` and carries a `--catch-up` marker, so
+it fires once when launchd loads it (login/boot) on top of the calendar schedule.
+A `--catch-up` run first evaluates a staleness gate against the **installed
+schedule's interval** (daily → 1 day; a weekday list → its largest gap, e.g.
+mon/wed/fri → 3 days):
+
+- **Fresh** — a successful backup younger than the interval is on record: it exits
+  0 with one quiet line. This is what makes the extra login/boot fire cheap, and it
+  swallows the duplicate fire right after a normal calendar run.
+- **Overdue / no history** — the Mac was off over a scheduled slot (or never backed
+  up): it prints `backup is N days overdue — catching up now`, posts a banner (the
+  same unattended gate as the failure banner), and runs the backup.
+
+**Existing installs get `RunAtLoad` + `--catch-up` on the next `--install-timer`** —
+the plist is regenerated on every install.
+
 #### Rotating integrity check
 
 A second scheduled job re-hashes the *stored bytes* to catch on-disk bit-rot — the

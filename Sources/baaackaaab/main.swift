@@ -392,6 +392,12 @@ runFmt.dateFormat = "yyyyMMdd-HHmmss"
 let runTag = cli.value("--run-tag") ?? "run-\(runFmt.string(from: Date()))"
 let runStart = Date()
 
+// Catch-up gate (RunAtLoad / boot). With `--catch-up`, exit quietly when a recent
+// successful backup is already on record; otherwise announce the catch-up (and
+// banner it unattended) and fall through to the normal backup below. A no-op
+// without the marker. Evaluated here, before any backup work begins.
+catchUpGateOrProceed()
+
 // Hand off to the extracted orchestrator: it runs init, quota, Drive, Photos,
 // manifest, summary, run-history and exit codes, then exits the process.
 BackupRun(

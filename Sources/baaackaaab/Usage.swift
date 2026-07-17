@@ -117,6 +117,7 @@ func printUsage() {
         ("--uninstall-check-timer", "remove the integrity-check LaunchAgent, then exit"),
     ])
     Console.note("The timer runs `baaackaaab --run-tag scheduled` (backs up the set). restic reads the credential files directly, so the unattended run needs no Keychain prompt — only a one-time Photos grant (`make release` + one manual backup, so a stable signature keeps the TCC grant across rebuilds).")
+    Console.note("The backup timer also runs at login/boot (RunAtLoad) with a --catch-up marker: that run backs up only if the last successful backup is older than the schedule's interval (catching up a slot missed while the Mac was off), and exits quietly otherwise. Existing installs pick this up on the next --install-timer.")
     Console.note("The monthly restore-drill timer runs `baaackaaab --restore-drill`: it restore-verifies a rotating sample into a temp dir (read-only on the store), records the result in the run history, and posts a banner ONLY on failure. The command center shows the last verified restore; --doctor reports it too.")
     Console.note("The integrity-check timer runs `baaackaaab --verify-repo --rotate-read-data`: each run re-hashes the next rotating 1/8 of the pack data with `restic check` (read-only), records it, and banners only on failure — after 8 runs every pack has been re-read once (on-disk bit-rot detection the restore drill can't be). The command center and --doctor show the last check + slice position.")
 

@@ -74,6 +74,53 @@ final class ScheduleTests: XCTestCase {
         XCTAssertNil(back.dayOfMonth)
     }
 
+    // MARK: - intendedInterval (the catch-up / overdue anchor)
+
+    func testDailyIntervalIsOneDay() {
+        let s = Schedule(times: [(hour: 12, minute: 0)], weekdays: [])
+        XCTAssertEqual(s.intendedInterval(), 86_400, accuracy: 0.5)
+    }
+
+    func testWeekdayListIntervalIsLargestGap() {
+        // Mon/Wed/Fri: gaps 2,2 and the Fri→Mon wrap of 3 → 3 days.
+        let s = Schedule(times: [(hour: 2, minute: 0)], weekdays: [1, 3, 5])
+        XCTAssertEqual(s.intendedInterval(), 3 * 86_400, accuracy: 0.5)
+    }
+
+    func testSingleWeekdayIntervalIsOneWeek() {
+        let s = Schedule(times: [(hour: 2, minute: 0)], weekdays: [3])   // weekly on Wed
+        XCTAssertEqual(s.intendedInterval(), 7 * 86_400, accuracy: 0.5)
+    }
+
+    func testMaxWeekdayGapHandlesWrapAndSundayForms() {
+        XCTAssertEqual(Schedule.maxWeekdayGap([1, 3, 5]), 3)     // Mon,Wed,Fri
+        XCTAssertEqual(Schedule.maxWeekdayGap([0, 6]), 6)        // Sun,Sat → 6-day gap Sun→Sat
+        XCTAssertEqual(Schedule.maxWeekdayGap([1]), 7)           // single day → weekly
+        XCTAssertEqual(Schedule.maxWeekdayGap([]), 1)            // empty → daily fallback
+    }
+
+    // MARK: - RunAtLoad (backup timer's boot catch-up)
+
+    func testBackupTimerPlistHasRunAtLoadAndCatchUp() {
+        let xml = LaunchdTimer.plistXML(
+            label: LaunchdTimer.label,
+            program: ["/usr/local/bin/baaackaaab", "--run-tag", "scheduled", "--catch-up"],
+            schedule: Schedule(times: [(hour: 12, minute: 0)], weekdays: []),
+            log: "/tmp/baaackaaab.log", runAtLoad: true)
+        XCTAssertTrue(xml.contains("<key>RunAtLoad</key>"), xml)
+        XCTAssertTrue(xml.contains("<string>--catch-up</string>"), xml)
+    }
+
+    func testDrillAndCheckTimersHaveNoRunAtLoad() {
+        // Only the backup timer opts into RunAtLoad; the drill/check are calendar-only.
+        let xml = LaunchdTimer.plistXML(
+            label: LaunchdTimer.drillLabel,
+            program: ["/usr/local/bin/baaackaaab", "--restore-drill"],
+            schedule: Schedule(times: [(hour: 3, minute: 0)], weekdays: [], dayOfMonth: 1),
+            log: "/tmp/baaackaaab.log")   // runAtLoad defaults false
+        XCTAssertFalse(xml.contains("<key>RunAtLoad</key>"), xml)
+    }
+
     func testScheduleParserRejectsPlistWithoutInterval() {
         let xml = """
         <?xml version="1.0" encoding="UTF-8"?>
