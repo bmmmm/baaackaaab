@@ -202,6 +202,14 @@ let configPath: URL = cli.value("--config").map {
     URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath)
 } ?? BackupSet.defaultPath()
 
+// Prove the alerting path before it is relied on: fires a sample message through
+// every configured channel + a heartbeat ping, synchronously, reporting
+// delivered/failed per channel. Read-only on the backup set.
+if cli.has("--test-notify") {
+    testNotifyCommand(configPath: configPath)
+    exit(0)
+}
+
 // Scheduled-backup launchd timer. Installs/removes a per-user LaunchAgent that
 // runs `baaackaaab --run-tag scheduled` (non-bare, so it backs up the set under
 // launchd without a TTY). These touch the user's launchd, not the repo.
@@ -283,7 +291,8 @@ if cli.hasAny(["--list", "--add-folder", "--remove-folder", "--add-album", "--re
                "--limit-upload", "--clear-limit-upload", "--pack-size", "--clear-pack-size",
                "--rest-connections", "--clear-rest-connections",
                "--repo-quota", "--clear-repo-quota",
-               "--add-exclude", "--remove-exclude", "--add-exclude-file", "--remove-exclude-file"]) {
+               "--add-exclude", "--remove-exclude", "--add-exclude-file", "--remove-exclude-file",
+               "--set-heartbeat", "--clear-heartbeat", "--add-ntfy", "--add-webhook", "--remove-notify"]) {
     manageBackupSet(configPath: configPath)
     exit(0)
 }
@@ -299,6 +308,8 @@ var configPackSizeMiB: Int? = nil
 var configRestConnections: Int? = nil
 var configExcludes: [String] = []
 var configExcludeFiles: [String] = []
+var configHeartbeatURL: String? = nil
+var configNotifyChannels: [NotifyChannel] = []
 if driveFolders.isEmpty && photoAlbums.isEmpty
     && FileManager.default.fileExists(atPath: configPath.path) {
     do {
@@ -311,6 +322,8 @@ if driveFolders.isEmpty && photoAlbums.isEmpty
         configRestConnections = set.restConnections
         configExcludes = set.excludes
         configExcludeFiles = set.excludeFiles
+        configHeartbeatURL = set.heartbeatURL
+        configNotifyChannels = set.notifyChannels
     } catch {
         Console.error("backup set at \(configPath.path) is unreadable — fix or delete it: \(error)")
         exit(1)
@@ -390,5 +403,7 @@ BackupRun(
     driveFolders: driveFolders,
     photoAlbums: photoAlbums,
     stagingURL: stagingURL,
-    photoBatchBytes: photoBatchBytes
+    photoBatchBytes: photoBatchBytes,
+    heartbeatURL: configHeartbeatURL,
+    notifyChannels: configNotifyChannels
 ).execute()

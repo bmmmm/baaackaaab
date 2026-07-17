@@ -11,10 +11,6 @@ func listBackupSet(_ set: BackupSet, path: URL, existed: Bool) {
         Console.note("no backup set yet — add folders with --add-folder <dir>, albums with --add-album <name>")
         return
     }
-    if set.isEmpty {
-        Console.note("empty — add folders with --add-folder <dir>, albums with --add-album <name>")
-        return
-    }
     var pairs: [(String, String)] = []
     for f in set.driveFolders { pairs.append(("drive", f)) }
     for a in set.photoAlbums { pairs.append(("photo", "album \"\(a)\"")) }
@@ -32,6 +28,20 @@ func listBackupSet(_ set: BackupSet, path: URL, existed: Bool) {
     }
     for e in set.excludes { pairs.append(("exclude", e)) }
     for f in set.excludeFiles { pairs.append(("exclude-file", f)) }
+    if let hb = set.heartbeatURL {
+        pairs.append(("heartbeat", Credentials.redactMonitorURL(hb)))
+    }
+    for ch in set.notifyChannels {
+        pairs.append(("notify", "\(ch.type.rawValue): \(Credentials.redactMonitorURL(ch.url))"))
+    }
+    // `set.isEmpty` only means "no drive folders/photo albums" (the sources a
+    // backup would run against) — a set with only tuning knobs, excludes, or
+    // monitoring configured must still print THOSE, not the "empty" hint. Gate
+    // on whether there is anything to show at all, not on that narrower flag.
+    if pairs.isEmpty {
+        Console.note("empty — add folders with --add-folder <dir>, albums with --add-album <name>")
+        return
+    }
     Console.info(pairs)
     Console.note("Plus always-on defaults: macOS junk (\(ResticBackend.junkExcludes.joined(separator: ", "))) and CACHEDIR.TAG-tagged caches are excluded on every backup.")
 }
@@ -160,6 +170,42 @@ func manageBackupSet(configPath: URL) {
     for raw in cli.values("--remove-exclude-file") {
         if set.removeExcludeFile(raw) { changed = true; Console.success("removed exclude-file  \(raw)") }
         else { Console.note("exclude-file not in set: \(raw)") }
+    }
+    // Heartbeat: a Healthchecks-style dead-man's-switch URL, persisted so the
+    // unattended timer pings it too — a monitor that never hears from a stopped
+    // machine is the failure a local macOS banner can never report.
+    if let raw = cli.value("--set-heartbeat") {
+        guard OutboundNotifier.isValidHTTPURL(raw) else {
+            Console.error("--set-heartbeat needs an http(s) URL — got '\(raw)' (e.g. https://hc-ping.com/your-uuid)")
+            exit(1)
+        }
+        if set.setHeartbeat(raw) { changed = true; Console.success("heartbeat set to  \(Credentials.redactMonitorURL(raw))") }
+        else { Console.note("heartbeat already set to that URL") }
+    }
+    if cli.has("--clear-heartbeat") {
+        if set.clearHeartbeat() { changed = true; Console.success("heartbeat cleared") }
+        else { Console.note("no heartbeat was set") }
+    }
+    // Push channels: ntfy and generic webhook, persisted so the timer pushes too.
+    if let raw = cli.value("--add-ntfy") {
+        guard OutboundNotifier.isValidHTTPURL(raw) else {
+            Console.error("--add-ntfy needs an http(s) topic URL — got '\(raw)' (e.g. https://ntfy.sh/your-topic)")
+            exit(1)
+        }
+        if set.addNotifyChannel(type: .ntfy, url: raw) { changed = true; Console.success("added ntfy channel  \(Credentials.redactMonitorURL(raw))") }
+        else { Console.note("ntfy channel already configured: \(Credentials.redactMonitorURL(raw))") }
+    }
+    if let raw = cli.value("--add-webhook") {
+        guard OutboundNotifier.isValidHTTPURL(raw) else {
+            Console.error("--add-webhook needs an http(s) URL — got '\(raw)'")
+            exit(1)
+        }
+        if set.addNotifyChannel(type: .webhook, url: raw) { changed = true; Console.success("added webhook channel  \(Credentials.redactMonitorURL(raw))") }
+        else { Console.note("webhook channel already configured: \(Credentials.redactMonitorURL(raw))") }
+    }
+    if let raw = cli.value("--remove-notify") {
+        if set.removeNotifyChannel(url: raw) { changed = true; Console.success("removed notify channel  \(Credentials.redactMonitorURL(raw))") }
+        else { Console.note("no notify channel matches that URL: \(Credentials.redactMonitorURL(raw))") }
     }
 
     if changed {
