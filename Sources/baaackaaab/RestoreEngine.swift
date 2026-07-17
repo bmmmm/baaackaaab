@@ -43,8 +43,34 @@ enum RestoreEngine {
         ]
     }
 
+    /// The domain-marker xattr macOS FileProvider sets on the ROOT of a synced
+    /// directory. With iCloud's Desktop & Documents sync the synced trees live at
+    /// `~/Desktop` and `~/Documents` DIRECTLY — outside the static
+    /// `~/Library/Mobile Documents` container — so a static root list alone
+    /// misses them; the marker is what actually identifies a synced tree.
+    static let fileProviderMarkerXattr = "com.apple.file-provider-domain-id"
+
+    /// True when any EXISTING component along `path` carries the FileProvider
+    /// domain-marker xattr — i.e. the path lives inside a cloud-synced tree
+    /// (iCloud Desktop & Documents sync, or a third-party provider), regardless
+    /// of where that tree is mounted.
+    static func isInsideFileProviderTree(_ path: URL) -> Bool {
+        var components = canonicalize(path).pathComponents
+        let fm = FileManager.default
+        while components.count >= 2 {
+            let ancestor = NSString.path(withComponents: components)
+            if fm.fileExists(atPath: ancestor),
+               getxattr(ancestor, fileProviderMarkerXattr, nil, 0, 0, 0) != -1 {
+                return true
+            }
+            components.removeLast()
+        }
+        return false
+    }
+
     /// True when `path` is at or under one of the live iCloud Drive / Photos
-    /// roots this tool must never write into (see `forbiddenRoots`). Shared by
+    /// roots this tool must never write into (see `forbiddenRoots`), or inside
+    /// any FileProvider-synced tree (see `isInsideFileProviderTree`). Shared by
     /// `validateTarget` (restore targets) and the recovery-kit export, which
     /// must refuse the same roots — a recovery kit synced back into the
     /// compromised-source domain defeats its purpose. Same case-insensitive,
@@ -52,6 +78,7 @@ enum RestoreEngine {
     static func isInsideForbiddenRoot(_ path: URL) -> Bool {
         let resolved = canonicalize(path)
         return forbiddenRoots().contains { isAtOrUnder(resolved, canonicalize($0)) }
+            || isInsideFileProviderTree(resolved)
     }
 
     /// Hard safety gate on the restore target. Rejects the filesystem root and
@@ -84,6 +111,11 @@ enum RestoreEngine {
                     path: path,
                     reason: "that is inside live iCloud Drive / Photos — restoring there could overwrite your originals")
             }
+        }
+        if isInsideFileProviderTree(resolved) {
+            throw RestoreError.unsafeTarget(
+                path: path,
+                reason: "that is inside a cloud-synced (FileProvider) folder — e.g. iCloud's Desktop & Documents sync; restoring there could overwrite your originals or sync them back")
         }
         // Fresh-directory requirement: non-existent is ideal; an existing path must
         // be an empty directory. A .DS_Store does not count as "in use".

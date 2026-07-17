@@ -22,7 +22,7 @@ enum RecoveryKitError: Error, CustomStringConvertible, Equatable {
     var description: String {
         switch self {
         case .forbiddenTarget(let p):
-            return "refusing to write the recovery kit into \(p) — it is inside live iCloud Drive / Photos. A recovery kit synced back into the compromised-source domain defeats its purpose; pick a path outside iCloud (e.g. a USB stick or ~/Desktop), then move it offline immediately."
+            return "refusing to write the recovery kit into \(p) — it is inside live iCloud Drive / Photos or a cloud-synced (FileProvider) folder; with Desktop & Documents sync that includes ~/Desktop and ~/Documents. A recovery kit synced back into the compromised-source domain defeats its purpose; pick a non-synced path (e.g. a USB stick, an external disk, or ~/Downloads), then move it offline immediately."
         case .opensslMissing:
             return "openssl not found on PATH — it ships with macOS and every Linux, so this is unusual; check your PATH. Without it the kit cannot be encrypted here. Use --export-recovery-kit-plain instead (unencrypted — extra risk in transit) or install openssl."
         case .opensslFailed(let code):

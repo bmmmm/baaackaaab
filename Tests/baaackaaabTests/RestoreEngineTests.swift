@@ -113,6 +113,48 @@ final class RestoreEngineTests: XCTestCase {
             URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("recovery-kit-\(UUID().uuidString)")))
     }
 
+    // MARK: - FileProvider-synced trees (iCloud Desktop & Documents sync)
+
+    // With Desktop & Documents sync, iCloud Drive surfaces at ~/Desktop and
+    // ~/Documents directly — OUTSIDE the static ~/Library/Mobile Documents root —
+    // so the gate must recognize the FileProvider domain-marker xattr instead of
+    // relying on the path. Simulated here by stamping the marker on a temp dir.
+    private func makeMarkedDir() throws -> URL {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("fileprovider-marked-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let ok = "test-domain".withCString { value in
+            setxattr(dir.path, RestoreEngine.fileProviderMarkerXattr, value, strlen(value), 0, 0) == 0
+        }
+        guard ok else {
+            throw XCTSkip("cannot set the FileProvider marker xattr on this volume (errno \(errno))")
+        }
+        return dir
+    }
+
+    func testRejectsTargetInsideFileProviderMarkedTree() throws {
+        let dir = try makeMarkedDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        assertRejected(dir.appendingPathComponent("restored-here"),
+                       "a target under a FileProvider-marked dir is refused")
+        XCTAssertTrue(RestoreEngine.isInsideForbiddenRoot(dir.appendingPathComponent("kit.enc")),
+                      "the recovery-kit gate shares the FileProvider refusal")
+    }
+
+    func testMarkerOnNonexistentTailStillDetectedViaAncestor() throws {
+        let dir = try makeMarkedDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        XCTAssertTrue(RestoreEngine.isInsideForbiddenRoot(
+            dir.appendingPathComponent("deep/not/yet/existing/kit.enc")),
+            "the marker on an existing ancestor must cover a non-existent tail")
+    }
+
+    func testUnmarkedTempDirIsNotFlaggedAsFileProvider() {
+        XCTAssertFalse(RestoreEngine.isInsideFileProviderTree(
+            URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("plain-\(UUID().uuidString)")),
+            "an ordinary temp path must not be flagged")
+    }
+
     // MARK: - defaultTarget
 
     func testDefaultTargetIsDeterministicUnderHome() {
