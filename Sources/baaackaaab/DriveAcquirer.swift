@@ -61,6 +61,19 @@ final class DriveAcquirer {
     /// COORDINATED READ — `NSFileCoordinator` faults the contents in on demand
     /// and only invokes the accessor once the bytes are present. We run it off
     /// the main thread and bound the wait with a semaphore timeout.
+    /// The materialize wait for a file of `bytes` logical size: a flat cap
+    /// punished exactly the largest (often most valuable) files — a multi-GB
+    /// video on a slow link legitimately needs longer than two minutes, and a
+    /// too-short timeout skips its folder EVERY run, a permanent backup gap.
+    /// Scaled at a conservative 1 MiB/s floor with the old 120 s minimum and a
+    /// 1 h ceiling (a stuck provider must still fail the folder eventually,
+    /// not stall the whole scheduled run forever). Pure — unit-testable.
+    static func materializeTimeout(forByteSize bytes: Int?) -> TimeInterval {
+        let base: TimeInterval = 120
+        guard let bytes, bytes > 0 else { return base }
+        return min(max(base, TimeInterval(bytes) / 1_048_576), 3_600)
+    }
+
     func ensureMaterialized(_ url: URL, timeout: TimeInterval) throws {
         if isMaterialized(url) { return }
         try? fm.startDownloadingUbiquitousItem(at: url)   // legacy kick; harmless no-op on FileProvider
@@ -137,7 +150,10 @@ final class DriveAcquirer {
             guard isFile else { continue }
 
             let rel = relativePath(of: fileURL, base: folder)
-            try ensureMaterialized(fileURL, timeout: 120)
+            // Logical size is available for a dataless stub too (the provider
+            // reports it), so the timeout can scale with the file it guards.
+            let logicalSize = (try? fileURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize
+            try ensureMaterialized(fileURL, timeout: Self.materializeTimeout(forByteSize: logicalSize))
             if isDataless(fileURL) { throw DriveError.stillDataless(rel) }
 
             // We already proved it is not dataless; the only remaining failure is

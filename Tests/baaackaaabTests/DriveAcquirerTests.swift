@@ -36,6 +36,18 @@ final class DriveAcquirerTests: XCTestCase {
         XCTAssertEqual(dataless, 0)
     }
 
+    // MARK: - materializeTimeout (size-scaled download wait)
+
+    func testMaterializeTimeoutScalesWithSize() {
+        // Small/unknown files keep the 120 s base.
+        XCTAssertEqual(DriveAcquirer.materializeTimeout(forByteSize: nil), 120)
+        XCTAssertEqual(DriveAcquirer.materializeTimeout(forByteSize: 5_000_000), 120)
+        // A 1 GiB file gets ~1024 s (1 MiB/s floor) instead of failing at 120 s.
+        XCTAssertEqual(DriveAcquirer.materializeTimeout(forByteSize: 1_073_741_824), 1_024)
+        // Ceiling: even a huge file must eventually fail rather than stall the run.
+        XCTAssertEqual(DriveAcquirer.materializeTimeout(forByteSize: 100_000_000_000), 3_600)
+    }
+
     // Same pin for the real pass: the symlink is not recorded, not "verified",
     // and the real file is verified with its own byte count.
     func testMaterializeAndVerifySkipsSymlinks() throws {

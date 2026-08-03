@@ -34,9 +34,62 @@ final class PhotosAcquirer {
     /// Upper bound on a single resource's iCloud download. Generous (a 4K video
     /// resource over a slow link is legitimately slow) but finite: without it a
     /// stuck download would hang the whole backup forever — and under launchd
-    /// that also blocks every following scheduled run. On timeout the resource is
-    /// recorded unverified and skipped; the run continues.
+    /// that also blocks every following scheduled run. On timeout the request is
+    /// CANCELLED (see exportResources), the resource is recorded unverified and
+    /// skipped; the run continues.
     private let resourceTimeout: TimeInterval = 600
+
+    /// Whether the current batch should flush BEFORE the next asset is exported:
+    /// only when the batch already holds data and the next asset's estimated
+    /// size would push it past the budget. Keeps peak staging disk at
+    /// ~max(budget, single asset) instead of budget + asset — on the
+    /// disk-constrained Mac this tool targets, a 4K-video asset landing on a
+    /// nearly-full batch would otherwise spike well past the documented
+    /// "~one batch" invariant. A nil estimate (PhotoKit exposes no public size)
+    /// changes nothing. Pure — unit-testable.
+    static func shouldPreFlush(batchBytes: Int, estimatedAssetBytes: Int?, budget: Int) -> Bool {
+        guard batchBytes > 0, let estimate = estimatedAssetBytes, estimate > 0 else { return false }
+        return batchBytes + estimate > budget
+    }
+
+    /// Best-effort size estimate for one asset: the sum of its resources'
+    /// `fileSize` values, read via KVC — PhotoKit has no public size API, but
+    /// this key has been stable for years and is only ever used to decide an
+    /// early flush (a nil/wrong estimate costs nothing but the old peak-disk
+    /// behavior). nil when no resource reports a size.
+    static func estimatedSize(of resources: [PHAssetResource]) -> Int? {
+        let sizes = resources.compactMap { ($0.value(forKey: "fileSize") as? NSNumber)?.intValue }
+        return sizes.isEmpty ? nil : sizes.reduce(0, +)
+    }
+
+    /// A FileHandle wrapper that makes "download chunk arrives" and "we gave up
+    /// and closed the file" safe to race: PHAssetResourceManager's
+    /// dataReceivedHandler can fire concurrently with the timeout path, and a
+    /// write on a closed FileHandle raises. All access under one lock; writes
+    /// after close are silently dropped (the request is being cancelled anyway).
+    final class GuardedFileWriter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var handle: FileHandle?
+        private(set) var failed = false
+
+        init?(path: String) {
+            guard FileManager.default.createFile(atPath: path, contents: nil),
+                  let h = FileHandle(forWritingAtPath: path) else { return nil }
+            handle = h
+        }
+
+        func write(_ data: Data) {
+            lock.lock(); defer { lock.unlock() }
+            guard let h = handle else { return }
+            do { try h.write(contentsOf: data) } catch { failed = true }
+        }
+
+        func close() {
+            lock.lock(); defer { lock.unlock() }
+            try? handle?.close()
+            handle = nil
+        }
+    }
 
     /// Bound on the one-time Photos authorization wait. Long enough for a human
     /// to answer the macOS prompt on first grant; under launchd TCC decides
@@ -133,6 +186,21 @@ final class PhotosAcquirer {
             for i in 0..<assets.count {
                 let asset = assets.object(at: i)
                 ordinal += 1
+                // Pre-flush: if this asset's estimated size would push the
+                // current batch past the budget, back up + clear the batch
+                // FIRST, so peak disk stays ~max(budget, asset) — see
+                // shouldPreFlush. An oversized single asset still exports (its
+                // data must be backed up) but into an otherwise-empty batch,
+                // with a warning naming the spike.
+                let resources = PHAssetResource.assetResources(for: asset)
+                let estimate = Self.estimatedSize(of: resources)
+                if Self.shouldPreFlush(batchBytes: batchBytes, estimatedAssetBytes: estimate,
+                                       budget: byteBudget) {
+                    try flush()
+                }
+                if let estimate, estimate > byteBudget {
+                    Console.warn("asset \(ordinal) is ~\(estimate) bytes — larger than the batch budget (\(byteBudget)); staging will briefly hold this one asset beyond the budget")
+                }
                 let assetDir = try batchDir().appendingPathComponent(
                     String(format: "%04d_%@", ordinal, Staging.sanitize(asset.localIdentifier)),
                     isDirectory: true
@@ -140,7 +208,7 @@ final class PhotosAcquirer {
                 try? FileManager.default.createDirectory(at: assetDir, withIntermediateDirectories: true)
 
                 let added = exportResources(
-                    of: asset, index: ordinal, count: totalAssets,
+                    of: asset, resources: resources, index: ordinal, count: totalAssets,
                     into: assetDir, inflight: inflightDir,
                     manager: manager, staging: staging
                 )
@@ -169,13 +237,18 @@ final class PhotosAcquirer {
     /// asset into `assetDir`. Returns the verified byte total. Each resource is
     /// downloaded into `inflight` (outside the batch tree) and renamed into the
     /// batch only once verified — a failed/timed-out download never has a path
-    /// inside anything restic reads, even if it completes late in the background.
+    /// inside anything restic reads.
+    ///
+    /// Uses `requestData` (chunks written via GuardedFileWriter) instead of
+    /// `writeData` because only requestData returns a request ID that
+    /// `cancelDataRequest` can stop: with writeData a timed-out download kept
+    /// running invisibly in the background — consuming network + disk after the
+    /// run had moved on, across every stuck resource of a scheduled run.
     private func exportResources(
-        of asset: PHAsset, index: Int, count: Int,
+        of asset: PHAsset, resources: [PHAssetResource], index: Int, count: Int,
         into assetDir: URL, inflight: URL,
         manager: PHAssetResourceManager, staging: Staging
     ) -> Int {
-        let resources = PHAssetResource.assetResources(for: asset)
         Console.step("asset \(index)/\(count) id=\(asset.localIdentifier) resources=\(resources.count)")
         var bytes = 0
 
@@ -195,21 +268,37 @@ final class PhotosAcquirer {
             let options = PHAssetResourceRequestOptions()
             options.isNetworkAccessAllowed = true   // allow download of cloud-only originals
 
+            guard let writer = GuardedFileWriter(path: tmp.path) else {
+                staging.record(AcquiredItem(
+                    source: "\(asset.localIdentifier)#\(resource.type.rawValue)",
+                    kind: "photo-resource", stagedPath: dest.path, byteCount: -1,
+                    verified: false, note: "could not create the staging file at \(tmp.path)"))
+                continue
+            }
             let semaphore = DispatchSemaphore(value: 0)
             let writeError = SyncBox<Error?>(nil)
-            manager.writeData(for: resource, toFile: tmp, options: options) { error in
+            let requestID = manager.requestData(for: resource, options: options,
+                                                dataReceivedHandler: { writer.write($0) },
+                                                completionHandler: { error in
                 writeError.value = error
                 semaphore.signal()
-            }
+            })
             let completed = semaphore.wait(timeout: .now() + resourceTimeout) == .success
+            if !completed {
+                // Actually stop the transfer — the whole point of requestData.
+                manager.cancelDataRequest(requestID)
+            }
+            writer.close()   // safe against a chunk still in flight (see GuardedFileWriter)
 
             let size = (try? tmp.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? -1
-            var ok = completed && writeError.value == nil && size > 0
+            var ok = completed && writeError.value == nil && !writer.failed && size > 0
             // On timeout, `writeError.value` is never read (the && short-circuits),
             // so there is no unsynchronized read racing the late completion handler.
             var note = !completed
-                ? "download timed out after \(Int(resourceTimeout))s"
+                ? "download timed out after \(Int(resourceTimeout))s — request cancelled"
                 : writeError.value.map { "\($0)" }
+                    ?? (writer.failed ? "writing the download to disk failed (disk full?)" : nil)
+                    ?? (size <= 0 ? "download completed but produced 0 bytes — not backed up" : nil)
             if ok {
                 do {
                     try FileManager.default.moveItem(at: tmp, to: dest)
