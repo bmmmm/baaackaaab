@@ -264,8 +264,8 @@ extension ConfigTUI {
     func homeUpdateLine(_ f: UpdateCheck.Finding, _ cols: Int) -> String {
         let refLabel = f.referenceKind == .latest ? "latest" : "baseline"
         switch f.verdict {
-        case .upToDate:
-            return green(fit("  \u{2713} \(f.component) \(f.installed!) \u{2014} current (\(refLabel) \(f.reference!))", cols))
+        case .upToDate(let inst, let ref):
+            return green(fit("  \u{2713} \(f.component) \(inst) \u{2014} current (\(refLabel) \(ref))", cols))
         case .behind(let inst, let ref):
             return yellow(fit("  \u{2717} \(f.component) \(inst) \u{2014} update available: \(ref) (\(refLabel))", cols))
         case .unknownInstalled:

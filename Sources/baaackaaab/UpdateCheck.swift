@@ -118,8 +118,11 @@ enum UpdateCheck {
     /// missing, and the verdict names which, so the caller can phrase an honest,
     /// actionable line instead of inventing a comparison. Pure + unit-tested.
     enum Verdict: Equatable {
-        case upToDate
-        case behind(SemVer, SemVer)   // installed, reference
+        // Carries the versions like `.behind` does, so no display path has to
+        // force-unwrap `installed`/`reference` on the strength of an invariant
+        // enforced in a different file (a decoupling there crashed the TUI).
+        case upToDate(SemVer, SemVer)   // installed, reference
+        case behind(SemVer, SemVer)     // installed, reference
         case unknownInstalled         // couldn't read the installed version
         case unknownReference         // couldn't determine the reference version
     }
@@ -129,7 +132,7 @@ enum UpdateCheck {
     static func verdict(installed: SemVer?, reference: SemVer?) -> Verdict {
         guard let installed else { return .unknownInstalled }
         guard let reference else { return .unknownReference }
-        return installed < reference ? .behind(installed, reference) : .upToDate
+        return installed < reference ? .behind(installed, reference) : .upToDate(installed, reference)
     }
 
     /// One component's currency, ready to render. `unavailableNote` is the
@@ -150,8 +153,8 @@ enum UpdateCheck {
         func emit() -> Bool {
             let refLabel = referenceKind == .latest ? "latest release" : "tested baseline"
             switch verdict {
-            case .upToDate:
-                Console.success("\(component) \(installed!) — current (\(refLabel) \(reference!))")
+            case .upToDate(let inst, let ref):
+                Console.success("\(component) \(inst) — current (\(refLabel) \(ref))")
                 return false
             case .behind(let inst, let ref):
                 Console.warn("\(component) \(inst) — update available: \(ref) (\(refLabel))")

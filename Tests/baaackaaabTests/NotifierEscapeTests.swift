@@ -19,6 +19,12 @@ final class NotifierEscapeTests: XCTestCase {
         XCTAssertEqual(Notifier.escape("a\r\nb"), #"a\r\nb"#)
     }
 
+    // U+2028/U+2029 are line breaks to many parsers; AppleScript has no \u
+    // escape, so they map to the escaped \n form instead of riding through raw.
+    func testEscapesUnicodeLineAndParagraphSeparators() {
+        XCTAssertEqual(Notifier.escape("a\u{2028}b\u{2029}c"), #"a\nb\nc"#)
+    }
+
     func testPlainMessagePassesThrough() {
         XCTAssertEqual(Notifier.escape("backup failed: 3/5 verified"),
                        "backup failed: 3/5 verified")

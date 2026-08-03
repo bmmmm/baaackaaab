@@ -61,6 +61,23 @@ final class TerminalUITests: XCTestCase {
         XCTAssertEqual(keys([0x1B], count: 1), [.esc])
     }
 
+    // Pasted non-ASCII decodes as the real character, not byte-by-byte Latin-1
+    // mojibake; broken sequences land on .other instead of garbage chars.
+    func testUTF8MultibyteInputDecodes() {
+        XCTAssertEqual(keys(Array("ä".utf8), count: 1), [.char("ä")])
+        XCTAssertEqual(keys(Array("写".utf8), count: 1), [.char("写")])
+        XCTAssertEqual(keys(Array("ä".utf8) + [UInt8(ascii: "x")], count: 2),
+                       [.char("ä"), .char("x")])
+        XCTAssertEqual(keys([0x80], count: 1), [.other])          // stray continuation
+        XCTAssertEqual(keys([0xC3, 0x28], count: 1), [.other])    // invalid continuation
+    }
+
+    // A truncated CSI ("ESC [" with no direction byte ever arriving) must
+    // resolve to .other after the grace window — never block readKey.
+    func testTruncatedCSIDoesNotBlock() {
+        XCTAssertEqual(keys([0x1B, 0x5B], count: 1), [.other])
+    }
+
     // MARK: - width math (wcwidth subset)
 
     func testDisplayWidthAsciiAndCJKAndEmoji() {

@@ -14,9 +14,12 @@ enum Key: Equatable {
 // cursor hidden and the alternate screen still up — the next shell prompt would
 // be unusable. The normal-exit path restores via `defer`, but a signal bypasses
 // it, so we stash the cooked termios when raw mode is entered and install
-// async-signal-safe handlers (tcsetattr / write / signal / raise are all
-// async-signal-safe) that restore it and then re-raise with the default
-// disposition so the exit status still reflects the signal.
+// handlers that restore it and then re-raise with the default disposition so
+// the exit status still reflects the signal. write/signal/raise are on the
+// POSIX async-signal-safe list; tcsetattr is NOT (it works in practice on
+// Darwin and is the same pattern vim/less/readline use, but strictly it is a
+// pragmatic bet, not a guarantee — kept because the alternative is a wrecked
+// terminal on every signal).
 // nonisolated(unsafe): these are reachable only from the async-signal-safe
 // restore handler (and written once in RawTerminal.init before any handler can
 // fire). A C signal handler can touch nothing but globals, so global mutable
@@ -138,7 +141,16 @@ extension ConfigTUI {
     func waitForMoreInput(_ ms: Int32) -> Bool {
         if inpos < inbuf.count { return true }
         var pfd = pollfd(fd: STDIN_FILENO, events: Int16(POLLIN), revents: 0)
-        guard poll(&pfd, 1, ms) > 0 else { return false }
+        // Retry on EINTR: a SIGWINCH landing inside this tiny grace window
+        // interrupts poll with -1, which read as a timeout — misreporting a
+        // split arrow key as a lone ESC (back/quit). Bounded retries; a resize
+        // storm still exits after a few grace windows instead of spinning.
+        var rc: Int32 = -1
+        for _ in 0..<3 {
+            rc = poll(&pfd, 1, ms)
+            if rc >= 0 || errno != EINTR { break }
+        }
+        guard rc > 0 else { return false }
         var tmp = [UInt8](repeating: 0, count: 32)
         let n = read(STDIN_FILENO, &tmp, 32)
         guard n > 0 else { return false }
@@ -163,12 +175,17 @@ extension ConfigTUI {
             if peekByte() == nil { _ = waitForMoreInput(escSequenceGraceMs) }
             if peekByte() == 0x5B {
                 _ = nextByte()
-                switch nextByte() {
-                case 0x41?: return .up
-                case 0x42?: return .down
-                case 0x43?: return .right
-                case 0x44?: return .left
-                default: return .other
+                // The direction byte gets the same grace, NOT a bare blocking
+                // read: a malformed two-byte "ESC [" (scripted input, terminal
+                // quirk) would otherwise hang readKey until the next keypress.
+                if peekByte() == nil { _ = waitForMoreInput(escSequenceGraceMs) }
+                switch peekByte() {
+                case 0x41?: _ = nextByte(); return .up
+                case 0x42?: _ = nextByte(); return .down
+                case 0x43?: _ = nextByte(); return .right
+                case 0x44?: _ = nextByte(); return .left
+                case nil:   return .other   // truncated sequence — swallow, don't block
+                default:    _ = nextByte(); return .other
                 }
             }
             return .esc
@@ -179,8 +196,34 @@ extension ConfigTUI {
         case 0x7F, 0x08: return .backspace
         case 0x09: return .tab
         case 0x03: return .ctrlC
-        default: return .char(Character(UnicodeScalar(b0)))
+        default: return decodeChar(first: b0)
         }
+    }
+
+    /// Decode one typed/pasted character starting at `first`. ASCII is the fast
+    /// path; a UTF-8 lead byte pulls its continuation bytes (with the same grace
+    /// wait as escape sequences, in case a paste splits across reads) and decodes
+    /// the real character — byte-by-byte Latin-1 turned every pasted "ä" into
+    /// mojibake. A stray continuation byte or an invalid sequence lands on
+    /// `.other` instead of a garbage `.char`.
+    private func decodeChar(first b0: UInt8) -> Key {
+        if b0 < 0x80 { return .char(Character(UnicodeScalar(b0))) }
+        let continuations: Int
+        switch b0 {
+        case 0xC2...0xDF: continuations = 1
+        case 0xE0...0xEF: continuations = 2
+        case 0xF0...0xF4: continuations = 3
+        default: return .other   // stray continuation / invalid lead byte
+        }
+        var bytes = [b0]
+        for _ in 0..<continuations {
+            if peekByte() == nil { _ = waitForMoreInput(escSequenceGraceMs) }
+            guard let b = nextByte(), (0x80...0xBF).contains(b) else { return .other }
+            bytes.append(b)
+        }
+        let s = String(decoding: bytes, as: UTF8.self)
+        guard let ch = s.first, s.count == 1, !s.contains("\u{FFFD}") else { return .other }
+        return .char(ch)
     }
 
     func terminalSize() -> (rows: Int, cols: Int) {

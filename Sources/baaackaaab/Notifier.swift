@@ -34,5 +34,10 @@ enum Notifier {
          .replacingOccurrences(of: "\"", with: "\\\"")
          .replacingOccurrences(of: "\r", with: "\\r")
          .replacingOccurrences(of: "\n", with: "\\n")
+         // Unicode line/paragraph separators are line breaks to many parsers;
+         // AppleScript has no \u escape, so map them to the escaped \n form
+         // rather than gambling on the osascript compiler's treatment.
+         .replacingOccurrences(of: "\u{2028}", with: "\\n")
+         .replacingOccurrences(of: "\u{2029}", with: "\\n")
     }
 }

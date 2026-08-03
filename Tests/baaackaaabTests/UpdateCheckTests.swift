@@ -70,8 +70,10 @@ final class UpdateCheckTests: XCTestCase {
     }
 
     func testVerdictUpToDateWhenEqualOrNewer() {
-        XCTAssertEqual(UpdateCheck.verdict(installed: SemVer(0, 19, 0), reference: SemVer(0, 19, 0)), .upToDate)
-        XCTAssertEqual(UpdateCheck.verdict(installed: SemVer(0, 20, 0), reference: SemVer(0, 19, 0)), .upToDate)
+        XCTAssertEqual(UpdateCheck.verdict(installed: SemVer(0, 19, 0), reference: SemVer(0, 19, 0)),
+                       .upToDate(SemVer(0, 19, 0), SemVer(0, 19, 0)))
+        XCTAssertEqual(UpdateCheck.verdict(installed: SemVer(0, 20, 0), reference: SemVer(0, 19, 0)),
+                       .upToDate(SemVer(0, 20, 0), SemVer(0, 19, 0)))
     }
 
     func testVerdictUnknownSides() {
