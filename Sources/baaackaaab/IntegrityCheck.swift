@@ -38,13 +38,26 @@ enum RotatingCheck {
 }
 
 /// Pure rendering decision for the dashboard's "last integrity check" line: the
-/// verdict level (red on a failed check, dim otherwise) and the age + slice
-/// position text. Age display only — no overdue judgment (a rotating check has no
-/// single cadence to violate; the slice position already shows coverage progress).
+/// verdict level and the age + slice position text. Unlike the drill's fixed
+/// monthly cadence, the check's cadence is whatever timer the operator installed
+/// — so staleness is judged against that `interval` (passed in by the caller
+/// from the installed plist): a passing check older than several missed fires
+/// means the timer has silently stopped (plist gone after an OS migration, Mac
+/// always asleep at the hour), which an ever-dimming "ok" line would never show.
 enum CheckDashboard {
-    enum Level: Equatable { case none, ok, failed }
+    enum Level: Equatable { case none, ok, stale, failed }
 
-    static func line(lastCheck: RunRecord?, now: Date) -> (level: Level, text: String) {
+    /// Stale once `interval * staleMisses` (min 7 days) has passed — generous
+    /// enough that a weekend with the lid closed never flaps a daily check to
+    /// yellow, tight enough that a dead timer shows within a week or two.
+    /// Without a known interval (timer plist missing/unreadable) fall back to
+    /// the drill's 45-day judgment rather than never warning at all.
+    static let staleMisses: Double = 4
+    static let staleFloor: TimeInterval = 7 * 86_400
+    static let staleFallback: TimeInterval = 45 * 86_400
+
+    static func line(lastCheck: RunRecord?, now: Date,
+                     interval: TimeInterval? = nil) -> (level: Level, text: String) {
         guard let c = lastCheck else {
             return (.none, "no integrity check yet — install one with `baaackaaab --install-check-timer`")
         }
@@ -53,6 +66,10 @@ enum CheckDashboard {
         let pos = c.slice.map { RotatingCheck.subsetSpec(slice: $0) } ?? "?/\(RotatingCheck.slices)"
         if !c.clean {
             return (.failed, "integrity check \(pos) FAILED \(age) — run `baaackaaab --verify-repo` to inspect")
+        }
+        let staleAfter = interval.map { max($0 * staleMisses, staleFloor) } ?? staleFallback
+        if now.timeIntervalSince(c.end) >= staleAfter {
+            return (.stale, "last integrity check \(age) — none since; the check timer may have stopped (reinstall: `baaackaaab --install-check-timer`)")
         }
         return (.ok, "integrity check \(pos) \u{00B7} \(age)")
     }
@@ -64,6 +81,12 @@ enum CheckDashboard {
 /// "check" history record carrying the slice + per-destination outcome, and
 /// banners only on failure (the unattended log goes unread). Exits the process.
 func rotatingCheckCommand() {
+    // Catch-up gate first (before the banner): a fresh RunAtLoad/login fire
+    // exits quietly here, so the log isn't spammed with no-op check banners.
+    maintenanceCatchUpGateOrProceed(job: "integrity check",
+                                    lastRecord: RunHistory.lastCheck(),
+                                    installedSchedule: LaunchdTimer.installedCheckSchedule(),
+                                    fallbackInterval: 86_400)
     Console.banner("baaackaaab", tagline: "integrity check — rotating read-data")
     let runStart = Date()
     let slice = RotatingCheck.nextSlice(lastSlice: RunHistory.lastCheck()?.slice)

@@ -800,11 +800,16 @@ func doctorCommand() {
 
     Console.section("Integrity check")
     if let lastCheck = RunHistory.lastCheck() {
-        let (level, text) = CheckDashboard.line(lastCheck: lastCheck, now: Date())
+        let (level, text) = CheckDashboard.line(
+            lastCheck: lastCheck, now: Date(),
+            interval: LaunchdTimer.installedCheckSchedule()?.intendedInterval())
         switch level {
         case .failed:
             Console.failure(text)
             problems += 1
+        case .stale:
+            Console.warn(text)
+            warnings += 1
         default:
             Console.success(text)
         }

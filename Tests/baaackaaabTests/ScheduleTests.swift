@@ -111,14 +111,18 @@ final class ScheduleTests: XCTestCase {
         XCTAssertTrue(xml.contains("<string>--catch-up</string>"), xml)
     }
 
-    func testDrillAndCheckTimersHaveNoRunAtLoad() {
-        // Only the backup timer opts into RunAtLoad; the drill/check are calendar-only.
+    // ALL three timers carry RunAtLoad + --catch-up now: without the make-up
+    // fire, a Mac that is asleep at the scheduled hour never drills / never
+    // advances the read-data rotation (the old calendar-only choice silently
+    // stalled both coverage guarantees). The gate keeps the login fire cheap.
+    func testDrillTimerPlistHasRunAtLoadAndCatchUp() {
         let xml = LaunchdTimer.plistXML(
             label: LaunchdTimer.drillLabel,
-            program: ["/usr/local/bin/baaackaaab", "--restore-drill"],
+            program: ["/usr/local/bin/baaackaaab", "--restore-drill", "--catch-up"],
             schedule: Schedule(times: [(hour: 3, minute: 0)], weekdays: [], dayOfMonth: 1),
-            log: "/tmp/baaackaaab.log")   // runAtLoad defaults false
-        XCTAssertFalse(xml.contains("<key>RunAtLoad</key>"), xml)
+            log: "/tmp/baaackaaab.log", runAtLoad: true)
+        XCTAssertTrue(xml.contains("<key>RunAtLoad</key>"), xml)
+        XCTAssertTrue(xml.contains("<string>--catch-up</string>"), xml)
     }
 
     func testScheduleParserRejectsPlistWithoutInterval() {

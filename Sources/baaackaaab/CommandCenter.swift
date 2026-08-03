@@ -213,14 +213,18 @@ extension ConfigTUI {
     }
 
     /// The "last integrity check" line: age + rotating slice position (e.g.
-    /// "integrity check 3/8 · 2d ago"), styled dim when passing, red on a failed
-    /// check. Age display only — the slice position shows coverage progress, so no
-    /// overdue judgment. Derived from RunHistory via the pure `CheckDashboard`.
+    /// "integrity check 3/8 · 2d ago"), styled dim when passing, yellow when the
+    /// timer looks dead (no check for several intervals), red on a failed check.
+    /// Derived from RunHistory via the pure `CheckDashboard`; the staleness
+    /// interval comes from the installed check timer's own plist.
     func homeCheckLine(_ cols: Int) -> String {
-        let (level, text) = CheckDashboard.line(lastCheck: loadLastCheck(), now: Date())
+        let (level, text) = CheckDashboard.line(
+            lastCheck: loadLastCheck(), now: Date(),
+            interval: LaunchdTimer.installedCheckSchedule()?.intendedInterval())
         switch level {
         case .none:   return dim(fit("  " + text, cols))
         case .ok:     return dim(fit("  \u{2713} " + text, cols))
+        case .stale:  return yellow(fit("  ! " + text, cols))
         case .failed: return red(fit("  \u{2717} " + text, cols))
         }
     }

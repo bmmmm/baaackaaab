@@ -71,6 +71,30 @@ func catchUpGateOrProceed() {
     }
 }
 
+/// The catch-up gate for the scheduled MAINTENANCE jobs (integrity check /
+/// restore drill), mirroring `catchUpGateOrProceed`. Two deliberate differences:
+/// the anchor is the job's newest record REGARDLESS of outcome — a failed
+/// check/drill already fired its failure banner, and re-running it on every
+/// login would spam and hammer the repo — and no catch-up banner is posted
+/// (the job itself banners only on failure; a quiet catch-up is the point).
+/// `fallbackInterval` covers a missing/unparseable plist (manual invocation,
+/// timer removed): the job's own default cadence.
+func maintenanceCatchUpGateOrProceed(job: String, lastRecord: RunRecord?,
+                                     installedSchedule: Schedule?,
+                                     fallbackInterval: TimeInterval) {
+    guard cli.has("--catch-up") else { return }
+    let interval = installedSchedule?.intendedInterval() ?? fallbackInterval
+    switch CatchUp.decide(lastSuccess: lastRecord?.start, interval: interval, now: Date()) {
+    case .fresh(let ageDays):
+        Console.note("catch-up: last \(job) \(ageDays)d ago, within the schedule — nothing to catch up, skipping this run")
+        exit(0)
+    case .overdue(let ageDays):
+        Console.warn("\(job) is \(ageDays) day(s) overdue (Mac asleep/off at the scheduled hour?) — catching up now")
+    case .noHistory:
+        Console.warn("no \(job) on record — running it now")
+    }
+}
+
 /// Print the actionable catch-up line and, when our output is invisible (launchd /
 /// piped — the same unattended gate the failure banner uses), post a macOS banner.
 /// The backup itself then proceeds in the caller.

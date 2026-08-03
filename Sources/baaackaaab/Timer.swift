@@ -147,7 +147,12 @@ enum LaunchdTimer {
         Console.banner("baaackaaab", tagline: "scheduled restore drill")
 
         let exe = executablePath()
-        let plist = try writeAndLoad(label: drillLabel, program: [exe, "--restore-drill"], schedule: schedule)
+        // RunAtLoad + `--catch-up`, same machinery as the backup timer: a Mac
+        // that is asleep/off at the scheduled hour every month would otherwise
+        // NEVER drill — StartCalendarInterval alone has no boot/login make-up
+        // fire. The gate keeps the login fire cheap (fresh → quiet skip).
+        let plist = try writeAndLoad(label: drillLabel, program: [exe, "--restore-drill", "--catch-up"],
+                                     schedule: schedule, runAtLoad: true)
 
         Console.section("LaunchAgent", detail: plist.path)
         Console.info([
@@ -172,7 +177,12 @@ enum LaunchdTimer {
         Console.banner("baaackaaab", tagline: "scheduled integrity check")
 
         let exe = executablePath()
-        let plist = try writeAndLoad(label: checkLabel, program: [exe, "--verify-repo", "--rotate-read-data"], schedule: schedule)
+        // RunAtLoad + `--catch-up`, same machinery as the backup timer — without
+        // it a laptop that is routinely asleep at the scheduled hour never
+        // advances the read-data rotation, and the "8 runs = full coverage"
+        // bit-rot guarantee silently stalls.
+        let plist = try writeAndLoad(label: checkLabel, program: [exe, "--verify-repo", "--rotate-read-data", "--catch-up"],
+                                     schedule: schedule, runAtLoad: true)
 
         Console.section("LaunchAgent", detail: plist.path)
         Console.info([
@@ -351,6 +361,18 @@ enum LaunchdTimer {
     /// show the current state. nil when no plist is present or it can't be parsed.
     static func installedSchedule() -> Schedule? {
         guard let data = try? Data(contentsOf: plistURL) else { return nil }
+        return schedule(fromPlistData: data)
+    }
+
+    /// The drill / check timers' installed schedules, for their catch-up gates
+    /// and the check dashboard's staleness judgment. Same read-back as
+    /// `installedSchedule`, different plist.
+    static func installedDrillSchedule() -> Schedule? {
+        guard let data = try? Data(contentsOf: plistURL(for: drillLabel)) else { return nil }
+        return schedule(fromPlistData: data)
+    }
+    static func installedCheckSchedule() -> Schedule? {
+        guard let data = try? Data(contentsOf: plistURL(for: checkLabel)) else { return nil }
         return schedule(fromPlistData: data)
     }
 

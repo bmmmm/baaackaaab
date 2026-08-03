@@ -114,6 +114,12 @@ enum DrillDashboard {
 /// rotating sample, restore-verifies it into a throwaway temp dir, records the
 /// outcome in RunHistory with a distinct `kind`, and banners only on failure.
 func restoreDrillCommand() {
+    // Catch-up gate first (before the banner) — same quiet-skip contract as the
+    // rotating check's gate. Fallback: the drill's monthly cadence.
+    maintenanceCatchUpGateOrProceed(job: "restore drill",
+                                    lastRecord: RunHistory.lastDrill(),
+                                    installedSchedule: LaunchdTimer.installedDrillSchedule(),
+                                    fallbackInterval: 30 * 86_400)
     Console.banner("baaackaaab", tagline: "restore drill — scheduled proof a backup restores")
     let sampleCount = cli.positiveInt("--sample", default: 5)
     let budget = cli.positiveInt("--max-bytes", default: 500_000_000, unit: "bytes")

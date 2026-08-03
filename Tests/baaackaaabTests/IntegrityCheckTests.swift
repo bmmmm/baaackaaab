@@ -80,6 +80,45 @@ final class IntegrityCheckTests: XCTestCase {
         XCTAssertTrue(line.text.contains("FAILED"), line.text)
     }
 
+    // MARK: - staleness (dead-timer detection)
+
+    // A passing check goes stale after `interval * staleMisses` (min 7d): a
+    // silently-stopped timer must not keep rendering as a dim "ok" forever.
+    func testDashboardStaleAfterMissedIntervals() {
+        let now = Date()
+        // Daily timer, last check 10 days ago: 10d >= max(1d * 4, 7d) → stale.
+        let line = CheckDashboard.line(lastCheck: check(exit: 0, slice: 3, endDaysAgo: 10, now: now),
+                                       now: now, interval: 86_400)
+        XCTAssertEqual(line.level, .stale)
+        XCTAssertTrue(line.text.contains("--install-check-timer"), line.text)
+    }
+
+    func testDashboardWeekendGapDoesNotFlapDailyCheckToStale() {
+        let now = Date()
+        // Daily timer, 3 days ago (lid closed over a long weekend): under the
+        // 7-day floor → still ok.
+        let line = CheckDashboard.line(lastCheck: check(exit: 0, slice: 3, endDaysAgo: 3, now: now),
+                                       now: now, interval: 86_400)
+        XCTAssertEqual(line.level, .ok)
+    }
+
+    func testDashboardStaleFallbackWithoutKnownInterval() {
+        let now = Date()
+        // No installed timer plist to judge against: fall back to 45 days.
+        XCTAssertEqual(CheckDashboard.line(lastCheck: check(exit: 0, slice: 1, endDaysAgo: 46, now: now),
+                                           now: now).level, .stale)
+        XCTAssertEqual(CheckDashboard.line(lastCheck: check(exit: 0, slice: 1, endDaysAgo: 44, now: now),
+                                           now: now).level, .ok)
+    }
+
+    // A FAILED check stays red, never stale — failure outranks staleness.
+    func testDashboardFailedOutranksStale() {
+        let now = Date()
+        let line = CheckDashboard.line(lastCheck: check(exit: 2, slice: 5, endDaysAgo: 60, now: now),
+                                       now: now, interval: 86_400)
+        XCTAssertEqual(line.level, .failed)
+    }
+
     // MARK: - check-timer plist wiring
 
     func testCheckTimerPlistHasRotatingProgramAndOwnLabel() {
