@@ -217,6 +217,11 @@ struct BackupRun {
                 Console.summary(headline: "cancelled during init — nothing was backed up yet",
                                 state: .warn, details: [("run-tag", runTag)])
                 recordRun(exitCode: 130, verified: 0, total: 0, sourceFailures: 0)
+                // The "start" heartbeat may still be in flight — let it leave (a
+                // start without a following success correctly raises the monitor's
+                // "started but never finished" alarm for a cancelled run). No-op
+                // when nothing was fired (dry run / no heartbeat).
+                OutboundNotifier.waitForPending()
                 exit(130)
             }
 
@@ -558,6 +563,5 @@ struct BackupRun {
             sendOutboundOutcome(ok: false, message: "\(error)", verified: 0, total: 0, destStatuses: [])
             exit(1)
         }
-        exit(0)
     }
 }

@@ -130,6 +130,42 @@ final class OutboundNotifierTests: XCTestCase {
         XCTAssertEqual(decoded, .init(title: "baaackaaab backup succeeded", message: "3/3 verified", priority: 4))
     }
 
+    // The token is stored in the URL but must travel as the X-Gotify-Key header,
+    // stripped from the wire URL — query strings land in access logs, headers don't.
+    func testGotifyRequestMovesTokenFromQueryToHeader() {
+        let req = OutboundNotifier.gotifyRequest(
+            url: "https://gotify.example.com/message?token=secret123",
+            title: "t", body: "b", priorityHigh: false)
+        XCTAssertEqual(req?.value(forHTTPHeaderField: "X-Gotify-Key"), "secret123")
+        XCTAssertEqual(req?.url?.absoluteString, "https://gotify.example.com/message")
+    }
+
+    // A percent-encoded token in the stored URL round-trips back to its raw
+    // value in the header (URLComponents decodes query items).
+    func testGotifyRequestDecodesPercentEncodedToken() {
+        let url = OutboundNotifier.gotifyEndpoint(base: "https://gotify.example.com", token: "we&rd=tok")
+        let req = OutboundNotifier.gotifyRequest(url: url, title: "t", body: "b", priorityHigh: false)
+        XCTAssertEqual(req?.value(forHTTPHeaderField: "X-Gotify-Key"), "we&rd=tok")
+        XCTAssertEqual(req?.url?.absoluteString, "https://gotify.example.com/message")
+    }
+
+    // A token containing query metacharacters must not truncate the query —
+    // it is percent-encoded into the stored URL.
+    func testGotifyEndpointPercentEncodesSpecialCharacters() {
+        XCTAssertEqual(
+            OutboundNotifier.gotifyEndpoint(base: "https://gotify.example.com", token: "we&rd=tok"),
+            "https://gotify.example.com/message?token=we%26rd%3Dtok")
+    }
+
+    // A hand-edited URL with no token still builds a request (Gotify answers 401,
+    // which the delivery-failure note then surfaces).
+    func testGotifyRequestWithoutTokenSendsNoHeader() {
+        let req = OutboundNotifier.gotifyRequest(
+            url: "https://gotify.example.com/message", title: "t", body: "b", priorityHigh: false)
+        XCTAssertNotNil(req)
+        XCTAssertNil(req?.value(forHTTPHeaderField: "X-Gotify-Key"))
+    }
+
     // Failure raises Gotify priority to 8 so the push interrupts the phone.
     func testGotifyRequestUsesHighPriorityOnFailure() throws {
         let req = OutboundNotifier.gotifyRequest(

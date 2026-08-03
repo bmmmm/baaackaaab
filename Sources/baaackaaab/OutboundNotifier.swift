@@ -106,8 +106,10 @@ enum OutboundNotifier {
     // MARK: - gotify
 
     /// The Gotify push body: `{title, message, priority}`. The app token is NOT
-    /// here — it rides in the URL's `?token=` the operator configured, matching
-    /// how ntfy/webhook carry their secret in the URL.
+    /// here — it is STORED in the configured URL's `?token=` (matching how
+    /// ntfy/webhook persist their secret), but on the wire it travels as the
+    /// `X-Gotify-Key` header: `gotifyRequest` strips it from the request URL so
+    /// the token never lands in the server's / a proxy's access log.
     struct GotifyPayload: Codable, Equatable {
         let title: String
         let message: String
@@ -118,28 +120,47 @@ enum OutboundNotifier {
     /// `<base>/message?token=<token>`. Accepts either the server root
     /// (`https://gotify.example.com`) or a URL that already ends in `/message`,
     /// and trims one trailing slash — so the common path is "paste the token",
-    /// not "hand-assemble the URL". The token is not percent-encoded: Gotify's
-    /// generated app tokens are drawn from a URL-safe alphabet ([A-Za-z0-9._-]).
+    /// not "hand-assemble the URL". The token is percent-encoded via
+    /// URLComponents: Gotify's generated tokens are URL-safe ([A-Za-z0-9._-]),
+    /// so this is a no-op for them, but a mistyped token containing `&`/`=`
+    /// must not silently truncate the query. `gotifyRequest` decodes it back
+    /// out with the same URLComponents rules, so the round-trip is lossless.
     static func gotifyEndpoint(base: String, token: String) -> String {
         var b = base.trimmingCharacters(in: .whitespacesAndNewlines)
         if b.hasSuffix("/") { b.removeLast() }
         if !b.hasSuffix("/message") { b += "/message" }
-        return b + "?token=" + token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard var comps = URLComponents(string: b) else { return b }
+        comps.queryItems = (comps.queryItems ?? [])
+            + [URLQueryItem(name: "token", value: token.trimmingCharacters(in: .whitespacesAndNewlines))]
+        return comps.url?.absoluteString ?? b
     }
 
     /// A Gotify push: JSON `{title, message, priority}` POSTed to the app's
-    /// `/message?token=…` endpoint. Priority follows Gotify's 0–10 scale — 8 on
+    /// `/message` endpoint. Priority follows Gotify's 0–10 scale — 8 on
     /// failure so it interrupts the phone, 4 on success so it stays a quiet log
     /// entry, matching ntfy's high/default split.
+    ///
+    /// The stored URL carries the token as `?token=` (see GotifyPayload), but
+    /// the request moves it into the `X-Gotify-Key` header and strips it from
+    /// the URL — query strings end up in access logs on the server and every
+    /// proxy in between, headers don't. A hand-edited URL without a token is
+    /// still sent as-is (Gotify then answers 401, which the failure note shows).
     static func gotifyRequest(url: String, title: String, body: String, priorityHigh: Bool) -> URLRequest? {
-        guard isValidHTTPURL(url), let u = URL(string: url),
+        guard isValidHTTPURL(url), var comps = URLComponents(string: url),
               let data = try? JSONEncoder().encode(
                 GotifyPayload(title: title, message: body, priority: priorityHigh ? 8 : 4)) else { return nil }
+        let token = comps.queryItems?.first(where: { $0.name == "token" })?.value
+        if token != nil {
+            let remaining = comps.queryItems?.filter { $0.name != "token" } ?? []
+            comps.queryItems = remaining.isEmpty ? nil : remaining
+        }
+        guard let u = comps.url else { return nil }
         var req = URLRequest(url: u)
         req.httpMethod = "POST"
         req.httpBody = data
         req.timeoutInterval = timeout
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let token { req.setValue(token, forHTTPHeaderField: "X-Gotify-Key") }
         return req
     }
 
@@ -237,11 +258,26 @@ enum OutboundNotifier {
     /// bounded chance to actually leave before the process calls `exit()`.
     private static let pending = DispatchGroup()
 
+    /// Failure notes from fire-and-forget sends, held back until
+    /// `waitForPending` — a background thread printing mid-run would tear the
+    /// TTY progress bar's self-rewriting line. NSLock-guarded because several
+    /// deliveries can fail concurrently (SyncBox's plain `value` is only safe
+    /// under its semaphore handoff, which doesn't exist here).
+    private static let deferredNotesLock = NSLock()
+    /// nonisolated(unsafe): every access is wrapped in deferredNotesLock —
+    /// the "external synchronization" case the concurrency checker can't see.
+    nonisolated(unsafe) private static var deferredNotes: [String] = []
+
     private static func fireAndForget(_ request: URLRequest, onFailure: @escaping @Sendable (DeliveryResult) -> String) {
         pending.enter()
         DispatchQueue.global(qos: .utility).async {
             let result = perform(request)
-            if !result.ok { Console.note(onFailure(result)) }
+            if !result.ok {
+                let note = onFailure(result)
+                deferredNotesLock.lock()
+                deferredNotes.append(note)
+                deferredNotesLock.unlock()
+            }
             pending.leave()
         }
     }
@@ -294,9 +330,16 @@ enum OutboundNotifier {
 
     /// Block until every outstanding fire-and-forget send finishes or `timeout`
     /// elapses — called right before a terminal `exit()` so a ping/push actually
-    /// leaves instead of being killed mid-flight.
+    /// leaves instead of being killed mid-flight. Also the point where deferred
+    /// delivery-failure notes are printed: the run's output (summary, progress
+    /// bar) is complete by now, so they can no longer tear a live line.
     static func waitForPending(timeout: TimeInterval = 12) {
         _ = pending.wait(timeout: .now() + timeout)
+        deferredNotesLock.lock()
+        let notes = deferredNotes
+        deferredNotes = []
+        deferredNotesLock.unlock()
+        for note in notes { Console.note(note) }
     }
 }
 
@@ -344,7 +387,14 @@ func testNotifyCommand(configPath: URL) {
 
     if let hb = set.heartbeatURL {
         if let req = OutboundNotifier.heartbeatRequest(base: hb, event: .success) {
-            report(label: "heartbeat", url: hb, result: OutboundNotifier.perform(req))
+            let result = OutboundNotifier.perform(req)
+            report(label: "heartbeat", url: hb, result: result)
+            if result.ok {
+                // A delivered test ping is indistinguishable from a real run's
+                // success ping on the monitor side — say so, or a missed-backup
+                // alert the operator was waiting on silently restarts its clock.
+                Console.note("this sent a REAL success ping — the monitor's dead-man timer was reset and counts from now")
+            }
         } else {
             failures += 1
             Console.failure("heartbeat (\(Credentials.redactMonitorURL(hb))) — malformed URL")

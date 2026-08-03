@@ -237,10 +237,12 @@ func manageBackupSet(configPath: URL) {
         else { Console.note("ntfy channel already configured: \(Credentials.redactMonitorURL(raw))") }
     }
     // Gotify: a self-hosted push server. Unlike ntfy/webhook, the secret is a
-    // per-app token — so the friendly path takes just the SERVER URL and prompts
-    // for the token silently (never in argv/shell history), then assembles the
-    // `<server>/message?token=…` endpoint. A URL that already carries `?token=`
-    // is accepted as-is (power user / non-interactive), so scripts still work.
+    // per-app token — so the friendly path takes just the SERVER URL and reads
+    // the token from BAAACKAAAB_GOTIFY_TOKEN (non-interactive) or a silent
+    // prompt, never argv (argv is world-readable via `ps` and lands in shell
+    // history — the same rule the restic secrets follow). A URL that already
+    // carries `?token=` is still accepted for backward compatibility, but the
+    // env var is the recommended scripted path.
     if let base = cli.value("--add-gotify") {
         guard OutboundNotifier.isValidHTTPURL(base) else {
             Console.error("--add-gotify needs your Gotify server URL — got '\(base)' (e.g. https://gotify.example.com)")
@@ -248,11 +250,19 @@ func manageBackupSet(configPath: URL) {
         }
         let full: String
         if let comps = URLComponents(string: base), comps.queryItems?.contains(where: { $0.name == "token" }) == true {
-            full = base   // already a complete /message?token=… URL
+            Console.warn("the token was passed inside the URL argument — argv is visible via `ps` and stays in shell history; prefer BAAACKAAAB_GOTIFY_TOKEN with the bare server URL, and consider rotating this token")
+            full = base   // legacy complete /message?token=… URL
         } else {
-            guard let token = promptSecret("Gotify app token (input hidden, paste it): "),
-                  !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                Console.error("no token entered — in Gotify create an Application (Apps → Create Application) and paste its token. Non-interactive? Pass the full URL instead: --add-gotify 'https://gotify.example.com/message?token=…'")
+            let envToken = ProcessInfo.processInfo.environment["BAAACKAAAB_GOTIFY_TOKEN"]?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let token: String
+            if let envToken, !envToken.isEmpty {
+                token = envToken
+            } else if let prompted = promptSecret("Gotify app token (input hidden, paste it): ")?
+                        .trimmingCharacters(in: .whitespacesAndNewlines), !prompted.isEmpty {
+                token = prompted
+            } else {
+                Console.error("no token entered — in Gotify create an Application (Apps → Create Application) and paste its token. Non-interactive? Export BAAACKAAAB_GOTIFY_TOKEN and re-run (never put the token in argv — it is visible via `ps` and shell history)")
                 exit(1)
             }
             full = OutboundNotifier.gotifyEndpoint(base: base, token: token)

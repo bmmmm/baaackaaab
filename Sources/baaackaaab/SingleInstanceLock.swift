@@ -34,7 +34,12 @@ enum SingleInstanceLock {
         try? FileManager.default.createDirectory(
             at: CredentialFiles.dir, withIntermediateDirectories: true)
         let fd = open(path.path, O_CREAT | O_RDWR, 0o600)
-        guard fd >= 0 else { return .acquired(-1) }
+        guard fd >= 0 else {
+            // Fail open, but never silently: the operator should know this run
+            // is not protected against a concurrent one, and why.
+            Console.warn("could not open the run lock at \(path.path) — proceeding WITHOUT the concurrent-run guard; check the support dir's permissions")
+            return .acquired(-1)
+        }
         if flock(fd, LOCK_EX | LOCK_NB) == 0 {
             return .acquired(fd)
         }

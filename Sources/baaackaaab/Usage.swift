@@ -57,7 +57,7 @@ func printUsage() {
         ("--set-heartbeat <url>", "persist a dead-man's-switch heartbeat URL, pinged at run start/success/fail"),
         ("--clear-heartbeat", "remove the heartbeat URL"),
         ("--add-ntfy <url>", "persist an ntfy topic URL to push the run outcome to (repeatable)"),
-        ("--add-gotify <server-url>", "persist a Gotify server to push the run outcome to; prompts for the app token (input hidden)"),
+        ("--add-gotify <server-url>", "persist a Gotify server to push the run outcome to; app token from $BAAACKAAAB_GOTIFY_TOKEN or a hidden prompt (never argv)"),
         ("--add-webhook <url>", "persist a webhook URL to POST the run outcome to as JSON (repeatable)"),
         ("--remove-notify <url>", "drop a previously-added ntfy/gotify/webhook channel by its URL"),
         ("--set-prom-textfile <dir>", "persist a node_exporter textfile-collector dir; every real run writes <dir>/baaackaaab.prom"),
