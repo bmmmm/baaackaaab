@@ -127,6 +127,12 @@ final class DriveAcquirer {
 
         var count = 0
         for case let fileURL as URL in enumerator {
+            // Symlinks: `isRegularFileKey` does NOT follow the link (verified
+            // empirically — a symlink reports isRegularFile=false), so links are
+            // skipped here: never materialized, never counted as verified. That
+            // is correct, not a gap — restic stores a symlink as a link node and
+            // never reads through it, so no stub bytes can enter the snapshot
+            // via a link. Pinned by DriveAcquirerTests.
             let isFile = (try? fileURL.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile ?? false
             guard isFile else { continue }
 
