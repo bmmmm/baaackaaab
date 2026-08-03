@@ -234,7 +234,15 @@ enum StatusExport {
     @discardableResult
     static func exportAfterRun(repoSizeBytes: Int64?, quotaBytes: Int64?,
                                promTextfileDir: String?) -> StatusSnapshot? {
-        let records = RunHistory.recent(historyLookback)
+        var records = RunHistory.recent(historyLookback)
+        // The lookback window can consist entirely of drill/check records (backup
+        // timer dead, check timer still firing daily). `last_run` must then still
+        // name the real last backup, however far back it sits — pull it from the
+        // full history and append it (records are newest-first, so the older
+        // backup record belongs at the end).
+        if !records.contains(where: { $0.isBackup }), let lastBackup = RunHistory.lastBackup() {
+            records.append(lastBackup)
+        }
         let snapshot = build(records: records, lastDrill: RunHistory.lastDrill(),
                             repoSizeBytes: repoSizeBytes, quotaBytes: quotaBytes,
                             lastCheck: RunHistory.lastCheck())

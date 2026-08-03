@@ -229,6 +229,20 @@ final class StatusExportTests: XCTestCase {
         XCTAssertEqual(got.lastRun?.tag, "good")
     }
 
+    // The lookback window can fill up with check records (backup timer dead,
+    // check timer alive): last_run must still name the real last backup from the
+    // FULL history instead of regressing to "never backed up".
+    func testExportAfterRunFindsBackupBehindManyCheckRecords() throws {
+        try RunHistory.append(record("old-backup", end: Date(timeIntervalSince1970: 1_700_000_060)))
+        for i in 0..<25 {   // > historyLookback (20) non-backup records on top
+            try RunHistory.append(checkRecord(slice: i % 8,
+                end: Date(timeIntervalSince1970: 1_700_200_000 + Double(i) * 86_400)))
+        }
+        let snap = StatusExport.exportAfterRun(repoSizeBytes: nil, quotaBytes: nil, promTextfileDir: nil)
+        XCTAssertEqual(snap?.lastRun?.tag, "old-backup")
+        XCTAssertEqual(snap?.lastCheck?.slice, 24 % 8)   // check block still reflects the newest check
+    }
+
     // exportAfterRun is best-effort: a write failure must not throw/crash the
     // caller (it's called from deep inside a real backup run).
     func testExportAfterRunNeverThrowsEvenWhenUnwritable() throws {

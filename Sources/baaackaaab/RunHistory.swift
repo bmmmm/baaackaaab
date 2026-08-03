@@ -258,4 +258,13 @@ enum RunHistory {
     static func lastSuccessfulBackup() -> RunRecord? {
         allRecords().last { $0.isBackup && $0.clean }
     }
+
+    /// The newest backup-kind record regardless of outcome, or nil if none — the
+    /// status export's `last_run` anchor. Scans the whole history: with the
+    /// backup timer dead but the daily check timer alive, the last real backup
+    /// can sit arbitrarily far behind the `recent()` window, and `last_run`
+    /// reporting "never backed up" in that state is exactly the wrong signal.
+    static func lastBackup() -> RunRecord? {
+        allRecords().last { $0.isBackup }
+    }
 }
