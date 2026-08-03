@@ -115,7 +115,7 @@ extension ConfigTUI {
             }
         // Arrows/enter/v all DRILL IN (browse the snapshot's files); a full
         // restore is the explicit `r` key, so no stray arrow can trigger a
-        // gigabyte-scale write (see TODO).
+        // gigabyte-scale write.
         case .enter, .right, .char("l"), .char("v"):
             if let snaps = restoreSnaps, restoreCursor < snaps.count {
                 enterFileBrowser(snap: snaps[restoreCursor])
@@ -342,7 +342,7 @@ extension ConfigTUI {
         case .up, .char("k"): lsCursor = max(0, lsCursor - 1)
         case .down, .char("j"): lsCursor = min(max(0, children.count - 1), lsCursor + 1)
         // Arrows/enter only NAVIGATE: into a directory, or a hint on a file.
-        // Restore is the explicit `r` key, never a stray arrow (see TODO).
+        // Restore is the explicit `r` key, never a stray arrow.
         case .enter, .right, .char("l"):
             if lsCursor < children.count {
                 let entry = children[lsCursor]

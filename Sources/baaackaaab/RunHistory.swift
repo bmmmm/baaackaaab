@@ -160,11 +160,50 @@ enum RunHistory {
         return d
     }
 
+    /// Compact the history once it exceeds `rotateAtRecords`, keeping the newest
+    /// `rotateKeepRecords` — the file is otherwise strictly append-only and
+    /// grows without bound over years of daily runs, with every read
+    /// (`allRecords`) re-parsing the whole thing. Generous thresholds: ~5 years
+    /// of daily backup+check records fit before the first rotation, and the
+    /// kept tail is far deeper than every consumer's window (baseline 30,
+    /// dashboard 20, drill/check anchors are monthly/daily). Atomic
+    /// temp+rename, same pattern as every other store write; best-effort like
+    /// append itself — a failed rotation costs nothing but deferred compaction.
+    static let rotateAtRecords = 5_000
+    static let rotateKeepRecords = 2_000
+
+    private static func rotateIfNeeded() {
+        // Cheap size gate first — parsing the whole file on every append would
+        // be exactly the cost this rotation exists to bound. ~0.5 MB is well
+        // below rotateAtRecords worth of real records, so the count check
+        // (which needs the parse) only runs once the file is plausibly close.
+        var st = stat()
+        guard stat(file.path, &st) == 0, st.st_size > 512_000 else { return }
+        let records = allRecords()
+        guard records.count > rotateAtRecords else { return }
+        let keep = records.suffix(rotateKeepRecords)
+        let enc = encoder()
+        var data = Data()
+        for rec in keep {
+            guard let line = try? enc.encode(rec) else { continue }
+            data.append(line)
+            data.append(0x0A)
+        }
+        let fm = FileManager.default
+        let tmp = CredentialFiles.dir.appendingPathComponent(
+            ".runs.ndjson.tmp-\(ProcessInfo.processInfo.processIdentifier)")
+        if fm.fileExists(atPath: tmp.path) { try? fm.removeItem(at: tmp) }
+        guard fm.createFile(atPath: tmp.path, contents: data,
+                            attributes: [.posixPermissions: 0o600]) else { return }
+        if rename(tmp.path, file.path) != 0 { try? fm.removeItem(at: tmp) }
+    }
+
     /// Append one record as a single JSON line, creating the file 0600 on first
     /// write. Best-effort by contract: recording history must NEVER fail a backup,
     /// so callers invoke this as `try?` — a full disk or a permission glitch costs
     /// a log line, not the run.
     static func append(_ record: RunRecord) throws {
+        rotateIfNeeded()
         var data = try encoder().encode(record)
         data.append(0x0A)   // newline — one record per line (NDJSON)
         let fm = FileManager.default

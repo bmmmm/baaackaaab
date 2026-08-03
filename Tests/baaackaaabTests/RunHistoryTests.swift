@@ -181,6 +181,19 @@ final class RunHistoryTests: XCTestCase {
         XCTAssertEqual(got.map(\.runTag), ["p3", "p2", "p1"])   // newest first, full window
     }
 
+    // Rotation: past rotateAtRecords the file compacts to the newest
+    // rotateKeepRecords — newest records survive, the oldest are dropped.
+    func testAppendRotatesPastThreshold() throws {
+        func rec(_ i: Int) -> RunRecord {
+            RunRecord(runTag: "r\(i)", start: Date(), end: Date(), exitCode: 0,
+                      verified: 1, total: 1, sourceFailures: 0, destinations: [])
+        }
+        for i in 0...(RunHistory.rotateAtRecords + 1) { try RunHistory.append(rec(i)) }
+        let after = RunHistory.recent(RunHistory.rotateAtRecords + 10)
+        XCTAssertLessThanOrEqual(after.count, RunHistory.rotateKeepRecords + 2)
+        XCTAssertEqual(after.first?.runTag, "r\(RunHistory.rotateAtRecords + 1)")   // newest kept
+    }
+
     // MARK: - Churn-metric NDJSON forward/backward compatibility
 
     // A record written with churn metrics survives the append→read round trip with

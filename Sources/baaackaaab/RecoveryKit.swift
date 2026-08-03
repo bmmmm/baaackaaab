@@ -134,6 +134,19 @@ enum RecoveryKit {
             lines.append("restic restore latest --target ./recovered --verify")
             lines.append("```")
             lines.append("")
+            // The kit's "any machine, stock restic" claim holds only for rest:
+            // (credentials embedded above) and local paths. Other backends need
+            // TRANSPORT credentials this tool never stores — without this note
+            // the operator discovers that mid-disaster with an auth error the
+            // sheet says nothing about.
+            if !repoURL.hasPrefix("rest:") && !repoURL.hasPrefix("/") {
+                lines.append("> Note: this is not a `rest:` repository. The backend transport needs its")
+                lines.append("> OWN credentials, which baaackaaab never stores and this kit cannot include:")
+                lines.append("> `sftp:` needs the SSH key/agent for the host, `s3:`/`b2:` need the API keys")
+                lines.append("> (AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, B2_ACCOUNT_ID/B2_ACCOUNT_KEY).")
+                lines.append("> Keep those with this kit, or recovery stops at the transport layer.")
+                lines.append("")
+            }
         }
         return lines.joined(separator: "\n")
     }

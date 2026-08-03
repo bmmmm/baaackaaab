@@ -113,8 +113,8 @@ func exportRecoveryKitCommand(plain: Bool) {
     if !plain {
         Console.section("To decrypt (any machine with openssl)")
         print("")
-        print("    openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -in \(output.path)")
+        print("    openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -in \(output.path) -out recovery-kit.md")
         print("")
-        Console.note("openssl will prompt for the passphrase you just entered (interactively, no echo).")
+        Console.note("openssl will prompt for the passphrase you just entered (interactively, no echo). `-out recovery-kit.md` writes the decrypted sheet to a file; drop it to print to the terminal instead. These exact decrypt parameters are pinned by RecoveryKitRoundTripTests.")
     }
 }
