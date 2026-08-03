@@ -291,9 +291,11 @@ enum DestinationError: Error, CustomStringConvertible {
 
 extension DestinationStore {
     /// A safe destinations/ subdir name: non-empty, no path separators, no
-    /// leading dot, restricted to a portable character set.
+    /// leading dot, no leading dash (a `-`-led name is almost always a swallowed
+    /// CLI flag, and would be unaddressable from the CLI afterwards), restricted
+    /// to a portable character set.
     static func validName(_ name: String) -> Bool {
-        guard !name.isEmpty, name.first != "." else { return false }
+        guard !name.isEmpty, name.first != ".", name.first != "-" else { return false }
         let allowed = CharacterSet(charactersIn:
             "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
         return name.unicodeScalars.allSatisfy { allowed.contains($0) }

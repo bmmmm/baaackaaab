@@ -239,4 +239,27 @@ final class CLIArgumentsTests: XCTestCase {
         // The value after --include can be any path word; it must not be read as a positional.
         XCTAssertNil(CLIArguments.unknownArgument(in: ["baaackaaab", "--restore", "--include", "report.pdf"]))
     }
+
+    // A known flag sitting in a value slot means the value was forgotten — the
+    // walk must name BOTH flags instead of skipping the pair silently. The
+    // trailing case is the dangerous one: with no leftover token, the old walk
+    // found nothing and the handler stored "--add-album" as a literal folder.
+    func testUnknownArgumentCatchesForgottenValueBeforeAnotherFlag() {
+        let trailing = CLIArguments.unknownArgument(in: ["baaackaaab", "--add-folder", "--add-album"])
+        XCTAssertNotNil(trailing)
+        XCTAssertTrue(trailing!.contains("--add-folder"), trailing!)
+        XCTAssertTrue(trailing!.contains("--add-album"), trailing!)
+
+        let midline = CLIArguments.unknownArgument(
+            in: ["baaackaaab", "--add-destination", "--repo-url", "rest:https://h/r/"])
+        XCTAssertNotNil(midline)
+        XCTAssertTrue(midline!.contains("--add-destination"), midline!)
+        XCTAssertTrue(midline!.contains("missing its value"), midline!)
+    }
+
+    // A value that merely STARTS with '-' but is no known flag stays accepted
+    // (exclude globs, --find patterns) — only known flags are rejected as values.
+    func testUnknownArgumentStillAcceptsDashPrefixedNonFlagValues() {
+        XCTAssertNil(CLIArguments.unknownArgument(in: ["baaackaaab", "--add-exclude", "-tmp*"]))
+    }
 }

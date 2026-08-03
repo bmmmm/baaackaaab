@@ -188,12 +188,31 @@ struct CLIArguments {
     ///     mistyped command and must fail loudly too.
     /// Pure (no argv access, no exit/IO) — directly unit-testable; the process
     /// wrapper `rejectUnknownFlags()` adds the exit.
+    /// Whether `tok` is any known flag (bool, value-taking, or `--diff`). Used to
+    /// tell "value that happens to start with '-'" (fine, e.g. `--find -x`) from
+    /// "the operator forgot the value and the next FLAG got swallowed" (always a
+    /// mistake — no value in this CLI ever equals a known flag).
+    static func isKnownFlag(_ tok: String) -> Bool {
+        tok == "--diff" || valueFlags.contains(tok) || boolFlags.contains(tok)
+    }
+
     static func unknownArgument(in tokens: [String]) -> String? {
         var i = 1   // skip argv[0]
         while i < tokens.count {
             let tok = tokens[i]
             if tok == "--diff" { i += 3; continue }           // flag + two snapshot ids
-            if valueFlags.contains(tok) { i += 2; continue }  // flag + its value
+            if valueFlags.contains(tok) {                     // flag + its value
+                // A known flag in the value slot means the value was forgotten:
+                // without this check the pair is skipped silently and the flag
+                // is either consumed as a literal value (mid-line) or — worse —
+                // a trailing `--add-folder --add-album` stores a folder literally
+                // named "--add-album" because the walk ends with no leftover token.
+                if i + 1 < tokens.count, isKnownFlag(tokens[i + 1]) {
+                    return "\(tok) is missing its value — the next token '\(tokens[i + 1])' is itself a flag. Put the value right after \(tok)."
+                }
+                i += 2
+                continue
+            }
             if boolFlags.contains(tok) { i += 1; continue }
             if tok.hasPrefix("-") && tok != "-" {
                 return "unknown flag '\(tok)' — see `baaackaaab --help` for the accepted flags. (Refusing to continue: an unrecognized flag would otherwise fall through to a full backup of the set.)"

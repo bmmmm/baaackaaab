@@ -44,7 +44,9 @@ final class DestinationStoreTests: XCTestCase {
     }
 
     func testValidNameRejects() {
-        for n in ["", ".hidden", "a/b", "a b", "naïve", "a\tb"] {
+        // Leading '-' included: such a name is almost always a swallowed CLI
+        // flag and would be unaddressable from the CLI afterwards.
+        for n in ["", ".hidden", "a/b", "a b", "naïve", "a\tb", "-oops", "--repo-url"] {
             XCTAssertFalse(DestinationStore.validName(n), n)
         }
     }
