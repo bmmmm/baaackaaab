@@ -26,7 +26,11 @@ struct RunCancelled: Error {}
 // "unchecked". This is what lets `static let shared` be a concurrency-safe global.
 final class BackupCancellation: @unchecked Sendable {
     static let shared = BackupCancellation()
-    private init() {}
+    // Internal (not private) so tests can exercise the arm/cancel/interrupt
+    // state machine on a throwaway instance WITHOUT contaminating the shared
+    // singleton other tests (the restic integration suite) rely on. Production
+    // code must only ever use `shared`.
+    init() {}
 
     private let lock = NSLock()
     // FIXME: one slot is correct only while the run loop is strictly sequential

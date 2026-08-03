@@ -274,6 +274,39 @@ final class ResticIntegrationTests: XCTestCase {
                          "the requested file should have been restored")
     }
 
+    /// The exact failure escapeResticPattern exists to prevent, proven against
+    /// live restic: a filename containing glob metacharacters ("IMG[1].jpg",
+    /// the shape Photos/iCloud exports produce) is a literal path to us but a
+    /// character-class glob to restic — unescaped, `--include` matches NOTHING
+    /// and restic still exits 0, so the test-restore/drill would silently pass
+    /// while restoring zero files. The escaped include must restore the file.
+    func testRestoreVerifyEscapesGlobMetacharacterFilenames() throws {
+        let backend = makeBackend()
+        try backend.ensureInitialized()
+        let src = try makeSource("src", files: ["IMG[1].jpg": "bracket bytes", "IMG1.jpg": "decoy"])
+        try backend.backup(paths: [src], tags: ["t"], host: "testhost")
+
+        let target = tmp.appendingPathComponent("glob-out", isDirectory: true)
+        let wanted = src.appendingPathComponent("IMG[1].jpg").path
+        let (code, output) = backend.restoreVerify(snapshot: "latest", target: target, includes: [wanted])
+        XCTAssertEqual(code, 0, "bracket-name restore+verify should exit 0:\n\(output)")
+        let restored = try firstFile(named: "IMG[1].jpg", under: target)
+        XCTAssertEqual(try String(contentsOf: restored, encoding: .utf8), "bracket bytes")
+        // The unescaped interpretation "IMG[1].jpg" ≙ glob "IMG1.jpg" must NOT
+        // be what got restored — the decoy staying absent proves the escaping.
+        XCTAssertThrowsError(try firstFile(named: "IMG1.jpg", under: target),
+                             "the glob interpretation must not match — only the literal file")
+    }
+
+    // MARK: - escapeResticPattern (pure escaping rules)
+
+    func testEscapeResticPatternEscapesAllMetacharacters() {
+        XCTAssertEqual(ResticBackend.escapeResticPattern("IMG[1].jpg"), "IMG\\[1\\].jpg")
+        XCTAssertEqual(ResticBackend.escapeResticPattern("a*b?c"), "a\\*b\\?c")
+        XCTAssertEqual(ResticBackend.escapeResticPattern("back\\slash"), "back\\\\slash")
+        XCTAssertEqual(ResticBackend.escapeResticPattern("/plain/path.txt"), "/plain/path.txt")
+    }
+
     // MARK: - find / ls / diff (read commands)
 
     func testFindAndLsLocateFiles() throws {

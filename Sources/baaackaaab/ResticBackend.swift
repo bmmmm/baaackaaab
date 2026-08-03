@@ -493,7 +493,9 @@ final class ResticBackend {
     /// otherwise match nothing and silently restore zero files (exit 0). The
     /// test-restore passes literal paths, so backslash-escape the metacharacters
     /// (and the escape char itself) to force a literal match.
-    private static func escapeResticPattern(_ s: String) -> String {
+    // Internal (not private) so the unit tests can pin the escaping rules — a
+    // regression here silently restores ZERO files with exit 0 (see doc above).
+    static func escapeResticPattern(_ s: String) -> String {
         var out = ""
         out.reserveCapacity(s.count)
         for ch in s {

@@ -262,4 +262,13 @@ final class CLIArgumentsTests: XCTestCase {
     func testUnknownArgumentStillAcceptsDashPrefixedNonFlagValues() {
         XCTAssertNil(CLIArguments.unknownArgument(in: ["baaackaaab", "--add-exclude", "-tmp*"]))
     }
+
+    // The layered --diff contract: unknownArgument's walk (i += 3) must not
+    // reject or crash on 0/1 trailing ids — diffCommand's own pair() guard owns
+    // that error with the actionable message. Pinned so neither layer silently
+    // assumes the other changed.
+    func testUnknownArgumentDiffWithMissingIdsFallsThroughToCommandGuard() {
+        XCTAssertNil(CLIArguments.unknownArgument(in: ["baaackaaab", "--diff"]))
+        XCTAssertNil(CLIArguments.unknownArgument(in: ["baaackaaab", "--diff", "aaaa"]))
+    }
 }
