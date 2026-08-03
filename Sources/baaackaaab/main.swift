@@ -347,8 +347,14 @@ if cli.has("--limit-upload")
     || cli.has("--no-defer-on-battery")
     || cli.has("--large-file-warn-mib")
     || cli.has("--clear-large-file-warn-mib") {
-    if !cli.values("--drive-folder").isEmpty || !cli.values("--photo-album").isEmpty {
-        Console.error("--limit-upload / --pack-size / --rest-connections / --read-concurrency / --repo-quota / --set-prom-textfile / --defer-on-battery / --large-file-warn-mib (and their --clear-* / --no-* forms) change the backup set's PERSISTENT tuning; they are not per-run flags (a run reads them from the set — there is no ad-hoc form). Set them on their own first (e.g. `baaackaaab --pack-size 64`), then run the backup separately. Combined with --drive-folder/--photo-album they would silently edit the set and skip the backup.")
+    // Any RUN-shaped flag alongside a persistent knob is the same trap as the
+    // ad-hoc source flags: the dispatch edits the set and exits, and the run /
+    // preview the user asked for silently never happens (`--pack-size 64
+    // --dry-run` previewed nothing). Reject the whole class, naming the clash.
+    let adHocRunFlags = ["--drive-folder", "--photo-album", "--dry-run", "--run-tag",
+                         "--host", "--staging", "--photo-batch-bytes", "--restic-repo"]
+    if let clash = adHocRunFlags.first(where: { cli.has($0) }) {
+        Console.error("--limit-upload / --pack-size / --rest-connections / --read-concurrency / --repo-quota / --set-prom-textfile / --defer-on-battery / --large-file-warn-mib (and their --clear-* / --no-* forms) change the backup set's PERSISTENT tuning; they are not per-run flags (a run reads them from the set — there is no ad-hoc form). Set them on their own first (e.g. `baaackaaab --pack-size 64`), then run separately. Combined with \(clash) this invocation would silently edit the set and skip the run/preview.")
         exit(1)
     }
 }

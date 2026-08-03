@@ -61,7 +61,12 @@ enum AppendOnlyProbe {
         var message: String {
             switch self {
             case .enforced:
-                return "append-only enforced — the probe DELETE was rejected with 403"
+                // Honest about the layer: a 403 proves DELETEs are rejected, but
+                // cannot tell rest-server's own --append-only from a reverse
+                // proxy/WAF blocking the DELETE method in front of a server that
+                // is NOT append-only — the latter leaves the ransomware
+                // guarantee resting on the proxy config alone.
+                return "append-only enforced — the probe DELETE was rejected with 403. (A reverse proxy blocking DELETE gives the same 403: confirm rest-server itself runs --append-only, e.g. `docker inspect` / the service args on the store host.)"
             case .notEnforced(let code):
                 return "server is NOT in --append-only mode (or wrong repo) — the ransomware guarantee is not in force; restart rest-server with --append-only (probe DELETE returned \(code))"
             case .authProblem:
