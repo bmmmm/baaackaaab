@@ -163,4 +163,37 @@ final class RestoreEngineTests: XCTestCase {
         XCTAssertEqual(t.lastPathComponent, "abc123-20260628-120000")
         assertAccepted(t, "the default fresh target must itself pass validation")
     }
+
+    // MARK: - sampleFiles (shared drill / test-restore sampler)
+
+    private func entry(_ name: String, size: Int?) -> ResticBackend.LsEntry {
+        ResticBackend.LsEntry(name: name, path: "/x/\(name)", type: "file", size: size)
+    }
+
+    // Identity order injected: deterministic assertions on the budget walk.
+    func testSampleFilesRespectsCountAndBudget() {
+        let files = [entry("a", size: 100), entry("b", size: 900),
+                     entry("c", size: 50), entry("d", size: 10)]
+        let r = RestoreEngine.sampleFiles(files, sampleCount: 3, budget: 200) { $0 }
+        XCTAssertEqual(r.sample.map(\.name), ["a", "c", "d"])   // b skipped: 100+900 > 200
+        XCTAssertEqual(r.bytes, 160)
+        XCTAssertEqual(r.skippedBudget, 1)
+    }
+
+    // The first pick is always taken — a guaranteed non-empty sample — even when
+    // it alone exceeds the budget. Documented overshoot, visible in `bytes`.
+    func testSampleFilesFirstPickMayOvershootBudget() {
+        let files = [entry("huge", size: 5_000), entry("small", size: 10)]
+        let r = RestoreEngine.sampleFiles(files, sampleCount: 2, budget: 1_000) { $0 }
+        XCTAssertEqual(r.sample.map(\.name), ["huge"])
+        XCTAssertEqual(r.bytes, 5_000)
+        XCTAssertEqual(r.skippedBudget, 1)   // "small" no longer fits on top
+    }
+
+    func testSampleFilesStopsAtSampleCount() {
+        let files = (0..<10).map { entry("f\($0)", size: 1) }
+        let r = RestoreEngine.sampleFiles(files, sampleCount: 4, budget: 1_000) { $0 }
+        XCTAssertEqual(r.sample.count, 4)
+        XCTAssertEqual(r.skippedBudget, 0)
+    }
 }

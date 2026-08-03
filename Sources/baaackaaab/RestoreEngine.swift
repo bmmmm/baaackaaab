@@ -196,4 +196,27 @@ enum RestoreEngine {
             throw RestoreError.createFailed(path: target.path, underlying: "\(error)")
         }
     }
+
+    /// Budget-bounded random sample for the drill / test-restore, factored out so
+    /// the two paths cannot drift. Picks up to `sampleCount` files from a
+    /// shuffled order, skipping files that would exceed `budget` — EXCEPT the
+    /// first pick, which is always taken: a sample of zero files proves nothing,
+    /// so a single file larger than the budget deliberately overshoots it by that
+    /// one file (worth knowing on a metered link — the callers surface
+    /// `skippedBudget`, and the overshoot is visible in `bytes`). `order`
+    /// injectable for deterministic tests; defaults to a real shuffle.
+    static func sampleFiles(
+        _ files: [ResticBackend.LsEntry], sampleCount: Int, budget: Int,
+        order: ([ResticBackend.LsEntry]) -> [ResticBackend.LsEntry] = { $0.shuffled() }
+    ) -> (sample: [ResticBackend.LsEntry], bytes: Int, skippedBudget: Int) {
+        var sample: [ResticBackend.LsEntry] = []
+        var bytes = 0, skippedBudget = 0
+        for f in order(files) {
+            if sample.count >= sampleCount { break }
+            let sz = f.size ?? 0
+            if !sample.isEmpty && bytes + sz > budget { skippedBudget += 1; continue }
+            sample.append(f); bytes += sz
+        }
+        return (sample, bytes, skippedBudget)
+    }
 }

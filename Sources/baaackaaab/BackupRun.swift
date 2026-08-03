@@ -497,8 +497,15 @@ struct BackupRun {
             Console.summary(headline: outcome.headline, state: outcome.state, details: details)
             // Snapshot the history BEFORE recording this run, so the churn-anomaly
             // baseline is built purely from PRIOR runs and never includes the run we
-            // are about to append.
-            let priorHistory = runCancelled ? [] : RunHistory.recent(ChurnAnomaly.baselineWindow)
+            // are about to append. Fetched per destination so each baseline gets a
+            // full window of ITS OWN successful backups — a shared recent(30) pull
+            // shrank the effective window by 1/N destinations plus every
+            // interleaved drill/check record.
+            let priorBackupsByDest: [String: [RunRecord]] = runCancelled ? [:] :
+                Dictionary(uniqueKeysWithValues: ready.map {
+                    ($0.destination.name,
+                     RunHistory.recentBackups(ChurnAnomaly.baselineWindow, destination: $0.destination.name))
+                })
             recordRun(exitCode: Int(outcome.exitCode), verified: verified, total: total, sourceFailures: sourceFailures)
             if outcome.notify, let message = outcome.notifyMessage { notifyOnFailure(message) }
 
@@ -512,7 +519,7 @@ struct BackupRun {
             // since an interactive run already shows the warning on screen.
             if !runCancelled {
                 for run in ready where run.ok && run.churn.hasData {
-                    let baseline = ChurnAnomaly.baseline(from: priorHistory,
+                    let baseline = ChurnAnomaly.baseline(from: priorBackupsByDest[run.destination.name] ?? [],
                                                          destination: run.destination.name)
                     let message: String
                     switch ChurnAnomaly.evaluate(current: run.churn, baseline: baseline) {

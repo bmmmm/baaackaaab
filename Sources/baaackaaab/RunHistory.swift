@@ -239,9 +239,30 @@ enum RunHistory {
     }
 
     /// How many restore drills have been recorded — the rotation cursor the drill
-    /// uses to advance its sampled source across successive runs.
-    static func drillCount() -> Int {
-        allRecords().reduce(0) { $0 + ($1.isDrill ? 1 : 0) }
+    /// uses to advance its sampled source across successive runs. Scoped to one
+    /// destination when given: the cursor must not advance because a DIFFERENT
+    /// destination was drilled by hand, or the rotation skips a source on the
+    /// next scheduled (primary) drill. nil counts all drills (dashboard totals).
+    static func drillCount(destination: String? = nil) -> Int {
+        allRecords().reduce(0) { count, rec in
+            guard rec.isDrill else { return count }
+            if let destination,
+               !rec.destinations.contains(where: { $0.name == destination }) { return count }
+            return count + 1
+        }
+    }
+
+    /// The last `limit` SUCCESSFUL backup records that name `destination`,
+    /// newest first — the churn-anomaly baseline feed. Filtering happens BEFORE
+    /// the window is applied: a shared `recent(30)` window shrank the effective
+    /// per-destination baseline by 1/N destinations plus every interleaved
+    /// drill/check record, making the tripwire noisier than the window-size
+    /// constant implies.
+    static func recentBackups(_ limit: Int, destination: String) -> [RunRecord] {
+        Array(allRecords().filter { rec in
+            rec.isBackup && rec.exitCode == 0
+                && rec.destinations.contains { $0.name == destination }
+        }.suffix(limit).reversed())
     }
 
     /// The newest scheduled integrity-check record, or nil if none has run — the

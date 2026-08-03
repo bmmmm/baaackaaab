@@ -142,6 +142,45 @@ final class RunHistoryTests: XCTestCase {
         XCTAssertEqual(RunHistory.drillCount(), 0)
     }
 
+    // The rotation cursor is per destination: a manual drill of `secondary` must
+    // not advance `primary`'s rotation (it would skip a source next cycle).
+    func testDrillCountScopedToDestination() throws {
+        func drill(_ destName: String) -> RunRecord {
+            RunRecord(runTag: "drill", start: Date(), end: Date(), exitCode: 0,
+                      verified: 1, total: 1, sourceFailures: 0,
+                      destinations: [RunRecord.Dest(name: destName, ok: true, error: nil)],
+                      kind: "drill")
+        }
+        try RunHistory.append(drill("primary"))
+        try RunHistory.append(drill("secondary"))
+        try RunHistory.append(drill("primary"))
+        XCTAssertEqual(RunHistory.drillCount(destination: "primary"), 2)
+        XCTAssertEqual(RunHistory.drillCount(destination: "secondary"), 1)
+        XCTAssertEqual(RunHistory.drillCount(), 3)   // nil = all, dashboard totals
+    }
+
+    // The churn baseline feed filters BEFORE windowing: interleaved records of
+    // another destination (or checks/drills) must not shrink the window.
+    func testRecentBackupsFiltersBeforeWindowing() throws {
+        func backup(_ destName: String, tag: String) -> RunRecord {
+            RunRecord(runTag: tag, start: Date(), end: Date(), exitCode: 0,
+                      verified: 1, total: 1, sourceFailures: 0,
+                      destinations: [RunRecord.Dest(name: destName, ok: true, error: nil)])
+        }
+        // 3 primary backups, buried under 5 secondary backups and a check record.
+        try RunHistory.append(backup("primary", tag: "p1"))
+        for i in 0..<5 { try RunHistory.append(backup("secondary", tag: "s\(i)")) }
+        try RunHistory.append(backup("primary", tag: "p2"))
+        try RunHistory.append(RunRecord(runTag: "check", start: Date(), end: Date(), exitCode: 0,
+                                        verified: 1, total: 1, sourceFailures: 0,
+                                        destinations: [RunRecord.Dest(name: "primary", ok: true, error: nil)],
+                                        kind: "check", slice: 1))
+        try RunHistory.append(backup("primary", tag: "p3"))
+
+        let got = RunHistory.recentBackups(3, destination: "primary")
+        XCTAssertEqual(got.map(\.runTag), ["p3", "p2", "p1"])   // newest first, full window
+    }
+
     // MARK: - Churn-metric NDJSON forward/backward compatibility
 
     // A record written with churn metrics survives the append→read round trip with

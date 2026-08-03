@@ -149,7 +149,7 @@ func restoreDrillCommand() {
     let snaps: [ResticBackend.Snapshot]
     do { snaps = try backend.listSnapshots() }
     catch { Console.error("could not list snapshots for the drill: \(error)"); exit(1) }
-    let priorDrills = RunHistory.drillCount()
+    let priorDrills = RunHistory.drillCount(destination: dest.name)
     let targets = DrillPlan.select(from: snaps, priorDrills: priorDrills)
     guard !targets.isEmpty else {
         // Nothing to restore yet is not a drill failure — report and exit 0 without
@@ -246,13 +246,12 @@ private func drillVerify(backend: ResticBackend, target: DrillTarget,
     let files = entries.filter { $0.type == "file" && ($0.size ?? 0) > 0 }
     guard !files.isEmpty else { return (false, 0, 0, 0, "snapshot has no non-empty files to sample") }
 
-    var sample: [ResticBackend.LsEntry] = []
-    var bytes = 0
-    for f in files.shuffled() {
-        if sample.count >= sampleCount { break }
-        let sz = f.size ?? 0
-        if !sample.isEmpty && bytes + sz > budget { continue }
-        sample.append(f); bytes += sz
+    let (sample, bytes, skippedBudget) =
+        RestoreEngine.sampleFiles(files, sampleCount: sampleCount, budget: budget)
+    if skippedBudget > 0 {
+        // Same visibility the manual --test-restore gives: a budget-trimmed
+        // sample should say so, not silently look like a full-size drill.
+        Console.note("\(skippedBudget) file(s) skipped to stay under the drill budget (raise with --max-bytes)")
     }
 
     do { try RestoreEngine.validateTarget(sub); try RestoreEngine.ensureTargetDir(sub) }

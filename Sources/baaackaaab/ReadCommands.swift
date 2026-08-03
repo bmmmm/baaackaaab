@@ -429,14 +429,8 @@ func testRestoreCommand() {
         Console.error("snapshot \(snapshot) has no non-empty files to test")
         exit(1)
     }
-    var sample: [ResticBackend.LsEntry] = []
-    var bytes = 0, skippedBudget = 0
-    for f in files.shuffled() {
-        if sample.count >= sampleCount { break }
-        let sz = f.size ?? 0
-        if !sample.isEmpty && bytes + sz > budget { skippedBudget += 1; continue }
-        sample.append(f); bytes += sz
-    }
+    let (sample, bytes, skippedBudget) =
+        RestoreEngine.sampleFiles(files, sampleCount: sampleCount, budget: budget)
     let sampledHuman = ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
     Console.step("sampling \(sample.count) of \(files.count) file(s) from snapshot \(snapshot) (\(sampledHuman))")
     if skippedBudget > 0 {
