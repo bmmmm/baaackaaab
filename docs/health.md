@@ -173,9 +173,11 @@ Gotify gets a JSON push (`{title, message, priority}`, priority 8 on failure so
 it interrupts, 4 on success); a webhook gets a JSON POST — `{ event, outcome,
 started, finished, verified, total, destinations: [{name, ok}], message }`.
 Gotify's per-app token is a secret, so `--add-gotify` takes just the **server
-URL** and prompts for the token silently (it never touches argv or shell
-history), then assembles the `/message?token=…` endpoint for you — pass the full
-URL yourself only for non-interactive setup. All are repeatable (`--remove-notify
+URL** and reads the token from `BAAACKAAAB_GOTIFY_TOKEN` (non-interactive
+setup) or a silent prompt (it never touches argv or shell history), then
+assembles the `/message?token=…` endpoint for you. On the wire the token
+travels as the `X-Gotify-Key` header, stripped from the request URL, so it
+never lands in the server's or a proxy's access log. All are repeatable (`--remove-notify
 <url>` drops one by URL) and fire on every terminal outcome, not just failures
 — a heartbeat "success" ping is what resets the monitor's clock.
 

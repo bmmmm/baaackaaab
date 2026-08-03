@@ -138,6 +138,10 @@ final class PhotosAcquirer {
             Console.step("\(albums.count) albums are titled '\(albumTitle)' — backing up all of them")
         }
 
+        // PHFetchResults are live-updating in principle; counts and ordinals are
+        // read ONCE here and treated as a snapshot. If the album changes during
+        // an hours-long export, progress numbering may drift from the live
+        // collection — cosmetic only, what gets verified/staged is unaffected.
         let assetLists = albums.map { PHAsset.fetchAssets(in: $0, options: nil) }
         let totalAssets = assetLists.reduce(0) { $0 + $1.count }
         let spread = albums.count > 1 ? " across \(albums.count) albums" : ""
