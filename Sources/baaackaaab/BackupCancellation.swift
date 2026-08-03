@@ -70,7 +70,10 @@ final class BackupCancellation: @unchecked Sendable {
             let src = DispatchSource.makeSignalSource(signal: sig, queue: .global(qos: .userInitiated))
             src.setEventHandler { [weak self] in self?.handle() }
             src.resume()
-            sources.append(src)
+            // Under the lock like every other mutable field — arm() is currently
+            // single-threaded, but the documented invariant (the basis for
+            // @unchecked Sendable) is "all state under `lock`", so keep it true.
+            lock.lock(); sources.append(src); lock.unlock()
         }
     }
 

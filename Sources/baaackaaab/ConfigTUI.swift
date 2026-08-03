@@ -251,7 +251,14 @@ final class ConfigTUI {
         drawPrompt("unsaved changes — y: save & quit   n: discard & quit   enter/esc: cancel (default)")
         while true {
             switch readKey() {
-            case .char("y"), .char("Y"): save(); return true
+            case .char("y"), .char("Y"):
+                save()
+                // A failed save must NOT quit: save() leaves `dirty` true and
+                // puts the error into statusMsg — stay in the editor so the
+                // failure is rendered, instead of tearing down the alt screen
+                // over silently-discarded edits.
+                if dirty { return false }
+                return true
             case .char("n"), .char("N"): return true
             // The safe default — enter/esc keeps the editor open, never discards.
             case .enter, .esc, .ctrlC: return false

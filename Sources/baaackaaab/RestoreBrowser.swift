@@ -174,8 +174,11 @@ extension ConfigTUI {
         let tail = code == 0 ? "restore finished \u{2014} revealed in Finder" : "restore exited with code \(code)"
         FileHandle.standardOutput.write(Data("\n\(tail) \u{2014} press any key to return\n".utf8))
         term.enable()
-        _ = readKey()
+        // Reclaim BEFORE the blocking read: the restic child may have taken the
+        // tty foreground pgroup; reading while backgrounded raises SIGTTIN and
+        // stops the app (looks like a hang after every restore).
         reclaimForeground()
+        _ = readKey()
         emit("\u{1B}[?1049h\u{1B}[?25l")   // back into the alternate screen
         statusMsg = code == 0 ? "restored into \(target.path)" : "restore failed (code \(code))"
     }
@@ -400,8 +403,11 @@ extension ConfigTUI {
         let tail = code == 0 ? "restore finished \u{2014} revealed in Finder" : "restore exited with code \(code)"
         FileHandle.standardOutput.write(Data("\n\(tail) \u{2014} press any key to return\n".utf8))
         term.enable()
-        _ = readKey()
+        // Reclaim BEFORE the blocking read: the restic child may have taken the
+        // tty foreground pgroup; reading while backgrounded raises SIGTTIN and
+        // stops the app (looks like a hang after every restore).
         reclaimForeground()
+        _ = readKey()
         emit("\u{1B}[?1049h\u{1B}[?25l")
         statusMsg = code == 0 ? "restored into \(target.path)" : "restore failed (code \(code))"
     }

@@ -340,8 +340,11 @@ extension ConfigTUI {
         let tail = code == 0 ? "sync finished" : "sync exited with code \(code)"
         FileHandle.standardOutput.write(Data("\n\(tail) \u{2014} press any key to return\n".utf8))
         term.enable()                       // raw again, to catch a single keypress
-        _ = readKey()
+        // Reclaim BEFORE the blocking read: the just-exited restic child may have
+        // taken the tty foreground pgroup; reading while backgrounded raises
+        // SIGTTIN (not ignored) and stops the whole app — looks like a hang.
         reclaimForeground()
+        _ = readKey()
         emit("\u{1B}[?1049h\u{1B}[?25l")    // back into the alternate screen
         remotes = []; remoteQueried = false  // repos changed — drop the cached status
         recentRuns = nil                     // the run we just did appended a record
@@ -379,8 +382,8 @@ extension ConfigTUI {
         let tail = code == 0 ? "dry run finished" : "dry run exited with code \(code)"
         FileHandle.standardOutput.write(Data("\n\(tail) \u{2014} press any key to return\n".utf8))
         term.enable()
+        reclaimForeground()   // before the blocking read — see syncNow()
         _ = readKey()
-        reclaimForeground()
         emit("\u{1B}[?1049h\u{1B}[?25l")
         statusMsg = code == 0 ? "dry run complete \u{2014} nothing uploaded" : "dry run failed (code \(code))"
     }
@@ -402,8 +405,8 @@ extension ConfigTUI {
         catch { FileHandle.standardOutput.write(Data("could not launch \(label): \(error)\n".utf8)) }
         FileHandle.standardOutput.write(Data("\n\(label) done \u{2014} press any key to return\n".utf8))
         term.enable()
+        reclaimForeground()   // before the blocking read — see syncNow()
         _ = readKey()
-        reclaimForeground()
         emit("\u{1B}[?1049h\u{1B}[?25l")   // back into the alternate screen
         statusMsg = code == 0 ? "" : "\(label) exited with code \(code)"
         return code
