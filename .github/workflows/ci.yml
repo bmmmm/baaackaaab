@@ -36,3 +36,9 @@ jobs:
         run: swift test
         env:
           RESTIC_CACHE_DIR: ${{ runner.temp }}/restic-cache
+      # The TTY merge-gate: drives the real command-center TUI on a pty via
+      # expect (ships with macOS) — screens, SIGWINCH redraw, clean exit.
+      # Runs against an isolated throwaway store; read-only towards the
+      # runner's (empty) LaunchAgents.
+      - name: TUI smoke (pty)
+        run: scripts/tui-smoke.sh .build/release/baaackaaab

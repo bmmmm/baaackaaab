@@ -123,6 +123,22 @@ extension ConfigTUI {
 
     func nextByte() -> UInt8? {
         if inpos >= inbuf.count {
+            // Wait via poll with a short timeout instead of a bare blocking
+            // read. The bare read relied on SIGWINCH EINTR-ing it, which is
+            // not guaranteed: a process-directed signal may be delivered to
+            // another thread (the handler then sets winchPending without
+            // interrupting our read), and the process may not even be IN
+            // read() when the signal lands (e.g. blocked in write() on a full
+            // pty — seen under scripts/tui-smoke.sh). The 250 ms poll tick
+            // observes winchPending regardless of where the signal landed.
+            while true {
+                if winchPending != 0 { return nil }   // surfaced as .resize by readKey
+                var pfd = pollfd(fd: STDIN_FILENO, events: Int16(POLLIN), revents: 0)
+                let rc = poll(&pfd, 1, 250)
+                if rc > 0 { break }
+                if rc < 0 && errno != EINTR { return nil }   // real error → .eof upstream
+                // rc == 0 (poll tick) or EINTR: loop and re-check winchPending
+            }
             var tmp = [UInt8](repeating: 0, count: 32)
             let n = read(STDIN_FILENO, &tmp, 32)
             if n <= 0 { return nil }

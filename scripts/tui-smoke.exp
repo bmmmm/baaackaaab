@@ -1,0 +1,95 @@
+#!/usr/bin/expect -f
+# TUI smoke: drive the command center on a real pty — screens, SIGWINCH, clean
+# exit. Run via scripts/tui-smoke.sh, which builds the isolated environment.
+#
+# Pattern rules (hard-learned):
+#  * ASCII only — Tcl does not read this file as UTF-8, so matching the em-dash
+#    headers ("baaackaaab <emdash> timer") silently never fires. Match an ASCII
+#    substring of each screen instead.
+#  * unique per screen — footer key hints ("R restore", "t timer") false-
+#    positive on bare words; use text only that screen renders:
+#      home:   "command center"          (header)
+#      editor: "configure backup set"    (header)
+#      timer:  "will install:"           (schedule preview line)
+#      restore w/o destinations: "no repository" (home status line)
+
+set timeout 30
+set bin [lindex $argv 0]
+set config [lindex $argv 1]
+
+proc fail {msg} {
+    puts "\nFAIL: $msg"
+    exit 1
+}
+
+spawn $bin --center --config $config
+
+# Registered AFTER spawn: expect_after binds to the spawn_id current at
+# REGISTRATION time — before spawn that is the user stdin, which under a
+# headless runner is at EOF immediately and fails every expect on the spot.
+expect_after {
+    timeout { fail "timed out waiting for expected screen text" }
+    eof     { fail "TUI exited unexpectedly" }
+}
+
+expect "command center"
+
+# Editor and back (ESC returns home when the center launched the editor).
+send "e"
+expect "configure backup set"
+send "\x1b"
+expect "command center"
+
+# Timer screen and back. READ-ONLY by contract: LaunchAgents are NOT isolated
+# by BAAACKAAAB_SUPPORT_DIR, so this screen shows the operator's REAL timer —
+# never send "i" (install) or "u" (uninstall) here.
+send "t"
+expect "will install:"
+send "\x1b"
+expect "command center"
+
+# Restore with NO destinations (isolated support dir): stays on home with the
+# actionable status line — and never issues a live snapshot query.
+send "R"
+expect "no repository"
+# Drain until QUIET before the resize proof. Two failure modes this kills
+# (both hit 2026-08-04): screen anchors like "command center" recur in every
+# home frame, so without a drain the next expect matches stale BACKLOG bytes
+# instead of the redraw; and during the exec/sleep no-read phase the app can
+# block mid-frame in write() on the full pty buffer — a deadlock once the
+# script stops reading. After 1s of silence the buffer is empty and the app
+# is provably idle in its input loop.
+# (expect has NO -timeout flag — an inline one silently becomes a glob
+# pattern; the timeout VARIABLE is the only per-wait control.)
+set save_timeout $timeout
+set timeout 1
+expect {
+    -re ".+" { exp_continue }
+    timeout {}
+}
+set timeout $save_timeout
+
+# Resize: stty sets the new pty size, but empirically does NOT deliver
+# SIGWINCH to the child on macOS (verified 2026-08-04: no redraw ever came) —
+# send the signal explicitly. The buffer is drained and the app idle, so the
+# "command center" below can only come from the resize-triggered redraw.
+exec stty rows 40 cols 100 < $spawn_out(slave,name)
+exec kill -WINCH [exp_pid]
+expect "command center"
+
+# Quit (set untouched -> no confirm prompt) and require a clean exit status.
+# Local eof/timeout branches override the expect_after ones — do NOT try to
+# "clear" expect_after with `expect_after {}`: that registers an EMPTY glob
+# pattern that matches instantly, faking an eof and parking `wait` on a
+# still-running app (deadlock; cost a debugging session on 2026-08-04).
+# The local timeout branch matters too: falling through to `wait` without
+# one would turn a hung TUI into a silent hang instead of a clean FAIL.
+send "q"
+expect {
+    eof { }
+    timeout { fail "TUI did not exit after q" }
+}
+catch wait result
+set status [lindex $result 3]
+if {$status != 0} { fail "TUI exited with status $status" }
+puts "\nPASS: TUI smoke (screens + SIGWINCH + clean exit)"
