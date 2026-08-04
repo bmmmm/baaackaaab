@@ -35,9 +35,33 @@ dashboard; a launchd timer runs it unattended.
 - **One binary, no daemons** — a single Swift CLI; scheduling is a plain
   launchd LaunchAgent, secrets live in `0600` files and never touch argv.
 
-Not what you were looking for? The wider restic ecosystem — GUIs, cron
-wrappers, browsers, other backup front-ends — is cataloged at
-[awesome-restic](https://github.com/rubiojr/awesome-restic).
+## How it compares
+
+The restic ecosystem has excellent general-purpose front-ends —
+[resticprofile](https://github.com/creativeprojects/resticprofile) and
+[autorestic](https://github.com/cupcakearmy/autorestic) for declarative
+profiles and scheduling, [backrest](https://github.com/garethgeorge/backrest)
+for a web-UI orchestrator with retention and multi-repo support. They all
+orchestrate the same thing: filesystem paths, backed up with full delete
+rights. baaackaaab plays a different game on three points:
+
+- **Source acquisition, not just paths.** Generic tools pointed at iCloud
+  Drive back up FileProvider placeholders, and pointed at Photos they scrape
+  library internals. baaackaaab materializes Drive files via coordinated reads
+  and exports Photos through PhotoKit in byte-budgeted batches.
+- **Retention is refused, not offered.** Where others ship forget/prune as a
+  core feature, this client structurally cannot delete — and `--doctor`
+  actively proves the server enforces that, instead of assuming it.
+- **Verification is scheduled, not optional.** Monthly restore drills, a
+  rotating read-data check, and a recovery kit whose commands the test suite
+  itself executes.
+
+If your backup problem is general — many hosts, mixed sources, rolling
+retention — pick one of the tools above; the wider ecosystem (GUIs, cron
+wrappers, browsers) is cataloged at
+[awesome-restic](https://github.com/rubiojr/awesome-restic). baaackaaab does
+exactly one job: this Mac's iCloud data, one-way, into a store it can never
+destroy.
 
 ## Why this exists
 
