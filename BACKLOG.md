@@ -223,6 +223,42 @@ Deliberately NOT fixed (accepted, with reasons):
 - **BackupCancellation tracks ONE process** — correct while destinations run
   sequentially; a `FIXME` at the field anchors the parallel-by-link precondition.
 
+## Review round 3 (2026-08-04) — pre-v1.1.0 sweep
+
+Fixed in the v1.1.0 line: trailing value-flag fallthrough to a full backup
+(`Med-High`), unbounded quota-preflight `stats`, check/drill children not
+registered with BackupCancellation, misleading `.failed`/`.timedOut` texts,
+`launchFailed` conflated with `.notFound`, recovery-kit export lines breaking
+on embedded single quotes, doctor's staging path ignoring `--staging`,
+transport-env perm check sitting behind the password guard, stale
+RunAtLoad/remoteStatus/class-doc comments. Plus three no-behaviour-change
+refactors: Doctor.swift extraction, one spawn core behind the four runners,
+read-only query split (ResticBackendQueries.swift).
+
+Deferred (each verified plausible, none data-loss in normal operation):
+
+- [ ] **AppendOnlyProbe: credential-less `rest:` URL reads as "not a rest:
+  destination".** `Low-Med` — `target(from:)` returns nil for a `rest:` URL
+  without embedded userinfo; doctor then prints the S3/R2 storage-layer note,
+  which is simply false there. Return a typed reason (`.notRest` vs
+  `.restWithoutCredentials`) and word the latter honestly.
+- [ ] **AppendOnlyProbe follows redirects with the Basic header.** `Low` —
+  `URLSession.shared` re-sends Authorization on a same-origin 30x and a
+  redirect can turn a real 403 into `.inconclusive`. Reuse OutboundNotifier's
+  NoRedirectDelegate shape (ephemeral session, refuse redirects).
+- [ ] **doctor/updateCheck ignore `--restic-repo` / inherited RESTIC_REPOSITORY.**
+  `Low` — they read `DestinationStore.all()` while every other command resolves
+  the override, so with an override exported doctor reports repos the next run
+  won't touch. Resolve the override or print an explicit note.
+- [ ] **`lsDetailed` is likely a no-op duplicate of `ls`.** `Low` — `-l` adds
+  nothing under `--json` (size is always present). Verify against the installed
+  restic, then delete it (behaviour change, own slice) or reword its doc.
+- [ ] **RunHistory rotation vs a concurrent O_APPEND writer.** `Low` — rotate's
+  temp+rename can strand another process's just-appended record on the unlinked
+  inode; drill/check append without the single-instance lock and all three
+  timers RunAtLoad-co-fire at login. Take an flock around rotate+append, or
+  skip rotation when the lock is not held.
+
 ## Decisions — do NOT re-investigate
 
 - **`--config` forwarding to the restore/read children is a no-op (dead code).**

@@ -100,6 +100,20 @@ final class RecoveryKitTests: XCTestCase {
         XCTAssertTrue(sheet.contains("transport-env"))
     }
 
+    // A single quote in an imported password or a hand-written transport-env
+    // value must not break the sheet's export lines — a recovery command that
+    // shatters at paste time defeats the kit's purpose.
+    func testComposeSheetEscapesSingleQuotesInExportLines() {
+        XCTAssertEqual(RecoveryKit.shellQuoted("plain"), "'plain'")
+        XCTAssertEqual(RecoveryKit.shellQuoted("it's"), "'it'\\''s'")
+        let entries = [RecoveryKit.Entry(
+            name: "offsite", repoURL: "s3:https://h/b", password: "pa'ss",
+            transportEnv: ["AWS_SECRET_ACCESS_KEY": "se'cret"])]
+        let sheet = RecoveryKit.composeSheet(entries: entries, generatedAt: Date())
+        XCTAssertTrue(sheet.contains("export RESTIC_PASSWORD='pa'\\''ss'"))
+        XCTAssertTrue(sheet.contains("export AWS_SECRET_ACCESS_KEY='se'\\''cret'"))
+    }
+
     func testComposeSheetNonRestWithoutTransportEnvStillWarns() {
         let entries = [RecoveryKit.Entry(
             name: "offsite", repoURL: "s3:https://acc.r2.example.com/bkt", password: "s3key")]

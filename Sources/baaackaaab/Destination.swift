@@ -242,6 +242,19 @@ enum DestinationStore {
             Console.warn("destination '\(name)': transport-env sets \(reserved.joined(separator: ", ")) — ignored; the repository URL and encryption key come only from the destination's repo-url/repo-password files.")
             for key in reserved { env.removeValue(forKey: key) }
         }
+        // Values are passed to restic verbatim — warn about the two shapes that
+        // are almost always a .env-style habit rather than part of the secret:
+        // a value wrapped in matching quotes, or one starting with whitespace.
+        // Both otherwise surface only as an opaque backend auth error. Key
+        // names only in the warning, never values (they are secrets).
+        let suspicious = env.filter { _, v in
+            (v.count >= 2 && v.hasPrefix("\"") && v.hasSuffix("\""))
+                || (v.count >= 2 && v.hasPrefix("'") && v.hasSuffix("'"))
+                || v.first?.isWhitespace == true
+        }.keys.sorted()
+        if !suspicious.isEmpty {
+            Console.warn("destination '\(name)': transport-env value(s) for \(suspicious.joined(separator: ", ")) look quoted or start with whitespace — values are taken verbatim (no shell quoting); remove the quotes/padding unless they are literally part of the secret.")
+        }
         return env
     }
 

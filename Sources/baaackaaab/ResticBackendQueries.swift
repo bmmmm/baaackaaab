@@ -333,7 +333,10 @@ extension ResticBackend {
     /// Parse `restic snapshots --json` into an array of dictionaries. In --json
     /// mode restic emits a single JSON array; we still slice from the first '['
     /// in case a stray line precedes it.
-    private func snapshotsJSON(timeout: TimeInterval? = nil) throws -> [[String: Any]] {
+    // No default for `timeout`: both call sites pass the probe timeout
+    // explicitly, and an unreachable `nil` default is the kind a future call
+    // site quietly starts relying on.
+    private func snapshotsJSON(timeout: TimeInterval?) throws -> [[String: Any]] {
         let out = try runCapturing(["snapshots", "--json"], command: "snapshots", timeout: timeout)
         guard let start = out.firstIndex(of: "[") else { return [] }
         let json = String(out[start...])

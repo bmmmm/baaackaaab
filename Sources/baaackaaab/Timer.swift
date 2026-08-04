@@ -407,8 +407,9 @@ enum LaunchdTimer {
                          runAtLoad: Bool = false) -> String {
         let args = program.map { "        <string>\(xmlEscape($0))</string>" }.joined(separator: "\n")
         // RunAtLoad fires the job once when launchd loads it (login/boot) in
-        // addition to the calendar schedule — the boot catch-up path. Only the
-        // backup timer sets it; the drill/check timers stay purely calendar-driven.
+        // addition to the calendar schedule — the boot catch-up path. All three
+        // timers (backup, drill, check) set it and pair it with `--catch-up`,
+        // which exits quietly when the last run is recent enough.
         let runAtLoadXML = runAtLoad ? "    <key>RunAtLoad</key>\n    <true/>\n" : ""
         return """
         <?xml version="1.0" encoding="UTF-8"?>

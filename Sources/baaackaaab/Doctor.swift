@@ -62,24 +62,26 @@ func doctorCommand() {
         warnings += 1
     }
     for dest in dests {
-        guard dest.passwordAvailable else {
-            Console.failure("\(dest.name): " + noPasswordNote())
-            problems += 1
-            continue
-        }
         // The operator writes transport-env by hand (unlike the url/password
         // files this tool creates 0600 itself), so doctor is where a too-open
-        // copy gets caught. Checked before reachability — a loose credential
-        // file matters even while the destination is down.
+        // copy gets caught. Checked before the password guard and before
+        // reachability — a loose credential file matters even when the key is
+        // missing or the destination is down.
         let transportEnvFile = DestinationStore.transportEnvFile(dest.name)
         if let attrs = try? FileManager.default.attributesOfItem(atPath: transportEnvFile.path),
            let perms = attrs[.posixPermissions] as? NSNumber, perms.uint16Value & 0o077 != 0 {
             Console.warn("\(dest.name): transport-env is group/world-readable — it holds backend credentials; tighten it with `chmod 600 \(transportEnvFile.path)`")
             warnings += 1
         }
+        guard dest.passwordAvailable else {
+            Console.failure("\(dest.name): " + noPasswordNote())
+            problems += 1
+            continue
+        }
         let backend = ResticBackend(destination: dest)
-        // Bounded existence probe first, so a dead destination is reported in ~60s
-        // instead of hanging on restic's backend retries (remoteStatus is unbounded).
+        // Bounded existence probe first, so a dead destination is reported in
+        // ~60s instead of hanging on restic's backend retries; the remoteStatus
+        // queries behind it are bounded by the same probe timeout.
         guard backend.exists() else {
             Console.failure("\(dest.name): not reachable or not initialized — run `--check` (verifies DNS/auth and inits the repo)")
             problems += 1
@@ -121,12 +123,14 @@ func doctorCommand() {
             continue
         }
         let verdict = AppendOnlyProbe.probe(target)
+        // `isProblem` (unit-tested) owns the problem policy; the switch only
+        // picks the display level — two sources of truth would drift.
+        if verdict.isProblem { problems += 1 }
         switch verdict {
         case .enforced:
             Console.success("\(dest.name): \(verdict.message)")
         case .notEnforced:
             Console.failure("\(dest.name): \(verdict.message)")
-            problems += 1
         case .authProblem, .inconclusive:
             Console.warn("\(dest.name): \(verdict.message)")
             warnings += 1
@@ -137,8 +141,13 @@ func doctorCommand() {
 
     Console.section("Disk space")
     let home = FileManager.default.homeDirectoryForCurrentUser
-    let stagingDefault = home.appendingPathComponent("Library/Caches/baaackaaab/staging", isDirectory: true)
-    for (label, url) in [("home volume", home), ("staging", stagingDefault)] {
+    // Honor a `--staging` override the same way the run path resolves it
+    // (main.swift's stagingURL) — hard-coding the default here would report
+    // free space for the wrong volume on a machine staging to another disk.
+    let staging = cli.value("--staging")
+        .map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath, isDirectory: true) }
+        ?? home.appendingPathComponent("Library/Caches/baaackaaab/staging", isDirectory: true)
+    for (label, url) in [("home volume", home), ("staging", staging)] {
         guard let free = freeBytes(at: url) else {
             Console.detail("\(label): free space unknown (\(url.path))")
             continue

@@ -2,6 +2,7 @@ import Foundation
 
 enum ResticError: Error, CustomStringConvertible {
     case notFound
+    case launchFailed(String)
     case failed(command: String, code: Int32)
     case timedOut(command: String, seconds: Int)
     case locked
@@ -11,10 +12,12 @@ enum ResticError: Error, CustomStringConvertible {
         switch self {
         case .notFound:
             return "restic executable not found in PATH — install it (`brew install restic`) and re-run"
+        case .launchFailed(let why):
+            return "could not launch restic: \(why) — the binary was found but did not start (check its permissions/architecture, e.g. after a partial brew upgrade)"
         case .failed(let cmd, let code):
-            return "restic \(cmd) exited with code \(code) — see restic output above"
+            return "restic \(cmd) exited with code \(code) — see restic's output above where shown; the quiet JSON queries suppress it, re-run `--check` for the transport detail"
         case .timedOut(let cmd, let secs):
-            return "restic \(cmd) did not respond within \(secs)s — the destination is unreachable or wedged. It is skipped this run; it is NOT treated as a missing repo, so nothing is re-initialized."
+            return "restic \(cmd) did not respond within \(secs)s — the destination is unreachable or wedged; the (read-only) operation was abandoned and nothing was changed. When this is the run-start probe, the destination is skipped this run; it is NOT treated as a missing repo, so nothing is re-initialized."
         case .locked:
             return "repository is locked by another restic operation (a backup/prune is running) — retry once it finishes, or clear a stale lock with `--unlock`. The repo is NOT re-initialized."
         case .wrongPassword:
@@ -37,9 +40,13 @@ enum RepoProbe: Equatable {
 
 /// Thin wrapper around the `restic` CLI.
 ///
-/// The Mac stays strictly write-only towards the store: this only ever runs
-/// `init`/`backup`/`cat config`, never `forget`/`prune` (those run server-side
-/// on the append-only host). Both secrets reach restic through the environment,
+/// The Mac stays read + append only toward the store: this runs `init` and
+/// `backup` (new data only), the read-only queries (`cat config`, check, and
+/// the snapshot/ls/find/diff/stats/lock reads in ResticBackendQueries.swift),
+/// `restore` (which writes to LOCAL disk only), and exactly one repo delete —
+/// `unlock`, which restic hardcodes to lock files. Never `forget`/`prune`
+/// (those run server-side on the append-only host). Both secrets reach restic
+/// through the environment,
 /// never argv (argv is world-readable via `ps`): the encryption password via
 /// `RESTIC_PASSWORD[_FILE]`, the repository URL via `RESTIC_REPOSITORY[_FILE]`.
 /// The URL embeds the rest-server endpoint password, so it is just as sensitive
@@ -573,7 +580,7 @@ final class ResticBackend {
             if r.code != 0 { throw ResticError.failed(command: command, code: r.code) }
             return String(data: r.output, encoding: .utf8) ?? ""
         } catch let e as SpawnError {
-            throw Self.mapToResticError(e, args: args)
+            throw Self.mapToResticError(e, args: args, command: command)
         }
     }
 
@@ -667,15 +674,20 @@ final class ResticBackend {
         let output: Data   // empty unless stdout == .collect
     }
 
-    /// The historical public error mapping, shared by the throwing wrappers:
-    /// a missing executable and a failed launch both surface as `.notFound`,
-    /// and a timeout is labelled with the subcommand (`args.first`).
-    private static func mapToResticError(_ e: SpawnError, args: [String]) -> ResticError {
+    /// The public error mapping shared by the throwing wrappers. `command`
+    /// labels a timeout with the caller's subcommand where one is known
+    /// (runCapturing's `command:` parameter); the fallback `args.first` can be
+    /// misleading for `-o`-prefixed invocations, so callers that know better
+    /// pass it explicitly.
+    private static func mapToResticError(_ e: SpawnError, args: [String],
+                                         command: String? = nil) -> ResticError {
         switch e {
-        case .executableMissing, .launchFailed:
+        case .executableMissing:
             return .notFound
+        case .launchFailed(let why):
+            return .launchFailed(why)
         case .timedOut(let seconds):
-            return .timedOut(command: args.first ?? "restic", seconds: seconds)
+            return .timedOut(command: command ?? args.first ?? "restic", seconds: seconds)
         }
     }
 

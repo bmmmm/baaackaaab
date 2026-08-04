@@ -134,13 +134,13 @@ enum RecoveryKit {
             lines.append("### Recovery steps (plain restic, no baaackaaab needed)")
             lines.append("")
             lines.append("```sh")
-            lines.append("export RESTIC_REPOSITORY='\(repoURL)'")
-            lines.append("export RESTIC_PASSWORD='\(password)'")
+            lines.append("export RESTIC_REPOSITORY=\(shellQuoted(repoURL))")
+            lines.append("export RESTIC_PASSWORD=\(shellQuoted(password))")
             // The destination's transport-env file (backend credentials, e.g.
             // AWS_* for s3:) — embedded so the recovery block stays a complete
             // copy-paste. Sorted for a deterministic sheet.
             for key in entry.transportEnv.keys.sorted() {
-                lines.append("export \(key)='\(entry.transportEnv[key] ?? "")'")
+                lines.append("export \(key)=\(shellQuoted(entry.transportEnv[key] ?? ""))")
             }
             lines.append("restic snapshots")
             lines.append("restic restore latest --target ./recovered --verify")
@@ -171,6 +171,16 @@ enum RecoveryKit {
             }
         }
         return lines.joined(separator: "\n")
+    }
+
+    /// Single-quote a value for the sheet's `export` lines, escaping embedded
+    /// single quotes ('…' → '…'\''…'). Generated keys (base64url) never need
+    /// it, but an IMPORTED repo password (`--repo-password-file`) or a
+    /// hand-written transport-env value may contain a quote — and a recovery
+    /// command that breaks at paste time defeats the sheet's whole purpose.
+    // Internal (not private) so a test can pin the escaping.
+    static func shellQuoted(_ s: String) -> String {
+        "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
     /// Validate a twice-entered passphrase: minimum length, then match. Pure —
