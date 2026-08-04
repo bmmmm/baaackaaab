@@ -88,6 +88,10 @@ func rotatingCheckCommand() {
                                     installedSchedule: LaunchdTimer.installedCheckSchedule(),
                                     fallbackInterval: 86_400)
     Console.banner("baaackaaab", tagline: "integrity check — rotating read-data")
+    // Arm cancellation so a SIGTERM/SIGINT interrupts the (hours-long)
+    // `restic check --read-data-subset` child instead of killing this process
+    // and orphaning restic with the repo lock held.
+    BackupCancellation.shared.arm()
     let runStart = Date()
     let slice = RotatingCheck.nextSlice(lastSlice: RunHistory.lastCheck()?.slice)
     let subset = RotatingCheck.subsetSpec(slice: slice)

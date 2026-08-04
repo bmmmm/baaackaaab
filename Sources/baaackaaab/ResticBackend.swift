@@ -629,7 +629,10 @@ final class ResticBackend {
     /// Returns nil if stats can't be read (e.g. a fresh repo with no snapshots,
     /// or the query failed), so the caller treats usage as unknown rather than
     /// failing the run over a missing gauge reading.
-    func repoSizeBytes(timeout: TimeInterval? = nil) -> Int? {
+    /// Always bounded: the default is the probe timeout, because the quota
+    /// pre-flight runs this BEFORE any backup — an unbounded `stats` against a
+    /// wedged destination would stall the whole scheduled run indefinitely.
+    func repoSizeBytes(timeout: TimeInterval = ResticBackend.probeTimeout) -> Int? {
         // `--quiet` suppresses restic's progress counter, which it otherwise
         // prints on stdout *before* the JSON (e.g. "[0:00] 100.00% 1/1 ...").
         guard let out = try? runCapturing(["stats", "--quiet", "--mode", "raw-data", "--json"], command: "stats", timeout: timeout)
@@ -971,6 +974,13 @@ final class ResticBackend {
         proc.standardError = pipe        // merge stderr so progress + verdict are one stream
         proc.standardInput = FileHandle.nullDevice   // never block on a password prompt
         do { try proc.run() } catch { return (127, "could not launch restic: \(error)") }
+        // Register with BackupCancellation like the other long-running paths:
+        // `check --read-data-subset` (hours) and `restore --verify` run through
+        // here, and an unregistered child means a SIGTERM to the scheduled
+        // check/drill kills us while restic lives on holding the repo lock.
+        // No-op unless a command has armed cancellation.
+        BackupCancellation.shared.setCurrent(proc)
+        defer { BackupCancellation.shared.clearCurrent(proc) }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         proc.waitUntilExit()
         return (proc.terminationStatus, String(data: data, encoding: .utf8) ?? "")
@@ -980,7 +990,10 @@ final class ResticBackend {
     /// enough that a briefly-slow but reachable server still answers; short
     /// enough that a genuinely dead destination is skipped quickly instead of
     /// stalling the whole multi-destination run on restic's backend retries.
-    private static let probeTimeout: TimeInterval = 60
+    /// Internal (not private) so it can serve as a default argument
+    /// (`repoSizeBytes`) — default-argument expressions cannot reference
+    /// private members.
+    static let probeTimeout: TimeInterval = 60
 
     /// Run restic and return its exit code. With `quiet`, output is discarded
     /// (used for the existence probe); otherwise it is inherited so the user sees

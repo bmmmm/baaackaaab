@@ -210,6 +210,14 @@ struct CLIArguments {
                 if i + 1 < tokens.count, isKnownFlag(tokens[i + 1]) {
                     return "\(tok) is missing its value — the next token '\(tokens[i + 1])' is itself a flag. Put the value right after \(tok)."
                 }
+                // A value flag as the FINAL token has no value either. Without
+                // this guard the walk just ends, the command dispatch matches
+                // nothing, and a bare `baaackaaab --destination` falls through
+                // to a full backup of the set — into a store the Mac can never
+                // prune.
+                if i + 1 >= tokens.count {
+                    return "\(tok) is missing its value — it is the last argument. Put the value right after \(tok)."
+                }
                 i += 2
                 continue
             }

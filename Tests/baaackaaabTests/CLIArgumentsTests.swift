@@ -263,6 +263,22 @@ final class CLIArgumentsTests: XCTestCase {
         XCTAssertNil(CLIArguments.unknownArgument(in: ["baaackaaab", "--add-exclude", "-tmp*"]))
     }
 
+    // A value flag as the FINAL token has no value at all. Before the guard,
+    // the walk simply ended, the dispatch matched nothing, and a bare
+    // `baaackaaab --destination` fell through to a FULL BACKUP of the set —
+    // into an append-only store the Mac can never prune.
+    func testUnknownArgumentRejectsTrailingValueFlag() {
+        for flag in ["--destination", "--read-data-subset", "--snapshot",
+                     "--include", "--target", "--restic-repo"] {
+            let msg = CLIArguments.unknownArgument(in: ["baaackaaab", flag])
+            XCTAssertNotNil(msg, flag)
+            XCTAssertTrue(msg!.contains(flag), msg!)
+            XCTAssertTrue(msg!.contains("missing its value"), msg!)
+        }
+        // Composed with a real command flag ahead of it — still caught.
+        XCTAssertNotNil(CLIArguments.unknownArgument(in: ["baaackaaab", "--restore", "--include"]))
+    }
+
     // The layered --diff contract: unknownArgument's walk (i += 3) must not
     // reject or crash on 0/1 trailing ids — diffCommand's own pair() guard owns
     // that error with the actionable message. Pinned so neither layer silently
