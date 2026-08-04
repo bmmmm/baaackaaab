@@ -157,11 +157,29 @@ first choice, AWS S3 the alternative (see the trade-off below). Stock restic's
    EOF
    ```
 
-5. **First sync:** `baaackaaab --check` initializes the repo, then a manual
-   `--run-tag manual` does the initial upload — expect a ~full-corpus upload
-   (tens of GB) to take hours on a home uplink; `--limit-upload` if the line
-   suffers. Subsequent runs upload only churn.
-6. **Re-export the recovery kit** (`--export-recovery-kit`) — it now carries
+5. **Smoke-test with a few MB first** — don't let the full-corpus upload be
+   the first thing that ever exercises the token, endpoint, and restore path.
+   `baaackaaab --check` initializes the repo (proves auth + write with a few
+   KB); then run the same plain-restic commands the recovery kit carries, but
+   against a small folder:
+
+   ```sh
+   export RESTIC_REPOSITORY='s3:https://<accountid>.r2.cloudflarestorage.com/<bucket>'
+   export RESTIC_PASSWORD_FILE=~/Library/Application\ Support/baaackaaab/destinations/offsite/repo-password
+   export AWS_ACCESS_KEY_ID=<access key id> AWS_SECRET_ACCESS_KEY=<secret access key>
+   restic backup --tag smoke ~/some/small/folder      # a few MB, seconds
+   restic restore latest --target "$TMPDIR/offsite-smoke" --verify
+   ```
+
+   That proves upload, download, and decryption end-to-end in under a minute —
+   and doubles as a first recovery drill with exactly the kit's commands. The
+   smoke snapshot may simply stay (restic dedups around it); on R2 the token
+   can delete (see the caveat above), so `restic forget --tag smoke --prune`
+   removes it again if you prefer a clean history.
+6. **First sync:** a manual `--run-tag manual` does the initial upload —
+   expect a ~full-corpus upload (tens of GB) to take hours on a home uplink;
+   `--limit-upload` if the line suffers. Subsequent runs upload only churn.
+7. **Re-export the recovery kit** (`--export-recovery-kit`) — it now carries
    both destinations, including the transport-env lines — and move it offline.
 
 **Check cadence / cost:** the rotating read-data integrity check re-downloads
