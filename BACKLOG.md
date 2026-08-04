@@ -153,7 +153,15 @@ the closest to the safety core and is worth doing first.
 
 ## Ops (operational — not a code change)
 
-- [ ] **Update the rest-server on the store host to 0.14.0.** `Security` — pending
+- [x] **Update the rest-server on the store host to 0.14.0.** `Security` — done
+  - Resolution (2026-08-04): operator-verified on garage —
+    `docker inspect` shows `restic/rest-server:0.14.0`, and the container's
+    startup log carries the 0.14 quota-init line ("Initializing quota…").
+    Append-only enforcement is independently proven by every `--doctor` run's
+    DELETE probe. One residual hand-check (5 s, not worth its own item):
+    `docker exec restic-rest-server ls -l /data/.htpasswd` — the 0.14 perms
+    fix covers only NEWLY created htpasswd files; if it shows more than
+    `-rw-------`, run `chmod 600` on it once.
   - The tested baseline was bumped to 0.14.0 (`UpdateCheck.swift:restServerBaseline`),
     but the actual running rest-server on the store host is likely still on an older
     line. The tool cannot read the server's version (rest-server doesn't advertise
