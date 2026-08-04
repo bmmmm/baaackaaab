@@ -69,20 +69,34 @@ final class ResticBackend {
         self.repository = destination.displayURL ?? destination.name
         self.destinationName = destination.name
         self.executablePath = Self.resolveExecutable(executable)
-        self.environment = Self.childEnvironment(overlay: destination.envOverlay)
+        self.environment = Self.childEnvironment(overlay: destination.envOverlay,
+                                                 transportEnv: destination.transportEnv)
     }
 
+    /// The env vars that name the repository and its encryption key. Always
+    /// stripped from the parent environment and only ever (re-)introduced via a
+    /// destination's own overlay — never via its transport-env file, whose
+    /// entries under these names are dropped below (the loader already warns
+    /// about them).
+    static let repoCredentialKeys = ["RESTIC_REPOSITORY", "RESTIC_REPOSITORY_FILE",
+                                     "RESTIC_PASSWORD", "RESTIC_PASSWORD_FILE"]
+
     /// Build the environment for a restic child: the parent environment with ALL
-    /// four RESTIC_* repo/password vars stripped, then exactly this destination's
-    /// overlay applied. Stripping first guarantees restic never sees a stale
-    /// RESTIC_REPOSITORY next to a RESTIC_REPOSITORY_FILE (it aborts on the pair),
-    /// and that one destination's secret can never bleed into another's run.
-    private static func childEnvironment(overlay: [String: String]) -> [String: String] {
+    /// four RESTIC_* repo/password vars stripped, then this destination's
+    /// transport env (backend credentials, e.g. AWS_* for `s3:`), then its
+    /// repo/password overlay. Stripping first guarantees restic never sees a
+    /// stale RESTIC_REPOSITORY next to a RESTIC_REPOSITORY_FILE (it aborts on
+    /// the pair), and that one destination's secret can never bleed into
+    /// another's run. The overlay merges LAST, and the repo credential keys are
+    /// dropped from the transport env here too, so a transport-env line can
+    /// never redirect the repo or its key — regardless of how the Destination
+    /// was constructed. Internal (not private) so the tests can pin exactly
+    /// this precedence.
+    static func childEnvironment(overlay: [String: String],
+                                 transportEnv: [String: String] = [:]) -> [String: String] {
         var env = ProcessInfo.processInfo.environment
-        for key in ["RESTIC_REPOSITORY", "RESTIC_REPOSITORY_FILE",
-                    "RESTIC_PASSWORD", "RESTIC_PASSWORD_FILE"] {
-            env.removeValue(forKey: key)
-        }
+        for key in repoCredentialKeys { env.removeValue(forKey: key) }
+        env.merge(transportEnv.filter { !repoCredentialKeys.contains($0.key) }) { _, new in new }
         env.merge(overlay) { _, new in new }
         return env
     }

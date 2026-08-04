@@ -89,23 +89,89 @@ Two things do **not** come for free on those backends, though:
 
 - **Backend credentials.** S3/B2/Azure/GCS authenticate with their own env vars
   (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, `B2_ACCOUNT_ID` /
-  `B2_ACCOUNT_KEY`, …). baaackaaab stores only the repo URL and the restic
-  encryption key per destination — it does **not** hold backend credentials — so
-  those vars must be in the process environment. An interactive run picks them up
-  from your shell (e.g. `~/.env`); the **launchd timer does not inherit them** (its
-  plist sets only `PATH`), so a scheduled S3/B2 backup needs them added to the
-  LaunchAgent's `EnvironmentVariables`, or restic can't authenticate.
+  `B2_ACCOUNT_KEY`, …), separate from the repo URL and restic encryption key the
+  destination store holds. Put them in an optional per-destination file
+  `destinations/<name>/transport-env` (one `KEY=VALUE` per line, `#` comments,
+  `chmod 600`) next to the destination's other credential files. They are merged
+  into the environment of that destination's restic children only — never argv,
+  never a global export, never another destination's run — and the launchd timer
+  needs no extra setup (the file is read per run, so no `EnvironmentVariables`
+  plumbing in the LaunchAgent). Lines named `RESTIC_REPOSITORY[_FILE]` /
+  `RESTIC_PASSWORD[_FILE]` are ignored with a warning: the repo and its key come
+  only from `repo-url` / `repo-password`. `--export-recovery-kit` includes the
+  file's lines, and `--doctor` warns when its permissions are looser than 0600.
 - **The append-only guarantee is REST-server-specific.** The ransomware defense —
   the Mac *physically cannot delete* — is enforced by the rest-server's
   `--append-only` mode at the protocol layer. Plain `s3:` / `b2:` / `sftp:` / a
   local path have no such restic-level enforcement: a key that can write can
   usually also delete. To approximate the guarantee there you must enforce
-  immutability at the **storage** layer — S3/B2 **Object Lock** (compliance mode)
-  plus an IAM policy without `DeleteObject`. Without that, such a destination is a
-  valid *extra copy* but does not carry the append-only safety property, so keep
-  the append-only REST server (or an object-locked bucket) as the Tier-1 store.
+  immutability at the **storage** layer, and how much of it you can get depends
+  on the provider: **AWS S3** can do it properly (an IAM policy denying
+  `s3:DeleteObject` except on `locks/*` — the carve-out keeps `--unlock` working
+  — and/or Object Lock in compliance mode); **Cloudflare R2** cannot — its API
+  tokens have no per-action scoping (*Object Read & Write* includes
+  `DeleteObject`) and no Object Lock, so an R2 destination's protection is
+  **credential separation only**: the token on this Mac can delete, and the
+  defense is that no attacker-reachable machine holds an *admin* token. Without
+  storage-layer enforcement such a destination is a valid *extra copy* but does
+  not carry the append-only safety property, so keep the append-only REST server
+  (or an object-locked bucket) as the Tier-1 store.
 
-## Tuning
+## Offsite destination on S3-compatible storage (R2 / S3)
+
+The recommended second destination is an S3-compatible bucket — Cloudflare R2
+first choice, AWS S3 the alternative (see the trade-off below). Stock restic's
+`s3:` backend talks to both; verified against restic 0.19.
+
+1. **Create the bucket** (versioning off — restic keeps its own history; no
+   lifecycle rules to start).
+2. **Create the credentials.**
+   - *R2:* an API token scoped to that one bucket, permission **Object Read &
+     Write** (there is no narrower write tier — see the caveat above). The token
+     yields an Access Key ID + Secret Access Key for the S3 endpoint.
+   - *AWS S3:* an IAM user allowing `s3:PutObject` / `s3:GetObject` /
+     `s3:ListBucket` and denying `s3:DeleteObject` except on `locks/*`.
+3. **Add the destination** with a **new, independent** restic password — never
+   the primary's:
+
+   ```sh
+   # R2 endpoint shape (path-style, which restic expects):
+   #   s3:https://<accountid>.r2.cloudflarestorage.com/<bucket>
+   # AWS shape: s3:https://s3.<region>.amazonaws.com/<bucket>
+   baaackaaab --add-destination offsite \
+     --repo-url 's3:https://<accountid>.r2.cloudflarestorage.com/<bucket>' \
+     --order 1
+   ```
+
+   No extra restic options are needed for R2: `s3.bucket-lookup` defaults to
+   path-style for non-AWS hosts, and the region defaults are fine (for AWS, set
+   `AWS_DEFAULT_REGION` in the transport-env file if needed).
+4. **Write the transport-env file** so the timer and every run can
+   authenticate (see *Backend credentials* above):
+
+   ```sh
+   umask 077
+   cat > ~/Library/Application\ Support/baaackaaab/destinations/offsite/transport-env <<'EOF'
+   AWS_ACCESS_KEY_ID=<access key id>
+   AWS_SECRET_ACCESS_KEY=<secret access key>
+   EOF
+   ```
+
+5. **First sync:** `baaackaaab --check` initializes the repo, then a manual
+   `--run-tag manual` does the initial upload — expect a ~full-corpus upload
+   (tens of GB) to take hours on a home uplink; `--limit-upload` if the line
+   suffers. Subsequent runs upload only churn.
+6. **Re-export the recovery kit** (`--export-recovery-kit`) — it now carries
+   both destinations, including the transport-env lines — and move it offline.
+
+**Check cadence / cost:** the rotating read-data integrity check re-downloads
+its slice (1/8 of pack data per run). R2 has **zero egress fees**, so the daily
+rotation is free there; on AWS S3 that egress becomes the dominant cost of the
+whole destination — run the check weekly (`--install-check-timer --days sun`)
+or with a smaller slice there. Same logic for restore drills: free on R2,
+metered on S3. That egress asymmetry — not the storage price — is why R2 is the
+default recommendation; pick S3 when the enforceable IAM append-only story
+above matters more than the check/restore economics.
 
 These persistent knobs live in the backup set (so the unattended timer uses them too):
 

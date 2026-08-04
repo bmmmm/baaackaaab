@@ -35,8 +35,10 @@ becomes permanently undecryptable with them; the server never holds a copy of th
 encryption key. `--export-recovery-kit` writes a single offline Markdown sheet
 that fixes that: every destination's full repo URL, its restic encryption
 password, the endpoint (htpasswd) password (extracted from the URL where
-present), and terse plain-`restic` recovery steps that need nothing but stock
-restic on any machine — no baaackaaab, no Mac.
+present), the backend transport credentials from its `transport-env` file where
+one exists (e.g. the AWS keys of an `s3:` offsite destination), and terse
+plain-`restic` recovery steps that need nothing but stock restic on any machine
+— no baaackaaab, no Mac.
 
 ```sh
 baaackaaab --export-recovery-kit ~/Desktop/baaackaaab-recovery.md.enc

@@ -41,6 +41,15 @@ struct Destination {
     let enabled: Bool
     let repo: RepoRef
     let password: PasswordRef
+    /// Extra environment for this destination's restic children, loaded from the
+    /// optional destinations/<name>/transport-env file: backend TRANSPORT
+    /// credentials (e.g. AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY for an `s3:`
+    /// repo), which restic reads from the environment and which are separate
+    /// from the repo URL + encryption key the store already holds. Empty for
+    /// rest:/local destinations and ad-hoc runs. Reaches restic only via the
+    /// per-child environment (see ResticBackend.childEnvironment) — never argv,
+    /// never a process-global export.
+    var transportEnv: [String: String] = [:]
 
     /// The RESTIC_* vars this destination needs, to overlay onto a child's
     /// environment. Exactly one repo source and at most one password source —
@@ -138,6 +147,7 @@ struct DestinationMeta: Codable {
 ///   destinations/<name>/repo-url        0600
 ///   destinations/<name>/repo-password   0600
 ///   destinations/<name>/meta.json       0600 (link, order, enabled)
+///   destinations/<name>/transport-env   0600, optional (KEY=VALUE backend creds)
 /// Back-compat: a legacy single repo (top-level repo-url/repo-password) is
 /// surfaced as the destination "default" until the first --add-destination
 /// migrates it into destinations/default.
@@ -148,6 +158,7 @@ enum DestinationStore {
     static func urlFile(_ name: String) -> URL { destDir(name).appendingPathComponent("repo-url") }
     static func passwordFile(_ name: String) -> URL { destDir(name).appendingPathComponent("repo-password") }
     static func metaFile(_ name: String) -> URL { destDir(name).appendingPathComponent("meta.json") }
+    static func transportEnvFile(_ name: String) -> URL { destDir(name).appendingPathComponent("transport-env") }
 
     /// Names of the stored destinations (subdirectories of destinations/ that
     /// carry a non-empty url + password). Sorted for stable display.
@@ -174,8 +185,64 @@ enum DestinationStore {
         let meta = loadMeta(name)
         return Destination(
             name: name, link: meta.link, order: meta.order, enabled: meta.enabled,
-            repo: .file(urlFile(name)), password: .file(passwordFile(name))
+            repo: .file(urlFile(name)), password: .file(passwordFile(name)),
+            transportEnv: loadTransportEnv(name)
         )
+    }
+
+    /// Parse a transport-env file's contents: one KEY=VALUE per line, blank lines
+    /// and `#` comments ignored, the value taken verbatim after the first `=` (no
+    /// quoting rules — an AWS secret key is passed through as-is). Returns the
+    /// parsed variables plus the 1-based numbers of the lines that were NOT
+    /// KEY=VALUE (no `=`, empty key, or whitespace in the key). Numbers only, by
+    /// design: a malformed line is quite possibly a secret pasted with the wrong
+    /// separator, so its content must never reach a log line. Pure, for the tests.
+    static func parseTransportEnv(_ contents: String) -> (env: [String: String], malformedLines: [Int]) {
+        var env: [String: String] = [:]
+        var malformed: [Int] = []
+        // Split on `isNewline`, not the literal "\n": Swift treats CRLF as ONE
+        // character, so splitting on "\n" would leave a CRLF file as a single
+        // "line" with embedded \r\n and silently mis-parse it.
+        let lines = contents.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
+        for (index, raw) in lines.enumerated() {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if line.isEmpty || line.hasPrefix("#") { continue }
+            guard let eq = line.firstIndex(of: "="), eq != line.startIndex else {
+                malformed.append(index + 1)
+                continue
+            }
+            let key = String(line[line.startIndex..<eq])
+            guard key.rangeOfCharacter(from: .whitespaces) == nil else {
+                malformed.append(index + 1)
+                continue
+            }
+            env[key] = String(line[line.index(after: eq)...])
+        }
+        return (env, malformed)
+    }
+
+    /// Read the optional transport-env file for a stored destination. A MISSING
+    /// file is the normal case — rest:/local destinations need no transport
+    /// credentials. Malformed lines are warned about by number (see
+    /// `parseTransportEnv`), and entries under the four RESTIC_* repo/password
+    /// names are warned about and dropped: the repository URL and its encryption
+    /// key come exclusively from the destination's own credential files, so a
+    /// transport-env line can never override them (or hand restic a conflicting
+    /// RESTIC_REPOSITORY / _FILE pair, which it aborts on).
+    private static func loadTransportEnv(_ name: String) -> [String: String] {
+        let file = transportEnvFile(name)
+        guard let data = FileManager.default.contents(atPath: file.path),
+              let text = String(data: data, encoding: .utf8) else { return [:] }
+        var (env, malformed) = parseTransportEnv(text)
+        if !malformed.isEmpty {
+            Console.warn("destination '\(name)': transport-env line(s) \(malformed.map(String.init).joined(separator: ", ")) are not KEY=VALUE — ignored. Fix \(file.path) (one KEY=VALUE per line, `#` for comments).")
+        }
+        let reserved = env.keys.filter { ResticBackend.repoCredentialKeys.contains($0) }.sorted()
+        if !reserved.isEmpty {
+            Console.warn("destination '\(name)': transport-env sets \(reserved.joined(separator: ", ")) — ignored; the repository URL and encryption key come only from the destination's repo-url/repo-password files.")
+            for key in reserved { env.removeValue(forKey: key) }
+        }
+        return env
     }
 
     /// Read a destination's meta.json. A MISSING file is the legitimate default

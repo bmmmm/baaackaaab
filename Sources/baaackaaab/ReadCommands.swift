@@ -664,6 +664,16 @@ func doctorCommand() {
             problems += 1
             continue
         }
+        // The operator writes transport-env by hand (unlike the url/password
+        // files this tool creates 0600 itself), so doctor is where a too-open
+        // copy gets caught. Checked before reachability — a loose credential
+        // file matters even while the destination is down.
+        let transportEnvFile = DestinationStore.transportEnvFile(dest.name)
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: transportEnvFile.path),
+           let perms = attrs[.posixPermissions] as? NSNumber, perms.uint16Value & 0o077 != 0 {
+            Console.warn("\(dest.name): transport-env is group/world-readable — it holds backend credentials; tighten it with `chmod 600 \(transportEnvFile.path)`")
+            warnings += 1
+        }
         let backend = ResticBackend(destination: dest)
         // Bounded existence probe first, so a dead destination is reported in ~60s
         // instead of hanging on restic's backend retries (remoteStatus is unbounded).
@@ -699,7 +709,12 @@ func doctorCommand() {
             continue
         }
         guard let target = AppendOnlyProbe.target(from: repoURL) else {
-            Console.note("\(dest.name): not a rest: destination — append-only cannot be verified at the protocol level here; enforce immutability at the storage layer instead (S3/B2 Object Lock, etc. — see README's Backends & the immutability caveat)")
+            // Mechanism named per backend (verified 2026-08, issue #20): AWS S3
+            // can enforce append-only via IAM; Cloudflare R2 tokens have no
+            // action-level scoping (Object Read & Write includes DeleteObject,
+            // no Object Lock), so there the honest story is credential
+            // separation only — mirror that instead of implying enforcement.
+            Console.note("\(dest.name): not a rest: destination — append-only cannot be verified at the protocol level here; enforce immutability at the storage layer. AWS S3: IAM policy denying s3:DeleteObject except locks/* (keeps --unlock working). Cloudflare R2: tokens cannot deny deletes — protection is credential separation only, keep delete-capable keys off this Mac.")
             continue
         }
         let verdict = AppendOnlyProbe.probe(target)

@@ -115,6 +115,93 @@ final class DestinationStoreTests: XCTestCase {
         XCTAssertEqual(b.order, 1)
     }
 
+    // MARK: - parseTransportEnv (pure)
+
+    func testParseTransportEnvBasics() {
+        let (env, bad) = DestinationStore.parseTransportEnv("""
+        # offsite bucket credentials
+        AWS_ACCESS_KEY_ID=AKIAEXAMPLE
+
+        AWS_SECRET_ACCESS_KEY=abc=def==
+        """)
+        XCTAssertEqual(env, ["AWS_ACCESS_KEY_ID": "AKIAEXAMPLE",
+                             "AWS_SECRET_ACCESS_KEY": "abc=def=="])   // value split on FIRST '='
+        XCTAssertEqual(bad, [])
+    }
+
+    func testParseTransportEnvCRLFAndPadding() {
+        let (env, bad) = DestinationStore.parseTransportEnv("  KEY=value\r\nOTHER=x\r\n")
+        XCTAssertEqual(env, ["KEY": "value", "OTHER": "x"])
+        XCTAssertEqual(bad, [])
+    }
+
+    func testParseTransportEnvReportsMalformedLineNumbersOnly() {
+        let (env, bad) = DestinationStore.parseTransportEnv("""
+        GOOD=1
+        no separator here
+        =empty-key
+        SPACED KEY=x
+        ALSO_GOOD=2
+        """)
+        XCTAssertEqual(env, ["GOOD": "1", "ALSO_GOOD": "2"])
+        XCTAssertEqual(bad, [2, 3, 4])
+    }
+
+    // MARK: - transport-env loading
+
+    func testLoadReadsTransportEnv() throws {
+        try DestinationStore.add(name: "offsite", repoURL: "s3:https://acc.r2.example.com/bkt",
+                                 password: "k", link: "wan", order: nil, enabled: true)
+        try writeFile("AWS_ACCESS_KEY_ID=id\nAWS_SECRET_ACCESS_KEY=sec\n",
+                      to: DestinationStore.transportEnvFile("offsite"))
+        let d = try XCTUnwrap(DestinationStore.load("offsite"))
+        XCTAssertEqual(d.transportEnv,
+                       ["AWS_ACCESS_KEY_ID": "id", "AWS_SECRET_ACCESS_KEY": "sec"])
+    }
+
+    func testLoadWithoutTransportEnvIsEmpty() throws {
+        try DestinationStore.add(name: "plain", repoURL: "rest:https://h/p/",
+                                 password: "k", link: "default", order: nil, enabled: true)
+        let d = try XCTUnwrap(DestinationStore.load("plain"))
+        XCTAssertEqual(d.transportEnv, [:])
+    }
+
+    func testLoadDropsReservedResticKeysFromTransportEnv() throws {
+        // A transport-env line must never redirect the repo or its key: the
+        // four RESTIC_* names are dropped (with a warning) on load.
+        try DestinationStore.add(name: "sneaky", repoURL: "s3:https://h/b",
+                                 password: "k", link: "default", order: nil, enabled: true)
+        try writeFile("RESTIC_PASSWORD=evil\nRESTIC_REPOSITORY=rest:https://evil/\nAWS_ACCESS_KEY_ID=ok\n",
+                      to: DestinationStore.transportEnvFile("sneaky"))
+        let d = try XCTUnwrap(DestinationStore.load("sneaky"))
+        XCTAssertEqual(d.transportEnv, ["AWS_ACCESS_KEY_ID": "ok"])
+    }
+
+    // MARK: - childEnvironment precedence
+
+    func testChildEnvironmentMergesTransportThenOverlay() {
+        let env = ResticBackend.childEnvironment(
+            overlay: ["RESTIC_REPOSITORY_FILE": "/x/url", "RESTIC_PASSWORD_FILE": "/x/pw"],
+            transportEnv: ["AWS_ACCESS_KEY_ID": "id",
+                           // Even if a reserved key slips past the loader (a
+                           // hand-built Destination), the child env drops it.
+                           "RESTIC_PASSWORD": "evil"])
+        XCTAssertEqual(env["AWS_ACCESS_KEY_ID"], "id")
+        XCTAssertEqual(env["RESTIC_REPOSITORY_FILE"], "/x/url")
+        XCTAssertEqual(env["RESTIC_PASSWORD_FILE"], "/x/pw")
+        XCTAssertNil(env["RESTIC_PASSWORD"])   // reserved key filtered, overlay intact
+    }
+
+    func testChildEnvironmentStripsInheritedResticVars() {
+        setenv("RESTIC_REPOSITORY", "rest:https://stale/", 1)
+        defer { unsetenv("RESTIC_REPOSITORY") }
+        let env = ResticBackend.childEnvironment(
+            overlay: ["RESTIC_REPOSITORY_FILE": "/x/url"],
+            transportEnv: [:])
+        XCTAssertNil(env["RESTIC_REPOSITORY"])   // stale parent var never reaches the child
+        XCTAssertEqual(env["RESTIC_REPOSITORY_FILE"], "/x/url")
+    }
+
     // MARK: - Legacy migration
 
     func testAddMigratesLegacySingleRepoToDefault() throws {

@@ -81,6 +81,33 @@ final class RecoveryKitTests: XCTestCase {
         XCTAssertTrue(sheet.contains("No destinations"))
     }
 
+    func testComposeSheetExportsTransportEnvSortedInRecoveryBlock() {
+        let entries = [RecoveryKit.Entry(
+            name: "offsite", repoURL: "s3:https://acc.r2.example.com/bkt",
+            password: "s3key",
+            transportEnv: ["AWS_SECRET_ACCESS_KEY": "sec", "AWS_ACCESS_KEY_ID": "id"])]
+        let sheet = RecoveryKit.composeSheet(entries: entries,
+                                             generatedAt: Date(timeIntervalSince1970: 1_700_000_000))
+        // The transport creds are export lines inside the copy-paste block,
+        // sorted by key for a deterministic sheet.
+        XCTAssertTrue(sheet.contains("export AWS_ACCESS_KEY_ID='id'"))
+        XCTAssertTrue(sheet.contains("export AWS_SECRET_ACCESS_KEY='sec'"))
+        let idPos = try! XCTUnwrap(sheet.range(of: "AWS_ACCESS_KEY_ID")).lowerBound
+        let secPos = try! XCTUnwrap(sheet.range(of: "AWS_SECRET_ACCESS_KEY")).lowerBound
+        XCTAssertLessThan(idPos, secPos)
+        // With the creds embedded, the sheet must NOT claim it cannot include them.
+        XCTAssertFalse(sheet.contains("cannot include"))
+        XCTAssertTrue(sheet.contains("transport-env"))
+    }
+
+    func testComposeSheetNonRestWithoutTransportEnvStillWarns() {
+        let entries = [RecoveryKit.Entry(
+            name: "offsite", repoURL: "s3:https://acc.r2.example.com/bkt", password: "s3key")]
+        let sheet = RecoveryKit.composeSheet(entries: entries, generatedAt: Date())
+        XCTAssertTrue(sheet.contains("cannot include"))
+        XCTAssertTrue(sheet.contains("destinations/offsite/transport-env"))
+    }
+
     // MARK: - buildEntries (I/O boundary, but exercised with a real Destination)
 
     func testBuildEntriesReadsDisplayURLAndPasswordValue() {
@@ -98,6 +125,14 @@ final class RecoveryKitTests: XCTestCase {
                                repo: .value("rest:https://h/d/"), password: .unset)
         let entries = RecoveryKit.buildEntries(from: [dest])
         XCTAssertNil(entries[0].password)
+    }
+
+    func testBuildEntriesCarriesTransportEnv() {
+        let dest = Destination(name: "d", link: "default", order: 0, enabled: true,
+                               repo: .value("s3:https://h/b"), password: .value("pw"),
+                               transportEnv: ["AWS_ACCESS_KEY_ID": "id"])
+        let entries = RecoveryKit.buildEntries(from: [dest])
+        XCTAssertEqual(entries[0].transportEnv, ["AWS_ACCESS_KEY_ID": "id"])
     }
 
     // MARK: - validatePassphrase (pure)

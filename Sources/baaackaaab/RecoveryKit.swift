@@ -47,17 +47,23 @@ enum RecoveryKit {
     /// One destination's material for the sheet. `repoURL` / `password` are nil
     /// when the credential files are missing/unreadable — the sheet then notes
     /// the destination as incomplete instead of failing the whole export.
+    /// `transportEnv` carries the destination's backend transport credentials
+    /// (its transport-env file, e.g. AWS_* keys for `s3:`) — deliberately in the
+    /// clear like every other secret here: without them, recovery of a non-rest:
+    /// destination stops at the transport layer.
     struct Entry {
         let name: String
         let repoURL: String?
         let password: String?
+        var transportEnv: [String: String] = [:]
     }
 
     /// Build entries from live destinations (I/O: reads the 0600 credential
     /// files). Pulled out from `composeSheet` so the Markdown formatting stays
     /// pure and testable with hand-built entries.
     static func buildEntries(from destinations: [Destination]) -> [Entry] {
-        destinations.map { Entry(name: $0.name, repoURL: $0.displayURL, password: $0.passwordValue) }
+        destinations.map { Entry(name: $0.name, repoURL: $0.displayURL,
+                                 password: $0.passwordValue, transportEnv: $0.transportEnv) }
     }
 
     /// Compose the full Markdown recovery sheet. Pure — no filesystem, no
@@ -130,21 +136,37 @@ enum RecoveryKit {
             lines.append("```sh")
             lines.append("export RESTIC_REPOSITORY='\(repoURL)'")
             lines.append("export RESTIC_PASSWORD='\(password)'")
+            // The destination's transport-env file (backend credentials, e.g.
+            // AWS_* for s3:) — embedded so the recovery block stays a complete
+            // copy-paste. Sorted for a deterministic sheet.
+            for key in entry.transportEnv.keys.sorted() {
+                lines.append("export \(key)='\(entry.transportEnv[key] ?? "")'")
+            }
             lines.append("restic snapshots")
             lines.append("restic restore latest --target ./recovered --verify")
             lines.append("```")
             lines.append("")
             // The kit's "any machine, stock restic" claim holds only for rest:
-            // (credentials embedded above) and local paths. Other backends need
-            // TRANSPORT credentials this tool never stores — without this note
-            // the operator discovers that mid-disaster with an auth error the
-            // sheet says nothing about.
+            // (credentials embedded above), local paths, and destinations whose
+            // transport-env file is exported above. Anything else needs TRANSPORT
+            // credentials this kit could not include — without this note the
+            // operator discovers that mid-disaster with an auth error the sheet
+            // says nothing about.
             if !repoURL.hasPrefix("rest:") && !repoURL.hasPrefix("/") {
-                lines.append("> Note: this is not a `rest:` repository. The backend transport needs its")
-                lines.append("> OWN credentials, which baaackaaab never stores and this kit cannot include:")
-                lines.append("> `sftp:` needs the SSH key/agent for the host, `s3:`/`b2:` need the API keys")
-                lines.append("> (AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, B2_ACCOUNT_ID/B2_ACCOUNT_KEY).")
-                lines.append("> Keep those with this kit, or recovery stops at the transport layer.")
+                if entry.transportEnv.isEmpty {
+                    lines.append("> Note: this is not a `rest:` repository. The backend transport needs its")
+                    lines.append("> OWN credentials, and this destination has no transport-env file, so this")
+                    lines.append("> kit cannot include them: `sftp:` needs the SSH key/agent for the host,")
+                    lines.append("> `s3:`/`b2:` need the API keys (AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY,")
+                    lines.append("> B2_ACCOUNT_ID/B2_ACCOUNT_KEY). Keep those with this kit — or store them")
+                    lines.append("> in `destinations/\(entry.name)/transport-env` (0600) and re-export this")
+                    lines.append("> kit — or recovery stops at the transport layer.")
+                } else {
+                    lines.append("> Note: this is not a `rest:` repository. The extra `export` lines above")
+                    lines.append("> are this destination's backend transport credentials (its transport-env")
+                    lines.append("> file); together with the encryption password they are everything stock")
+                    lines.append("> restic needs.")
+                }
                 lines.append("")
             }
         }
