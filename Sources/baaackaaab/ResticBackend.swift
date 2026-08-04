@@ -308,7 +308,7 @@ final class ResticBackend {
         var captured: ResticSummary?
         let code = try runBackupJSON(args + ["--json"],
                                      onStatus: { bar?.update($0) },
-                                     onSummary: { summary in
+                                     onSummary: { [destinationName] summary in
                                          captured = summary
                                          if let bar {
                                              bar.finish(summary)
@@ -363,42 +363,19 @@ final class ResticBackend {
     /// errors stay visible alongside the bar. The child is registered with
     /// BackupCancellation exactly like `run`, so Ctrl-C interrupts restic (exit
     /// 130) instead of hard-killing us; the pipe then hits EOF and the loop ends.
+    /// (`@escaping` is a formality — the stream handler is invoked synchronously
+    /// on the calling thread inside `spawn` and never outlives it.)
     private func runBackupJSON(_ args: [String],
-                               onStatus: (ResticStatus) -> Void,
-                               onSummary: (ResticSummary) -> Void) throws -> Int32 {
-        guard let exe = executablePath else { throw ResticError.notFound }
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: exe)
-        proc.arguments = args
-        proc.environment = environment   // this destination's repo + password
-        let outPipe = Pipe()
-        proc.standardOutput = outPipe
-        proc.standardError = FileHandle.standardError   // keep restic's diagnostics visible
-        proc.standardInput = FileHandle.nullDevice      // never block on a password prompt
-        do { try proc.run() } catch { throw ResticError.notFound }
-        BackupCancellation.shared.setCurrent(proc)
-        defer { BackupCancellation.shared.clearCurrent(proc) }
-
-        // Read stdout line by line. `availableData` blocks until data arrives or
-        // returns empty at EOF; we split the rolling buffer on '\n' so a JSON
-        // object spanning two reads is still decoded once it completes.
-        let reader = outPipe.fileHandleForReading
-        var buffer = Data()
-        while true {
-            let chunk = reader.availableData
-            if chunk.isEmpty { break }   // EOF — restic exited and closed the pipe
-            buffer.append(chunk)
-            while let nl = buffer.firstIndex(of: 0x0A) {
-                let line = buffer.subdata(in: buffer.startIndex..<nl)
-                buffer.removeSubrange(buffer.startIndex...nl)
-                Self.dispatchJSONLine(line, onStatus: onStatus, onSummary: onSummary)
-            }
+                               onStatus: @escaping (ResticStatus) -> Void,
+                               onSummary: @escaping (ResticSummary) -> Void) throws -> Int32 {
+        do {
+            let r = try spawn(args,
+                              stdout: .stream { Self.dispatchJSONLine($0, onStatus: onStatus, onSummary: onSummary) },
+                              stderr: .inherit, cancellable: true, deadline: nil)
+            return r.code
+        } catch let e as SpawnError {
+            throw Self.mapToResticError(e, args: args)
         }
-        if !buffer.isEmpty {
-            Self.dispatchJSONLine(buffer, onStatus: onStatus, onSummary: onSummary)
-        }
-        proc.waitUntilExit()
-        return proc.terminationStatus
     }
 
     /// Decode one `restic backup --json` line and dispatch it by message_type.
@@ -915,75 +892,41 @@ final class ResticBackend {
     /// Run restic capturing stdout as a string (stderr discarded). Throws on a
     /// non-zero exit, labelled with `command` so the caller's subcommand surfaces
     /// in the error (not a generic one). Used for the small JSON-emitting queries,
-    /// not for streaming commands. Reads the pipe to EOF before waiting so a large
-    /// payload can't deadlock on a full pipe buffer. `timeout`, when set, caps the
-    /// wall clock — on expiry the child is terminated and `timedOut` is thrown;
-    /// only ever used for read-only queries, never for writes.
+    /// not for streaming commands. `timeout`, when set, caps the wall clock — on
+    /// expiry the child is terminated and `timedOut` is thrown; only ever used
+    /// for read-only queries, never for writes.
     private func runCapturing(_ args: [String], command: String, timeout: TimeInterval? = nil) throws -> String {
-        guard let exe = executablePath else { throw ResticError.notFound }
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: exe)
-        proc.arguments = args
-        proc.environment = environment   // this destination's repo + password
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = FileHandle.nullDevice
-        proc.standardInput = FileHandle.nullDevice   // never block on a password prompt
-        do { try proc.run() } catch { throw ResticError.notFound }
-        guard let timeout else {
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            proc.waitUntilExit()
-            if proc.terminationStatus != 0 {
-                throw ResticError.failed(command: command, code: proc.terminationStatus)
-            }
-            return String(data: data, encoding: .utf8) ?? ""
+        do {
+            let r = try spawn(args, stdout: .collect, stderr: .discard,
+                              cancellable: false, deadline: timeout)
+            if r.code != 0 { throw ResticError.failed(command: command, code: r.code) }
+            return String(data: r.output, encoding: .utf8) ?? ""
+        } catch let e as SpawnError {
+            throw Self.mapToResticError(e, args: args)
         }
-        let capture = SyncBox<Data>(Data())
-        let sem = DispatchSemaphore(value: 0)
-        DispatchQueue.global(qos: .userInitiated).async {
-            capture.value = pipe.fileHandleForReading.readDataToEndOfFile()
-            proc.waitUntilExit()
-            sem.signal()
-        }
-        if sem.wait(timeout: .now() + timeout) == .timedOut {
-            forceTerminate(proc, reaped: sem)
-            throw ResticError.timedOut(command: args.first ?? "restic", seconds: Int(timeout))
-        }
-        if proc.terminationStatus != 0 {
-            throw ResticError.failed(command: command, code: proc.terminationStatus)
-        }
-        return String(data: capture.value, encoding: .utf8) ?? ""
     }
 
     /// Run restic capturing stdout AND stderr together, returning the exit code and
     /// the combined output WITHOUT throwing on a non-zero exit. Used by the commands
     /// where a non-zero exit is itself the signal to report (check, unlock) rather
-    /// than an error to propagate. Reads the pipe to EOF before waiting so a large
-    /// payload can't deadlock on a full pipe buffer. Never used for a streaming or
+    /// than an error to propagate. Never used for a streaming or
     /// writing-to-user-data command — these are repo-side maintenance queries.
+    /// Cancellable: `check --read-data-subset` (hours) and `restore --verify` run
+    /// through here, and an unregistered child would mean a SIGTERM to the
+    /// scheduled check/drill kills us while restic lives on holding the repo lock.
     private func runCapturingResult(_ args: [String]) -> (code: Int32, output: String) {
-        guard let exe = executablePath else {
+        do {
+            let r = try spawn(args, stdout: .collect, stderr: .merge,
+                              cancellable: true, deadline: nil)
+            return (r.code, String(data: r.output, encoding: .utf8) ?? "")
+        } catch SpawnError.executableMissing {
             return (127, "restic executable not found — install it (`brew install restic`) and re-run")
+        } catch SpawnError.launchFailed(let why) {
+            return (127, "could not launch restic: \(why)")
+        } catch {
+            // Unreachable: no deadline, so spawn can only throw the two above.
+            return (127, "could not launch restic: \(error)")
         }
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: exe)
-        proc.arguments = args
-        proc.environment = environment   // this destination's repo + password
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = pipe        // merge stderr so progress + verdict are one stream
-        proc.standardInput = FileHandle.nullDevice   // never block on a password prompt
-        do { try proc.run() } catch { return (127, "could not launch restic: \(error)") }
-        // Register with BackupCancellation like the other long-running paths:
-        // `check --read-data-subset` (hours) and `restore --verify` run through
-        // here, and an unregistered child means a SIGTERM to the scheduled
-        // check/drill kills us while restic lives on holding the repo lock.
-        // No-op unless a command has armed cancellation.
-        BackupCancellation.shared.setCurrent(proc)
-        defer { BackupCancellation.shared.clearCurrent(proc) }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        proc.waitUntilExit()
-        return (proc.terminationStatus, String(data: data, encoding: .utf8) ?? "")
     }
 
     /// Wall-clock cap for the read-only existence probe (`cat config`). Long
@@ -1002,38 +945,170 @@ final class ResticBackend {
     /// for the read-only probe, never for a writing command we must not kill
     /// mid-flight. The child reads repo + password from `environment`, never argv.
     private func run(_ args: [String], quiet: Bool = false, timeout: TimeInterval? = nil) throws -> Int32 {
-        guard let exe = executablePath else { throw ResticError.notFound }
+        do {
+            // `quiet` silences BOTH channels — splitting them is how a probe
+            // starts leaking backend noise into the unattended log.
+            let r = try spawn(args, stdout: quiet ? .discard : .inherit,
+                              stderr: quiet ? .discard : .inherit,
+                              cancellable: true, deadline: timeout)
+            return r.code
+        } catch let e as SpawnError {
+            throw Self.mapToResticError(e, args: args)
+        }
+    }
+
+    // MARK: - Child-process core
+
+    /// How a spawned child's stdout is handled. `.stream` consumes complete
+    /// lines on the CALLING thread — the progress-bar closures it feeds are
+    /// not Sendable, so the streaming case must never move to the background
+    /// timeout machinery (enforced: `.stream` + a deadline is a programmer
+    /// error).
+    private enum SpawnStdout {
+        case inherit                    // stream to the user (restore/init/dry-run)
+        case discard                    // quiet probe
+        case collect                    // read to EOF, returned in SpawnResult.output
+        case stream((Data) -> Void)     // NDJSON consumer, one call per line
+    }
+
+    /// How stderr is handled. `.merge` shares stdout's pipe so progress and
+    /// verdict interleave in arrival order — `checkRepo` greps that combined
+    /// stream, so two separate pipes would reorder it and break the verdict.
+    private enum SpawnStderr {
+        case inherit
+        case discard
+        case merge
+    }
+
+    /// Launch-layer failures, mapped by each wrapper into its public shape
+    /// (`ResticError` for the throwing runners, the `(127, message)` tuple for
+    /// `runCapturingResult`).
+    private enum SpawnError: Error {
+        case executableMissing
+        case launchFailed(String)
+        case timedOut(seconds: Int)
+    }
+
+    private struct SpawnResult {
+        let code: Int32
+        let output: Data   // empty unless stdout == .collect
+    }
+
+    /// The historical public error mapping, shared by the throwing wrappers:
+    /// a missing executable and a failed launch both surface as `.notFound`,
+    /// and a timeout is labelled with the subcommand (`args.first`).
+    private static func mapToResticError(_ e: SpawnError, args: [String]) -> ResticError {
+        switch e {
+        case .executableMissing, .launchFailed:
+            return .notFound
+        case .timedOut(let seconds):
+            return .timedOut(command: args.first ?? "restic", seconds: seconds)
+        }
+    }
+
+    /// The one place a restic child is configured, launched, and reaped.
+    /// Invariants every caller relies on:
+    /// - stdin is /dev/null: a missing password fails fast and visibly instead
+    ///   of hanging on an interactive prompt no one sees;
+    /// - the child env is this destination's private `environment` — secrets
+    ///   never touch argv;
+    /// - a collect/merge pipe is read to EOF BEFORE `waitUntilExit` (a >64 KiB
+    ///   payload would otherwise deadlock on a full pipe buffer);
+    /// - `deadline` is only ever set for read-only probes/queries — without a
+    ///   deadline `forceTerminate` is unreachable, so a writing child can
+    ///   never be killed mid-flight by this layer;
+    /// - a `cancellable` child registers with BackupCancellation only after a
+    ///   successful launch and deregisters on every exit path (no-op unless a
+    ///   command has armed cancellation).
+    private func spawn(_ args: [String], stdout: SpawnStdout, stderr: SpawnStderr,
+                       cancellable: Bool, deadline: TimeInterval?) throws -> SpawnResult {
+        guard let exe = executablePath else { throw SpawnError.executableMissing }
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: exe)
         proc.arguments = args
         proc.environment = environment   // this destination's repo + password
-        // Feed /dev/null so a missing RESTIC_PASSWORD fails fast and visibly
-        // instead of hanging on an interactive prompt we'd never see.
         proc.standardInput = FileHandle.nullDevice
-        if quiet {
-            proc.standardOutput = FileHandle.nullDevice
-            proc.standardError = FileHandle.nullDevice
-        }
-        do { try proc.run() } catch { throw ResticError.notFound }
-        // Track the child so a SIGINT/SIGTERM during a backup interrupts restic
-        // (it writes its partial snapshot, exits 130) instead of hard-killing us.
-        // No-op unless a run has armed BackupCancellation.
-        BackupCancellation.shared.setCurrent(proc)
-        defer { BackupCancellation.shared.clearCurrent(proc) }
 
-        guard let timeout else {
+        var outPipe: Pipe?
+        var streamHandler: ((Data) -> Void)?
+        switch stdout {
+        case .inherit:
+            break
+        case .discard:
+            proc.standardOutput = FileHandle.nullDevice
+        case .collect:
+            let p = Pipe(); outPipe = p; proc.standardOutput = p
+        case .stream(let handler):
+            let p = Pipe(); outPipe = p; proc.standardOutput = p
+            streamHandler = handler
+        }
+        switch stderr {
+        case .inherit:
+            break
+        case .discard:
+            proc.standardError = FileHandle.nullDevice
+        case .merge:
+            guard let outPipe else { preconditionFailure("stderr .merge requires a collecting stdout") }
+            proc.standardError = outPipe
+        }
+
+        do { try proc.run() } catch { throw SpawnError.launchFailed("\(error)") }
+        // Track the child so a SIGINT/SIGTERM interrupts restic (it writes its
+        // partial state and exits 130) instead of hard-killing us. Registered
+        // only after a successful launch; cleared on every exit path.
+        if cancellable { BackupCancellation.shared.setCurrent(proc) }
+        defer { if cancellable { BackupCancellation.shared.clearCurrent(proc) } }
+
+        if let streamHandler, let outPipe {
+            precondition(deadline == nil, "streaming spawns are never deadline-bounded")
+            Self.streamLines(from: outPipe, to: streamHandler)
             proc.waitUntilExit()
-            return proc.terminationStatus
+            return SpawnResult(code: proc.terminationStatus, output: Data())
         }
-        // Bounded wait: a background thread reaps the child and signals; if the
-        // deadline passes first we terminate the (read-only) probe and report it.
+
+        guard let deadline else {
+            let data = outPipe?.fileHandleForReading.readDataToEndOfFile() ?? Data()
+            proc.waitUntilExit()
+            return SpawnResult(code: proc.terminationStatus, output: data)
+        }
+
+        // Bounded wait: a background thread reads to EOF (when collecting) and
+        // reaps the child; if the deadline passes first the (read-only) child
+        // is terminated and `timedOut` reported.
+        let capture = SyncBox<Data>(Data())
         let sem = DispatchSemaphore(value: 0)
-        DispatchQueue.global(qos: .userInitiated).async { proc.waitUntilExit(); sem.signal() }
-        if sem.wait(timeout: .now() + timeout) == .timedOut {
-            forceTerminate(proc, reaped: sem)
-            throw ResticError.timedOut(command: args.first ?? "restic", seconds: Int(timeout))
+        let reader = outPipe?.fileHandleForReading
+        DispatchQueue.global(qos: .userInitiated).async {
+            if let reader { capture.value = reader.readDataToEndOfFile() }
+            proc.waitUntilExit()
+            sem.signal()
         }
-        return proc.terminationStatus
+        if sem.wait(timeout: .now() + deadline) == .timedOut {
+            forceTerminate(proc, reaped: sem)
+            throw SpawnError.timedOut(seconds: Int(deadline))
+        }
+        return SpawnResult(code: proc.terminationStatus, output: capture.value)
+    }
+
+    /// Read a pipe line-by-line on the calling thread, invoking `handler` per
+    /// complete '\n'-terminated line (and once more for a trailing unterminated
+    /// line at EOF). `availableData` blocks until data arrives or returns empty
+    /// at EOF; the rolling buffer lets a JSON object spanning two reads still
+    /// be dispatched once it completes.
+    private static func streamLines(from pipe: Pipe, to handler: (Data) -> Void) {
+        let reader = pipe.fileHandleForReading
+        var buffer = Data()
+        while true {
+            let chunk = reader.availableData
+            if chunk.isEmpty { break }   // EOF — the child exited and closed the pipe
+            buffer.append(chunk)
+            while let nl = buffer.firstIndex(of: 0x0A) {
+                let line = buffer.subdata(in: buffer.startIndex..<nl)
+                buffer.removeSubrange(buffer.startIndex...nl)
+                handler(line)
+            }
+        }
+        if !buffer.isEmpty { handler(buffer) }
     }
 
     /// Stop a timed-out child and make sure it actually dies. We SIGTERM it first
