@@ -62,6 +62,31 @@ final class CommandCenterHomeTests: XCTestCase {
         XCTAssertEqual(tui.clipBody(body, to: 3, cols: 80), body)
     }
 
+    // MARK: - wrapText (the runs detail's error text)
+
+    func testWrapTextLeavesAShortLineAlone() {
+        let tui = makeTUI()
+        XCTAssertEqual(tui.wrapText("short enough", width: 40), ["short enough"])
+    }
+
+    func testWrapTextIndentsContinuationLines() {
+        let tui = makeTUI()
+        let out = tui.wrapText("aaa bbb ccc ddd eee", width: 11)
+        XCTAssertEqual(out.count, 2)
+        XCTAssertEqual(out[0], "aaa bbb ccc")
+        XCTAssertTrue(out[1].hasPrefix("  "), out[1])
+    }
+
+    func testWrapTextEmitsAnOverlongWordExactlyOnce() {
+        // A restic error can carry a repo URL longer than the terminal is wide.
+        // Emitting it twice (or looping) would corrupt the one line that matters.
+        let tui = makeTUI()
+        let long = String(repeating: "x", count: 30)
+        let out = tui.wrapText("err \(long) tail", width: 12)
+        XCTAssertEqual(out.filter { $0.contains(long) }.count, 1, out.description)
+        XCTAssertTrue(out.joined(separator: " ").contains("tail"), out.description)
+    }
+
     func testClipBodyAnnouncesEveryHiddenLine() {
         // A short window used to drop the panels below the fold silently, which
         // reads as "nothing is scheduled". The count must include the line the

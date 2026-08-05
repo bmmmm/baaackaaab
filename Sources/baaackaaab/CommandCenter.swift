@@ -28,6 +28,7 @@ extension ConfigTUI {
         case .char("u"): checkUpdatesNow()
         case .char("R"): enterRestore()
         case .char("t"): enterTimer()
+        case .char("H"): enterRuns()
         case .char("?"): showHelp = true
         case .char("q"), .esc, .ctrlC: if confirmQuit() { return false }
         case .eof: return false
@@ -338,7 +339,7 @@ extension ConfigTUI {
     }
 
     func homeHelpLine() -> String {
-        "e edit \u{2022} s sync \u{2022} p preview \u{2022} r remote \u{2022} u updates \u{2022} R restore \u{2022} t schedules \u{2022} ? help \u{2022} q quit"
+        "e edit \u{2022} s sync \u{2022} p preview \u{2022} r remote \u{2022} u updates \u{2022} R restore \u{2022} t schedules \u{2022} H runs \u{2022} ? help \u{2022} q quit"
     }
 
     /// Help overlay content: replaces the body area when showHelp is toggled.
@@ -351,6 +352,7 @@ extension ConfigTUI {
             ("u", "check restic / server updates (contacts GitHub)"),
             ("R", "open restore browser"),
             ("t", "schedules: see / change / delete the backup, check + drill timers"),
+            ("H", "runs: coverage calendar, full history + why a run failed"),
             ("esc / ?", "close this help"),
             ("q", "quit"),
         ]
@@ -407,6 +409,7 @@ extension ConfigTUI {
         emit("\u{1B}[?1049h\u{1B}[?25l")    // back into the alternate screen
         remotes = []; remoteQueried = false  // repos changed — drop the cached status
         recentRuns = nil                     // the run we just did appended a record
+        runsRecords = nil                    // so does the runs screen's window
         lastSuccessfulBackupRecord = nil     // and it may be the new newest success
         statusMsg = code == 0 ? "sync finished \u{2014} press r to refresh remote" : "sync failed (code \(code))"
     }

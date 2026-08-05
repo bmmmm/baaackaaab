@@ -169,6 +169,14 @@ if cli.has("--history") {
     exit(0)
 }
 
+// Tail the unattended run log (no repo, no credentials, no network) — restic's own
+// output for a scheduled run, which the structured history deliberately omits.
+// The command center's runs screen shells out to this.
+if cli.has("--log-tail") {
+    LogTail.run(lines: cli.positiveInt("--log-tail", default: LogTail.defaultLines, unit: "lines"))
+    exit(0)
+}
+
 // Browse a snapshot's contents (read-only). The listed paths feed --restore --include.
 // `--ls` with no id is valid (defaults to the latest snapshot); dispatch on
 // presence so a bare `--ls` browses latest instead of falling through to a backup.

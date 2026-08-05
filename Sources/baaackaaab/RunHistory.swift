@@ -269,6 +269,15 @@ enum RunHistory {
         Array(allRecords().suffix(limit).reversed())
     }
 
+    /// Every record that ENDED at or after `date`, newest first — the runs screen's
+    /// feed. Bounded by a date rather than by a count because its calendar covers a
+    /// fixed span: a count deep enough for three months of backup+check records
+    /// would be an arbitrary number that silently clips the grid once a second
+    /// timer is added.
+    static func since(_ date: Date) -> [RunRecord] {
+        allRecords().filter { $0.end >= date }.reversed()
+    }
+
     /// The newest restore-drill record, or nil if none has run — the source for
     /// the dashboard's "last verified restore" line and doctor's drill verdict.
     /// Scans the whole history: a drill is monthly, so it can sit far behind the

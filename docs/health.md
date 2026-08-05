@@ -209,6 +209,34 @@ through every configured channel plus a heartbeat ping, synchronously, and
 reports delivered/failed per channel with an actionable reason (e.g. "ntfy
 returned HTTP 404 — check the topic URL is correct").
 
+## Reading the history back
+
+The command center's **runs** screen (`H`) is the human-facing view of the same
+run history the timers append to:
+
+- a **three-month coverage calendar**, one cell per day, so a gap in unattended
+  coverage shows up as a hole rather than as a missing row in a list. A day
+  aggregates every run it saw — a green backup and a failed check on the same day
+  is `!` (mixed), never a plain tick. Days before the history begins and days
+  still in the future render blank, not as "no run": neither has failed to happen.
+- the **runs themselves**, newest first, with `f` narrowing the list to failures.
+- the selected run's **detail**: exit code, the window it ran in, per-destination
+  churn — and on a failure the recorded error text, wrapped rather than truncated.
+  That text was previously only counted (`1 dest failed`), so the one question a
+  failed backup raises could only be answered from the log by hand.
+
+`l` pages the raw run log (`~/Library/Logs/baaackaaab.log`, where the LaunchAgents
+send stdout/stderr) through `baaackaaab --log-tail`, which is also usable on its
+own:
+
+```sh
+baaackaaab --log-tail        # last 200 lines
+baaackaaab --log-tail 1000
+```
+
+It needs no repository, no credentials and no network — so it still works in the
+state where you need it most.
+
 ## Machine-readable status
 
 Heartbeat/push notify on a run's *outcome*; sometimes you want to poll a file

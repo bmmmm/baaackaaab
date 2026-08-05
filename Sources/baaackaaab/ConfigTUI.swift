@@ -31,7 +31,7 @@ import Darwin
 //
 // Needs a real TTY (main.swift guards that). Off a terminal it refuses to run.
 
-enum Screen { case home, editor, restore, fileBrowser, timer }
+enum Screen { case home, editor, restore, fileBrowser, timer, runs }
 
 /// Which field of the schedules editor the up/down keys adjust. `day` is offered
 /// only for a monthly job (the restore drill); the others use the weekday keys.
@@ -107,6 +107,15 @@ final class ConfigTUI {
         return f
     }()
 
+    // Wall-clock with seconds, for a run's end time in the runs detail — a
+    // sub-minute run needs them or its window reads as a single instant.
+    let runClockFmt: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "HH:mm:ss"
+        return f
+    }()
+
     // Same idea for a FUTURE stamp (the next scheduled run), with the weekday
     // spelled out — on a weekday schedule the day name is the thing being checked.
     let timerStampFmt: DateFormatter = {
@@ -144,6 +153,14 @@ final class ConfigTUI {
     // all three jobs spawns launchctl per job, so it is read once and dropped after
     // any install/uninstall rather than recomputed on every render.
     var scheduleRows: [ScheduleRowState]?
+
+    // Runs screen: the three-month window of history behind the calendar, the
+    // list cursor/scroll, and whether the list is filtered to failures. The
+    // records are cached (the whole NDJSON file is parsed to build them) and
+    // dropped after a sync, like the home dashboard's shorter window.
+    var runsRecords: [RunRecord]?
+    var runsCursor = 0, runsTop = 0
+    var runsFailuresOnly = false
 
     // File browser screen: in-TUI navigation of a snapshot's directory tree.
     // `lsEntries` holds ALL entries from `restic ls` (flat depth-first list), loaded
@@ -249,6 +266,7 @@ final class ConfigTUI {
             case .restore: renderRestore()
             case .fileBrowser: renderFileBrowser()
             case .timer: renderTimer()
+            case .runs: renderRuns()
             case .editor: render()
             }
             let key = readKey()
@@ -259,6 +277,7 @@ final class ConfigTUI {
             else if screen == .restore { keepGoing = handleRestore(key) }
             else if screen == .fileBrowser { keepGoing = handleFileBrowser(key) }
             else if screen == .timer { keepGoing = handleTimer(key) }
+            else if screen == .runs { keepGoing = handleRuns(key) }
             else if pickAlbums { keepGoing = handleAlbumPicker(key) }
             else if panelFocused && !setRows().isEmpty { keepGoing = handleReview(key) }
             else { keepGoing = handleBrowse(key) }

@@ -83,6 +83,38 @@ expect "monthly on day 28"
 send "\x1b"
 expect "command center"
 
+# Runs screen: coverage calendar + history + the failure detail. Read-only, and
+# the run history IS isolated by BAAACKAAAB_SUPPORT_DIR, so an empty store here
+# is the expected state — assert the panels render, not their contents.
+send "H"
+expect "history, coverage"
+expect "calendar"
+# Either the legend under a rendered grid, or the empty-store notice in its
+# place — an isolated store has no history, the operator's has three months.
+expect -re {no run|no runs recorded yet}
+
+# l pages the run log through --log-tail. The log lives outside the isolated
+# support dir, so it may or may not exist — both paths must return cleanly.
+send "l"
+expect "run log"
+expect "press any key to return"
+# Drain to quiet BEFORE the keypress: the app is still re-enabling raw mode and
+# reclaiming the tty foreground when that prompt is printed, and a key sent into
+# that window is swallowed — the return to the runs screen then never comes and
+# reads as a hang. Same reason the resize proof below drains first.
+set save_timeout $timeout
+set timeout 1
+expect {
+    -re ".+" { exp_continue }
+    timeout {}
+}
+set timeout $save_timeout
+send " "
+expect "history, coverage"
+
+send "\x1b"
+expect "command center"
+
 # Restore with NO destinations (isolated support dir): stays on home with the
 # actionable status line — and never issues a live snapshot query.
 send "R"

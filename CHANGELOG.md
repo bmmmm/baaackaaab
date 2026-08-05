@@ -16,6 +16,18 @@
 - **A plist that launchd never loaded is now called out.** Such a job looks
   scheduled in every listing and never fires; the dashboard flags it in yellow
   instead of rendering it as healthy.
+- **A runs screen (`H`) with a coverage calendar, the history and the failure
+  detail.** Three months side by side, one cell per day, so a gap in unattended
+  coverage reads as a hole rather than as a missing list row; a day aggregates
+  every run it saw, so a failed check on the same day as a good backup shows as
+  mixed rather than green. Below it the runs themselves (`f` filters to
+  failures) and, for the selected run, its detail — exit code, window,
+  per-destination churn, and **the recorded error text**, which until now was
+  only counted (`1 dest failed`) and never shown anywhere in the TUI.
+- **`--log-tail [n]`** prints the last n lines of the unattended run log
+  (default 200) — restic's own output for a scheduled run, which the structured
+  history deliberately does not keep. No repo, credentials or network needed, so
+  it works in the state where it is needed. The runs screen's `l` shells out to it.
 
 ### Fixes
 
@@ -23,6 +35,10 @@
   visible line now says how many lines are hidden and that the window needs to be
   taller — a short window used to simply drop the lower panels, which reads as
   "there is nothing scheduled".
+- **The coverage calendar never claims a missed run it cannot know about.** Days
+  outside the recorded window — before the first record, or in the future —
+  render blank instead of as "no run", and a store with no history at all says so
+  rather than painting three months of dots.
 
 ## v1.1.0 — 2026-08-04
 

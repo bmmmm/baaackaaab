@@ -72,6 +72,7 @@ func printUsage() {
     Console.info([
         ("--test-notify", "fire a sample message through every configured channel + a heartbeat ping, report delivered/failed, then exit"),
         ("--status-export", "rebuild status.json (+ the Prometheus textfile, if configured) on demand, print its path, then exit"),
+        ("--log-tail <n>", "print the last n lines of the unattended run log (default 200; no repo, credentials or network needed), then exit"),
     ])
     Console.note("The heartbeat is a Healthchecks-style dead-man's switch: GET <url>/start at run begin, GET <url> on success, GET <url>/fail on failure. The alarm fires on the MONITOR side when a ping goes missing — the only way to catch a run that stopped happening entirely (crashed, unplugged, timer disabled), not just one that failed while running. Push channels (ntfy/gotify/webhook) additionally deliver the outcome away from the Mac. Both are best-effort: a delivery failure never changes a run's exit code. --test-notify proves the whole path before you rely on it.")
     Console.note("Every REAL run (never a dry run) also writes status.json under the support dir — a stable, documented machine-readable snapshot (last run, per-destination churn, repo size/quota, last restore drill) for scripts/dashboards that would rather poll a file than parse console output. --set-prom-textfile additionally writes a node_exporter textfile-collector file alongside it. Both are best-effort like the heartbeat/push channels above.")

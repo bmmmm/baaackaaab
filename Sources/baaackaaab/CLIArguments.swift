@@ -152,7 +152,7 @@ struct CLIArguments {
         "--add-destination", "--repo-url", "--repo-password-file", "--link",
         "--order", "--remove-destination", "--ls", "--find", "--snapshot",
         "--target", "--include", "--sample", "--max-bytes", "--destination",
-        "--read-data-subset", "--at", "--days", "--day", "--repo-quota-bytes",
+        "--read-data-subset", "--at", "--days", "--day", "--repo-quota-bytes", "--log-tail",
         "--quota-warn-fraction", "--materialize-test", "--evict-test",
         "--history", "--read-concurrency",
         "--set-heartbeat", "--add-ntfy", "--add-gotify", "--add-webhook", "--remove-notify",
