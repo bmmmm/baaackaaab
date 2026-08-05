@@ -48,6 +48,11 @@
   repair of a healthy repo. Reachability is now probed first; an unreachable
   destination reports "could not check — NOT a damage verdict" and banners as
   **could not run** instead of **failed**.
+- **The healthy states are green, not grey.** The drill, check, backup-age and
+  schedule lines rendered their passing state in the same dim grey as "nothing
+  here yet" — while the run and destination rows next to them had always been
+  green when clean. A passing restore drill is the most expensive evidence the
+  tool produces; it now reads like it, and all four lines carry the same tick.
 - **The cancel notice no longer claims an upload that never happened.** Ctrl-C
   or a SIGTERM printed "data already uploaded is kept (dedup reuses it next run)"
   for every job, including the read-only integrity check and restore drill, which

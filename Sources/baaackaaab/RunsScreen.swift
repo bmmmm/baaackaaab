@@ -193,7 +193,7 @@ extension ConfigTUI {
                 var bits: [String] = []
                 if let added = d.dataAdded { bits.append("\(byteSummary(added)) added") }
                 if let new = d.filesNew, let ch = d.filesChanged { bits.append("\(new) new, \(ch) changed") }
-                out.append(dim(fit("  \u{2713} \(d.name)" + (bits.isEmpty ? "" : ": " + bits.joined(separator: "  \u{2022}  ")), cols)))
+                out.append(green(fit("  \u{2713} \(d.name)" + (bits.isEmpty ? "" : ": " + bits.joined(separator: "  \u{2022}  ")), cols)))
             } else {
                 out.append(yellow(fit("  \u{2717} \(d.name): failed (no error text recorded)", cols)))
             }
