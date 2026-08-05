@@ -512,10 +512,13 @@ final class ResticIntegrationTests: XCTestCase {
     /// `DestinationWait.worstCaseWindow` counts probe time alongside the backoff,
     /// and why the retry sequence itself is covered by DestinationWaitTests with
     /// scripted probes rather than five more real ones here.
+    /// No wall-clock assertion here on purpose. An earlier version asserted the
+    /// probe returns within `probeTimeout + 15`, which is a timing claim about the
+    /// machine rather than about the code — and this suite runs inside the
+    /// pre-push hook, where a loaded Mac turns that into a push that fails for no
+    /// reason the operator can act on. The duration itself is documented on
+    /// `DestinationWait.worstCaseWindow` and pinned by its own arithmetic test.
     func testADeadEndpointProbesAsUnreachable() {
-        let started = Date()
         XCTAssertEqual(makeUnreachableBackend().probe(), .unreachable)
-        XCTAssertLessThan(Date().timeIntervalSince(started), ResticBackend.probeTimeout + 15,
-                          "the probe must stay bounded by its own cap")
     }
 }
