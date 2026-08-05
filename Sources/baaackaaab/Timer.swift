@@ -57,6 +57,34 @@ struct Schedule {
         return gap
     }
 
+    /// The next moment this schedule fires after `now`, computed from the same
+    /// keys launchd reads. nil when it can never fire (no times). Walks forward a
+    /// day at a time and builds every candidate through `Calendar`, so month
+    /// lengths and DST shifts are handled by the calendar rather than by
+    /// arithmetic on 86_400. Pure — directly unit-testable.
+    func nextFireDate(after now: Date, calendar: Calendar = .current) -> Date? {
+        guard !times.isEmpty else { return nil }
+        let sorted = times.sorted { ($0.hour, $0.minute) < ($1.hour, $1.minute) }
+        // 400 days is past the worst case for a monthly schedule (a day-of-month
+        // plus a leap year); daily and weekly ones resolve inside the first week.
+        for offset in 0...400 {
+            guard let day = calendar.date(byAdding: .day, value: offset, to: now) else { continue }
+            let comps = calendar.dateComponents([.weekday, .day], from: day)
+            if let dom = dayOfMonth {
+                guard comps.day == dom else { continue }
+            } else if !weekdays.isEmpty {
+                // Calendar's weekday is 1-based from Sunday; launchd's is 0-based.
+                guard let wd = comps.weekday,
+                      weekdays.contains(where: { (($0 % 7) + 7) % 7 == wd - 1 }) else { continue }
+            }
+            for t in sorted {
+                if let fire = calendar.date(bySettingHour: t.hour, minute: t.minute, second: 0, of: day),
+                   fire > now { return fire }
+            }
+        }
+        return nil
+    }
+
     /// Human-readable summary, e.g. "daily at 12:00", "Mon, Wed, Fri at 09:00,
     /// 18:00", or "monthly on day 1 at 03:00".
     func describe() -> String {
@@ -89,6 +117,72 @@ enum LaunchdTimer {
     /// The rotating integrity-check LaunchAgent — again its own label + plist, so
     /// the check schedule is independent of the backup and drill schedules.
     static let checkLabel = "io.baaackaaab.check"
+
+    /// The three scheduled jobs as one enumerable thing, so the dashboard and the
+    /// schedules editor iterate over them instead of repeating a
+    /// backup/check/drill switch at every call site. Each case knows its plist
+    /// label, the CLI flags that install/remove it, and its install defaults.
+    enum Kind: String, CaseIterable {
+        case backup, check, drill
+
+        var label: String {
+            switch self {
+            case .backup: return LaunchdTimer.label
+            case .check:  return LaunchdTimer.checkLabel
+            case .drill:  return LaunchdTimer.drillLabel
+            }
+        }
+
+        /// Short dashboard name — what this job does, not what it is called.
+        var title: String {
+            switch self {
+            case .backup: return "backup"
+            case .check:  return "integrity check"
+            case .drill:  return "restore drill"
+            }
+        }
+
+        var installFlag: String {
+            switch self {
+            case .backup: return "--install-timer"
+            case .check:  return "--install-check-timer"
+            case .drill:  return "--install-drill-timer"
+            }
+        }
+
+        var uninstallFlag: String {
+            switch self {
+            case .backup: return "--uninstall-timer"
+            case .check:  return "--uninstall-check-timer"
+            case .drill:  return "--uninstall-drill-timer"
+            }
+        }
+
+        /// The drill fires on a day-of-month (launchd's `Day`); the other two on a
+        /// weekday list (`Weekday`, empty = daily). Drives which field the editor
+        /// offers — a weekday set on a monthly schedule would be silently ignored.
+        var isMonthly: Bool { self == .drill }
+
+        /// What a fresh install lands on when the operator changes nothing —
+        /// mirrors the CLI defaults in `CLIArguments.schedule()/drillSchedule()`.
+        var defaultTime: (hour: Int, minute: Int) {
+            switch self {
+            case .backup: return (12, 0)
+            case .check, .drill: return (3, 0)
+            }
+        }
+    }
+
+    /// The installed schedule for one job, read back from its plist. nil when the
+    /// job is not installed or its plist is unparseable.
+    static func installedSchedule(_ kind: Kind) -> Schedule? {
+        guard let data = try? Data(contentsOf: plistURL(for: kind.label)) else { return nil }
+        return schedule(fromPlistData: data)
+    }
+
+    /// Whether one job's plist is on disk and whether launchd has it loaded.
+    /// Spawns launchctl — call it on refresh, never per render.
+    static func state(_ kind: Kind) -> (installed: Bool, loaded: Bool) { stateOf(label: kind.label) }
 
     private static var home: URL { FileManager.default.homeDirectoryForCurrentUser }
     private static func plistURL(for label: String) -> URL {

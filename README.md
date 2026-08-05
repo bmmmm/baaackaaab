@@ -168,7 +168,9 @@ The set lives in `~/.config/baaackaaab/backup-set.json` — a plain, hand-editab
 file that is the single source of truth; every front-end just edits it. Run
 `baaackaaab` with no arguments in a terminal to open the **command center** — the
 set plus a remote dashboard, with keys to edit, sync now, refresh remote status,
-and check for restic / server updates.
+and check for restic / server updates. Its **schedules** panel lists all three
+unattended jobs (backup, integrity check, restore drill) with their cadence and
+next run; `t` opens the editor where each one can be changed or deleted.
 
 ## Documentation
 

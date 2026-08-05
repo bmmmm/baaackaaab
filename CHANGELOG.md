@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+- **All three schedules are visible and editable in the command center.** The home
+  dashboard gained a `schedules` panel listing every unattended job — backup,
+  integrity check, restore drill — with its cadence and next run (`daily at 20:00
+  · next in 21h`). `t` opens the editor, where `tab` picks the job, `i` installs or
+  changes it and `u` deletes it; previously only the backup timer was reachable
+  there and the other two were CLI-only. The editor offers a day-of-month field
+  for the monthly drill instead of the weekday keys launchd would ignore, and every
+  write still goes through the tested `--install-*-timer` flags, so the TUI and the
+  CLI cannot drift apart.
+- **A plist that launchd never loaded is now called out.** Such a job looks
+  scheduled in every listing and never fires; the dashboard flags it in yellow
+  instead of rendering it as healthy.
+
+### Fixes
+
+- **A dashboard too tall for the window no longer truncates silently.** The last
+  visible line now says how many lines are hidden and that the window needs to be
+  taller — a short window used to simply drop the lower panels, which reads as
+  "there is nothing scheduled".
+
 ## v1.1.0 — 2026-08-04
 
 ### Features

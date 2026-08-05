@@ -33,6 +33,18 @@ import Darwin
 
 enum Screen { case home, editor, restore, fileBrowser, timer }
 
+/// Which field of the schedules editor the up/down keys adjust. `day` is offered
+/// only for a monthly job (the restore drill); the others use the weekday keys.
+enum TimerField { case hour, minute, day }
+
+/// One job's probed schedule state, cached for the home dashboard.
+struct ScheduleRowState {
+    let kind: LaunchdTimer.Kind
+    let installed: Bool
+    let loaded: Bool
+    let schedule: Schedule?
+}
+
 final class ConfigTUI {
     let configPath: URL
     let home = FileManager.default.homeDirectoryForCurrentUser
@@ -95,6 +107,15 @@ final class ConfigTUI {
         return f
     }()
 
+    // Same idea for a FUTURE stamp (the next scheduled run), with the weekday
+    // spelled out — on a weekday schedule the day name is the thing being checked.
+    let timerStampFmt: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "EEE yyyy-MM-dd HH:mm"
+        return f
+    }()
+
     // Restore screen: a snapshot browser over one source destination (cycle with
     // d when several are configured). Picking a snapshot re-execs the tested CLI
     // restore (`--restore … --yes`) so the actual write goes through the same
@@ -104,15 +125,25 @@ final class ConfigTUI {
     var restoreLoadError: String?
     var restoreCursor = 0, restoreTop = 0
 
-    // Timer screen: edit one time-of-day + an optional weekday set, then install /
-    // uninstall the launchd schedule via the tested CLI. Loaded from the installed
-    // plist on enter. The (installed, loaded) state is cached so a render never
-    // spawns launchctl — it is refreshed only on enter and after install/uninstall.
+    // Schedules screen: pick one of the three scheduled jobs (backup, integrity
+    // check, restore drill), edit its time-of-day plus either a weekday set or a
+    // day-of-month, then install / uninstall its launchd schedule via the tested
+    // CLI. The fields are loaded from the selected job's installed plist when the
+    // screen is entered or the job is switched. The (installed, loaded) state is
+    // cached so a render never spawns launchctl — it is refreshed only on enter,
+    // on job switch, and after an install/uninstall.
+    var timerKind: LaunchdTimer.Kind = .backup
     var timerHour = 12, timerMinute = 0
     var timerWeekdays = Set<Int>()      // launchd weekday numbers; empty = daily
-    var timerFieldMinute = false        // which time field up/down adjusts
+    var timerDayOfMonth = 1             // monthly jobs (the drill) only
+    var timerField: TimerField = .hour  // which field up/down adjusts
     var timerState: (installed: Bool, loaded: Bool) = (false, false)
     var timerCurrent: Schedule?
+
+    // The home dashboard's schedules section, cached like the run history: probing
+    // all three jobs spawns launchctl per job, so it is read once and dropped after
+    // any install/uninstall rather than recomputed on every render.
+    var scheduleRows: [ScheduleRowState]?
 
     // File browser screen: in-TUI navigation of a snapshot's directory tree.
     // `lsEntries` holds ALL entries from `restic ls` (flat depth-first list), loaded

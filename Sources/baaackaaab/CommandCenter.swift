@@ -90,6 +90,12 @@ extension ConfigTUI {
             for rec in runs.prefix(4) { body.append(homeRunLine(rec, cols)) }
         }
 
+        // What runs unattended sits right under what already ran — "when is the next
+        // one" is the question the recent-runs list raises.
+        body.append("")
+        body.append(divider("schedules", cols))
+        for row in loadScheduleRows() { body.append(homeScheduleLine(row, cols)) }
+
         body.append("")
         body.append(divider("verification", cols))
         body.append(homeDrillLine(cols))
@@ -105,8 +111,7 @@ extension ConfigTUI {
 
         if showHelp { body = helpOverlayLines(contentH, cols) }
         else if body.count < contentH { body += Array(repeating: "", count: contentH - body.count) }
-        if body.count > contentH { body = Array(body.prefix(contentH)) }
-        lines += body
+        lines += clipBody(body, to: contentH, cols: cols)
 
         lines.append("")
         lines.append(dim(fit(statusLine(), cols)))
@@ -229,6 +234,56 @@ extension ConfigTUI {
         }
     }
 
+    /// Cut a rendered body down to the content area. A short window silently
+    /// dropping the panels below the fold reads as "there is nothing there" — the
+    /// last visible line says how much was cut and what to do about it instead.
+    func clipBody(_ body: [String], to contentH: Int, cols: Int) -> [String] {
+        guard body.count > contentH else { return body }
+        // Every hidden line, plus the one this notice displaces.
+        let hidden = body.count - contentH + 1
+        return Array(body.prefix(contentH - 1))
+             + [yellow(fit("  \u{2026} \(hidden) more line(s) below \u{2014} make the window taller", cols))]
+    }
+
+    /// Probe all three scheduled jobs (plist on disk + loaded into launchd + the
+    /// schedule it encodes), cached like the run history: each job costs a launchctl
+    /// spawn, so this runs once per session and is dropped after any install or
+    /// uninstall rather than on every render.
+    func loadScheduleRows() -> [ScheduleRowState] {
+        if let rows = scheduleRows { return rows }
+        let rows = LaunchdTimer.Kind.allCases.map { kind -> ScheduleRowState in
+            let st = LaunchdTimer.state(kind)
+            return ScheduleRowState(kind: kind, installed: st.installed, loaded: st.loaded,
+                                    schedule: LaunchdTimer.installedSchedule(kind))
+        }
+        scheduleRows = rows
+        return rows
+    }
+
+    /// Drop the cached probe so the next render re-reads launchd — called after the
+    /// schedules editor installs or removes a job.
+    func invalidateScheduleRows() {
+        scheduleRows = nil
+        // The backup line's overdue judgment is anchored on the installed backup
+        // schedule's interval, so a schedule change invalidates it too.
+        backupIntervalLoaded = false
+        backupIntervalValue = nil
+    }
+
+    /// One scheduled job on the dashboard: cadence + next fire time when it is
+    /// healthy, yellow when a plist is present but launchd never loaded it (looks
+    /// scheduled, never fires), dim when the job is not scheduled at all.
+    func homeScheduleLine(_ row: ScheduleRowState, _ cols: Int) -> String {
+        let (level, text) = ScheduleDashboard.row(kind: row.kind, installed: row.installed,
+                                                  loaded: row.loaded, schedule: row.schedule,
+                                                  now: Date())
+        switch level {
+        case .ok:     return dim(fit("  \u{2713} " + text, cols))
+        case .none:   return dim(fit("    " + text + " \u{2014} press t to schedule it", cols))
+        case .broken: return yellow(fit("  ! " + text, cols))
+        }
+    }
+
     /// The "last backup" line: age of the newest successful backup, turning into an
     /// OVERDUE warning (yellow, like the drill-staleness line) when it has slipped
     /// past 1.5× the installed schedule's cadence. With no timer installed there is
@@ -283,7 +338,7 @@ extension ConfigTUI {
     }
 
     func homeHelpLine() -> String {
-        "e edit \u{2022} s sync \u{2022} p preview \u{2022} r remote \u{2022} u updates \u{2022} R restore \u{2022} t timer \u{2022} ? help \u{2022} q quit"
+        "e edit \u{2022} s sync \u{2022} p preview \u{2022} r remote \u{2022} u updates \u{2022} R restore \u{2022} t schedules \u{2022} ? help \u{2022} q quit"
     }
 
     /// Help overlay content: replaces the body area when showHelp is toggled.
@@ -295,7 +350,7 @@ extension ConfigTUI {
             ("r", "refresh remote status"),
             ("u", "check restic / server updates (contacts GitHub)"),
             ("R", "open restore browser"),
-            ("t", "edit the scheduled-backup timer"),
+            ("t", "schedules: see / change / delete the backup, check + drill timers"),
             ("esc / ?", "close this help"),
             ("q", "quit"),
         ]

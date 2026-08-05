@@ -18,6 +18,15 @@ The timer runs `baaackaaab --run-tag scheduled`. It needs no Keychain prompt (th
 credential files are read directly); it needs a one-time Photos grant, which a
 stable signature then keeps alive across rebuilds.
 
+All three schedules — this one, the restore drill and the integrity check below —
+are also visible and editable in the command center. Its **schedules** panel lists
+each job's cadence and next run; `t` opens the editor, where `tab` picks the job,
+`i` installs or changes it, and `u` deletes it. The editor drives the same CLI
+flags shown here, so the two paths cannot drift apart. Two states it calls out that
+a plain listing hides: a plist that is present but was never **loaded** into
+launchd (it looks scheduled and never fires), and a job that is **not scheduled at
+all**.
+
 ## Catch-up on boot/login
 
 The backup LaunchAgent also sets `RunAtLoad` and carries a `--catch-up` marker, so

@@ -125,6 +125,64 @@ final class ScheduleTests: XCTestCase {
         XCTAssertTrue(xml.contains("<string>--catch-up</string>"), xml)
     }
 
+    // MARK: - nextFireDate (what the dashboard shows as "next run")
+
+    /// A fixed calendar so these assertions don't drift with the machine's zone —
+    /// the schedules dashboard's whole value is being exact about when a job fires.
+    private var berlin: Calendar {
+        var c = Calendar(identifier: .gregorian)
+        c.timeZone = TimeZone(identifier: "Europe/Berlin")!
+        return c
+    }
+
+    private func at(_ y: Int, _ mo: Int, _ d: Int, _ h: Int, _ mi: Int) -> Date {
+        berlin.date(from: DateComponents(year: y, month: mo, day: d, hour: h, minute: mi))!
+    }
+
+    func testDailyFiresLaterTheSameDay() throws {
+        let s = Schedule(times: [(hour: 20, minute: 0)], weekdays: [])
+        let next = try XCTUnwrap(s.nextFireDate(after: at(2026, 8, 5, 19, 0), calendar: berlin))
+        XCTAssertEqual(next, at(2026, 8, 5, 20, 0))
+    }
+
+    func testDailyRollsToTomorrowOnceThePassingTimeIsPast() throws {
+        // The 20:00 slot has gone by, so the next fire is tomorrow's — the case the
+        // dashboard is showing right after an evening backup.
+        let s = Schedule(times: [(hour: 20, minute: 0)], weekdays: [])
+        let next = try XCTUnwrap(s.nextFireDate(after: at(2026, 8, 5, 21, 0), calendar: berlin))
+        XCTAssertEqual(next, at(2026, 8, 6, 20, 0))
+    }
+
+    func testSeveralTimesPickTheNextOneNotTheFirst() throws {
+        let s = Schedule(times: [(hour: 18, minute: 0), (hour: 9, minute: 0)], weekdays: [])
+        let next = try XCTUnwrap(s.nextFireDate(after: at(2026, 8, 5, 12, 0), calendar: berlin))
+        XCTAssertEqual(next, at(2026, 8, 5, 18, 0))
+    }
+
+    func testWeekdayScheduleSkipsToTheNextScheduledDay() throws {
+        // 2026-08-05 is a Wednesday; a Mon-only schedule fires the following Monday.
+        let s = Schedule(times: [(hour: 3, minute: 0)], weekdays: [1])
+        let next = try XCTUnwrap(s.nextFireDate(after: at(2026, 8, 5, 12, 0), calendar: berlin))
+        XCTAssertEqual(next, at(2026, 8, 10, 3, 0))
+    }
+
+    func testMonthlyScheduleRollsToNextMonth() throws {
+        // Day 1 has passed this month, so the drill's next fire is next month's.
+        let s = Schedule(times: [(hour: 3, minute: 0)], weekdays: [], dayOfMonth: 1)
+        let next = try XCTUnwrap(s.nextFireDate(after: at(2026, 8, 5, 12, 0), calendar: berlin))
+        XCTAssertEqual(next, at(2026, 9, 1, 3, 0))
+    }
+
+    func testMonthlyScheduleCrossesTheYearBoundary() throws {
+        let s = Schedule(times: [(hour: 3, minute: 0)], weekdays: [], dayOfMonth: 1)
+        let next = try XCTUnwrap(s.nextFireDate(after: at(2026, 12, 15, 12, 0), calendar: berlin))
+        XCTAssertEqual(next, at(2027, 1, 1, 3, 0))
+    }
+
+    func testScheduleWithNoTimesNeverFires() {
+        XCTAssertNil(Schedule(times: [], weekdays: []).nextFireDate(after: Date(), calendar: berlin))
+    }
+
     func testScheduleParserRejectsPlistWithoutInterval() {
         let xml = """
         <?xml version="1.0" encoding="UTF-8"?>

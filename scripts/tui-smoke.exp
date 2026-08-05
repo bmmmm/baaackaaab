@@ -6,16 +6,27 @@
 #  * ASCII only — Tcl does not read this file as UTF-8, so matching the em-dash
 #    headers ("baaackaaab <emdash> timer") silently never fires. Match an ASCII
 #    substring of each screen instead.
-#  * unique per screen — footer key hints ("R restore", "t timer") false-
+#  * unique per screen — footer key hints ("R restore", "t schedules") false-
 #    positive on bare words; use text only that screen renders:
-#      home:   "command center"          (header)
-#      editor: "configure backup set"    (header)
-#      timer:  "will install:"           (schedule preview line)
+#      home:      "command center"          (header)
+#      editor:    "configure backup set"    (header)
+#      schedules: "scheduled jobs"          (section divider)
+#                 "i installs:"             (schedule preview line)
 #      restore w/o destinations: "no repository" (home status line)
+#    The home schedules section is matched by its per-job STATE words
+#    ("next in" / "not scheduled" / "NOT loaded"), which no other panel emits —
+#    matching "schedules" would pass on the footer hint alone with the section
+#    missing entirely (that false pass happened while this was written).
 
 set timeout 30
 set bin [lindex $argv 0]
 set config [lindex $argv 1]
+
+# Tall enough that the whole dashboard is above the fold — the schedules section
+# sits low, and a 24-row default would legitimately clip it (the app then says so,
+# but this gate is here to see the section itself). The later resize goes to 40,
+# so it is still a real size change.
+set stty_init "rows 45 columns 100"
 
 proc fail {msg} {
     puts "\nFAIL: $msg"
@@ -34,17 +45,41 @@ expect_after {
 
 expect "command center"
 
+# The home dashboard states every scheduled job's status. Which state each job is
+# in depends on the operator's real LaunchAgents, so match the set of state words
+# rather than any one of them.
+expect -re {next in|not scheduled|NOT loaded|unreadable}
+
 # Editor and back (ESC returns home when the center launched the editor).
 send "e"
 expect "configure backup set"
 send "\x1b"
 expect "command center"
 
-# Timer screen and back. READ-ONLY by contract: LaunchAgents are NOT isolated
-# by BAAACKAAAB_SUPPORT_DIR, so this screen shows the operator's REAL timer —
-# never send "i" (install) or "u" (uninstall) here.
+# Schedules screen and back. READ-ONLY by contract: LaunchAgents are NOT isolated
+# by BAAACKAAAB_SUPPORT_DIR, so this screen shows the operator's REAL timers —
+# never send "i" (install) or "u" (uninstall) here. Navigation and the preview
+# line are pure computation, so they are safe to drive.
 send "t"
-expect "will install:"
+expect "scheduled jobs"
+expect "edit backup"
+expect "i installs:"
+
+# tab cycles job -> job. The drill is monthly, so it must offer a day-of-month
+# field instead of the weekday keys (launchd ignores Weekday on a Day schedule).
+send "\t"
+expect "edit integrity check"
+send "\t"
+expect "edit restore drill"
+expect "of each month"
+
+# Editing a field must reach the preview, not just repaint the widget: focus the
+# day field (right, right) and step it down one, wrapping 1 -> 28.
+send "\033\[C"
+send "\033\[C"
+send "\033\[B"
+expect "monthly on day 28"
+
 send "\x1b"
 expect "command center"
 

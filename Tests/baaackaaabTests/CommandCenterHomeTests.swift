@@ -53,4 +53,24 @@ final class CommandCenterHomeTests: XCTestCase {
         XCTAssertNil(tui.parseResticTime("not-a-date"))
         XCTAssertNil(tui.parseResticTime(""))
     }
+
+    // MARK: - clipBody (the short-window fold)
+
+    func testClipBodyLeavesAFittingBodyAlone() {
+        let tui = makeTUI()
+        let body = ["a", "b", "c"]
+        XCTAssertEqual(tui.clipBody(body, to: 3, cols: 80), body)
+    }
+
+    func testClipBodyAnnouncesEveryHiddenLine() {
+        // A short window used to drop the panels below the fold silently, which
+        // reads as "nothing is scheduled". The count must include the line the
+        // notice itself displaces — 6 lines into 4 rows hides 3, not 2.
+        let tui = makeTUI()
+        let clipped = tui.clipBody(["a", "b", "c", "d", "e", "f"], to: 4, cols: 80)
+        XCTAssertEqual(clipped.count, 4)
+        XCTAssertTrue(clipped[0].contains("a"))
+        XCTAssertTrue(clipped[2].contains("c"))
+        XCTAssertTrue(clipped[3].contains("3 more line(s) below"), clipped[3])
+    }
 }
