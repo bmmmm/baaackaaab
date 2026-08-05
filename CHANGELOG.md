@@ -48,6 +48,12 @@
   repair of a healthy repo. Reachability is now probed first; an unreachable
   destination reports "could not check — NOT a damage verdict" and banners as
   **could not run** instead of **failed**.
+- **The cancel notice no longer claims an upload that never happened.** Ctrl-C
+  or a SIGTERM printed "data already uploaded is kept (dedup reuses it next run)"
+  for every job, including the read-only integrity check and restore drill, which
+  upload nothing. Each job now states its own aftermath: the check reports the
+  repository untouched and the slice simply not run, the drill that its partial
+  restore is discarded with the temp directory.
 - **A dashboard too tall for the window no longer truncates silently.** The last
   visible line now says how many lines are hidden and that the window needs to be
   taller — a short window used to simply drop the lower panels, which reads as

@@ -91,7 +91,7 @@ func rotatingCheckCommand() {
     // Arm cancellation so a SIGTERM/SIGINT interrupts the (hours-long)
     // `restic check --read-data-subset` child instead of killing this process
     // and orphaning restic with the repo lock held.
-    BackupCancellation.shared.arm()
+    BackupCancellation.shared.arm(as: .check)
     let runStart = Date()
     let slice = RotatingCheck.nextSlice(lastSlice: RunHistory.lastCheck()?.slice)
     let subset = RotatingCheck.subsetSpec(slice: slice)
