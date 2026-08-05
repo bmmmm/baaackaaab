@@ -31,6 +31,23 @@
 
 ### Fixes
 
+- **The boot race no longer costs a backup.** The login/boot `--catch-up` fire
+  lands before Wi-Fi is up, the run-start probe times out, and the run ended
+  having backed up nothing — while being exactly the mechanism meant to make up
+  a slot missed with the Mac off. An unattended run that reaches no destination
+  now waits and probes again (30 s / 60 s / 120 s / 240 s), logging each wait,
+  before giving up. Only for transient failures, only unattended, and only while
+  no destination at all is reachable — a wrong password, a held lock or an absent
+  repo still fails on the first attempt. All three timers do this; a monthly
+  drill that lost the race would otherwise wait four weeks.
+- **An unreachable destination is no longer reported as a damaged one.** The
+  integrity check ran `restic check` first and judged the repo by its result —
+  but a transport failure is indistinguishable from damage in that result (a
+  non-zero exit with no lock marker), so a server that was merely away produced
+  "restic check reported problems" and pointed the operator at a server-side
+  repair of a healthy repo. Reachability is now probed first; an unreachable
+  destination reports "could not check — NOT a damage verdict" and banners as
+  **could not run** instead of **failed**.
 - **A dashboard too tall for the window no longer truncates silently.** The last
   visible line now says how many lines are hidden and that the window needs to be
   taller — a short window used to simply drop the lower panels, which reads as

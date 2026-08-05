@@ -45,6 +45,37 @@ mon/wed/fri → 3 days):
 **Existing installs get `RunAtLoad` + `--catch-up` on the next `--install-timer`** —
 the plist is regenerated on every install.
 
+### The boot race
+
+The login/boot fire lands seconds after launchd loads the agents — often before
+Wi-Fi is up. The run-start probe then times out and the run would end having
+backed up nothing. That fire is precisely the make-up mechanism for a slot missed
+while the Mac was off, so giving up on it costs a real backup: if the calendar
+slot has already passed, the next attempt is a day away.
+
+An **unattended** run that reaches **no** destination therefore waits and probes
+again — 30 s, 60 s, 120 s, 240 s, then it gives up. Each wait logs a line, so the
+race is visible in the log rather than showing up as an unexplained gap:
+
+```
+[warn] no destination reachable — retrying in 30s (attempt 2 of 5; giving up after up to 12m)
+```
+
+Narrow by construction, on three axes: only **transient** failures (a wrong
+password, a held lock or an absent repo fails on the first attempt — waiting
+cannot change any of those), only **unattended** runs (at a terminal you get the
+error immediately, not minutes of silence), and only while **no** destination is
+reachable (if one is up, the run proceeds and the other is skipped, as before).
+
+The quoted give-up time counts probe time as well as the waits: restic does not
+fail fast on a refused connection, it retries the backend request internally
+until the 60 s probe cap cuts it off, so each attempt can cost a full minute on
+top of its wait.
+
+All three timers do this — the check and the drill carry `RunAtLoad` +
+`--catch-up` too, and a monthly drill that lost the race would otherwise wait
+four weeks for its next attempt.
+
 ## Scheduled restore drill
 
 A backup you have never restored from is a hope, not a backup. A second
@@ -84,6 +115,17 @@ structural check, with an optional one-off `--read-data-subset`.
 That this actually catches rot — a single flipped pack byte fails the read-data
 check with concrete error lines while staying invisible to the structural check —
 is demonstrated in the [bit-rot PoC](poc-bitrot-detection.md).
+
+**Reachability is probed before the check runs, and an unreachable destination is
+never reported as a damaged one.** `restic check` cannot tell the two apart: a
+transport failure comes back as a plain non-zero exit with no lock marker, which
+is indistinguishable from real damage in its result. Judged by that alone, a
+server that was simply away would produce "restic check reported problems" and
+send you off to repair a healthy repo. So the destination is probed first (with
+the boot-race backoff above); if it does not answer, the run reports *"could not
+check — NOT a damage verdict"*, records `unreachable` in the history, and the
+banner says **could not run** rather than **failed**. An alarm that confuses "your
+backup may be damaged" with "the server was away" trains you to ignore it.
 
 The restore drill and the integrity check are complementary: the **drill** proves a
 sample *decrypts and restores* end-to-end, the **check** proves *all bytes still

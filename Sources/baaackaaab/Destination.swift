@@ -476,6 +476,11 @@ final class DestinationRun {
     /// Set when the destination could not be initialized/reached; it is then
     /// skipped for all backups in this run.
     var initError: String?
+    /// Whether that failure is one waiting could fix (a timeout / transport
+    /// error) rather than a decision the network cannot change (wrong password,
+    /// held lock, absent repo). Kept as a typed flag beside the message so the
+    /// retry gate never has to pattern-match the human-readable string.
+    var initTransient = false
     var backupFailures = 0
     var firstBackupError: String?
     /// This run's churn aggregated across every restic snapshot written to this

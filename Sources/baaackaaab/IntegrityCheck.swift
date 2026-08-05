@@ -106,6 +106,9 @@ func rotatingCheckCommand() {
 
     var destResults: [RunRecord.Dest] = []
     var failures = 0
+    // Counted apart from `failures`: a destination that could not be reached was
+    // never judged, so the summary must not call it a failed check.
+    var unreachable = 0
     for dest in dests {
         Console.section("Destination", detail: "\(dest.name) [\(dest.link)]")
         guard dest.passwordAvailable else {
@@ -114,8 +117,28 @@ func rotatingCheckCommand() {
             failures += 1
             continue
         }
+        // Reachability FIRST. `restic check` cannot tell a damaged repo from an
+        // unreachable one — a network failure comes back as a non-zero exit with
+        // no lock marker, which the branches below would report as damage and
+        // send the operator off to repair a healthy repo server-side. It is also
+        // the boot race: this job carries RunAtLoad + --catch-up like the backup
+        // timer, so its login fire can land before Wi-Fi is up.
+        let backend = ResticBackend(destination: dest)
+        let reachable = DestinationWait.awaitReachable(
+            probe: { backend.probe() },
+            unattended: isatty(STDERR_FILENO) == 0,
+            isCancelled: { BackupCancellation.shared.isCancelled },
+            sleep: { DestinationWait.waitCancellable($0, isCancelled: { BackupCancellation.shared.isCancelled }) })
+        if reachable == .unreachable {
+            Console.warn("could not check '\(dest.name)' — the destination is not reachable (timeout / transport). NOT a damage verdict: nothing was read, so nothing was judged. The next scheduled slice retries.")
+            destResults.append(RunRecord.Dest(name: dest.name, ok: false, error: "unreachable — the check could not run"))
+            unreachable += 1
+            failures += 1
+            continue
+        }
+
         Console.step("checking structure + re-reading \(subset) of pack data — reads from the repo, can take a while")
-        let result = ResticBackend(destination: dest).checkRepo(readDataSubset: subset)
+        let result = backend.checkRepo(readDataSubset: subset)
         if result.clean {
             Console.success("no errors found — slice \(subset) re-read OK")
             destResults.append(RunRecord.Dest(name: dest.name, ok: true, error: nil))
@@ -152,12 +175,24 @@ func rotatingCheckCommand() {
         exit(0)
     }
     // Unattended failure banner, same gate the drill / backup failure path uses:
-    // fire ONLY when our output is invisible (launchd / piped).
+    // fire ONLY when our output is invisible (launchd / piped). A run that only
+    // failed to REACH its destinations is worded as "could not run", never as a
+    // failed check — the difference is "your backup may be damaged" versus "the
+    // server was away", and an alarm that confuses the two trains you to ignore it.
+    let onlyUnreachable = unreachable == failures
+    let headline = onlyUnreachable
+        ? "baaackaaab \u{2014} integrity check could not run"
+        : "baaackaaab \u{2014} integrity check failed"
+    let detail = onlyUnreachable
+        ? "\(unreachable)/\(dests.count) destination(s) unreachable — nothing was judged; the next slice retries"
+        : "\(failures)/\(dests.count) destination(s) failed slice \(subset) — run `baaackaaab --verify-repo`"
     if isatty(STDERR_FILENO) == 0 {
-        Notifier.notify(title: "baaackaaab \u{2014} integrity check failed",
-                        message: "\(failures)/\(dests.count) destination(s) failed slice \(subset) — run `baaackaaab --verify-repo`",
-                        subtitle: "integrity check")
+        Notifier.notify(title: headline, message: detail, subtitle: "integrity check")
     }
-    Console.error("\(failures)/\(dests.count) destination(s) failed the rotating integrity check (slice \(subset)) — see above")
+    if onlyUnreachable {
+        Console.error("\(unreachable)/\(dests.count) destination(s) were not reachable — the rotating integrity check (slice \(subset)) did not run. This is NOT a damage verdict.")
+    } else {
+        Console.error("\(failures)/\(dests.count) destination(s) failed the rotating integrity check (slice \(subset)) — see above")
+    }
     exit(1)
 }

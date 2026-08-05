@@ -486,4 +486,36 @@ final class ResticIntegrationTests: XCTestCase {
             }
         }
     }
+
+    // MARK: - Unreachable destination (the boot race)
+
+    /// A backend aimed at a port nothing listens on — what the boot race looks
+    /// like from restic's side. Port 1 is reserved and never bound, so the
+    /// connection is refused immediately rather than hanging on the probe's
+    /// 60-second cap; the test stays fast while exercising the real code path.
+    private func makeUnreachableBackend() -> ResticBackend {
+        let dest = Destination(name: "dead", link: "default", order: 0, enabled: true,
+                               repo: .value("rest:http://127.0.0.1:1/nothing-here/"),
+                               password: .value(password))
+        return ResticBackend(destination: dest)
+    }
+
+    /// The link in the chain the unit tests cannot prove: that a real dead
+    /// endpoint actually classifies as `.unreachable`. Everything downstream —
+    /// the retry gate, the check's "not a damage verdict" wording — keys off this
+    /// value, so if restic ever returned something else here the whole boot-race
+    /// handling would silently stop applying.
+    ///
+    /// Costs a full minute by design, and that duration is itself the finding:
+    /// restic does NOT fail fast on a refused connection, it retries the backend
+    /// request internally until `probeTimeout` cuts it off. That is why
+    /// `DestinationWait.worstCaseWindow` counts probe time alongside the backoff,
+    /// and why the retry sequence itself is covered by DestinationWaitTests with
+    /// scripted probes rather than five more real ones here.
+    func testADeadEndpointProbesAsUnreachable() {
+        let started = Date()
+        XCTAssertEqual(makeUnreachableBackend().probe(), .unreachable)
+        XCTAssertLessThan(Date().timeIntervalSince(started), ResticBackend.probeTimeout + 15,
+                          "the probe must stay bounded by its own cap")
+    }
 }

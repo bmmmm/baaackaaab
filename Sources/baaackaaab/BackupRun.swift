@@ -179,36 +179,62 @@ struct BackupRun {
             // still run, so one dead repo never costs you the whole backup. (init refuses
             // to clobber an existing repo, so this is safe to call every run.)
             Console.section("Destinations")
-            for run in runs {
-                if backupDryRun {
-                    // A dry run must write NOTHING, so probe for the repo instead of
-                    // initializing it. restic's typed exit codes let us name the exact
-                    // reason a repo can't be previewed, instead of one catch-all.
-                    switch run.backend.probe() {
-                    case .present:
-                        Console.success("\(run.destination.name): reachable (dry run — not initialized)  \(Credentials.redact(run.backend.repository))")
-                    case .absent:
-                        run.initError = "repository not created yet — run `--check` to create it; a dry run never initializes"
-                        Console.failure("\(run.destination.name): \(run.initError!)")
-                    case .locked:
-                        run.initError = "repository is locked by another restic operation — retry, or clear a stale lock with `--unlock`"
-                        Console.failure("\(run.destination.name): \(run.initError!)")
-                    case .wrongPassword:
-                        run.initError = "repository password is wrong — this destination's stored key cannot decrypt the repo"
-                        Console.failure("\(run.destination.name): \(run.initError!)")
-                    case .unreachable:
-                        run.initError = "repository not reachable (timeout / transport / auth) — run `--check` to diagnose; a dry run never initializes"
-                        Console.failure("\(run.destination.name): \(run.initError!)")
+            // Retried as a whole when NOTHING came up: the login/boot catch-up
+            // fire races Wi-Fi coming up, and that fire is the make-up mechanism
+            // for a slot missed while the Mac was off — giving up on the first
+            // probe there costs a real backup, not just a notification. Narrow by
+            // construction (see DestinationWait): unattended runs only, transient
+            // failures only, and only while no destination at all is reachable.
+            var attemptsMade = 0
+            while true {
+                for run in runs {
+                    run.initError = nil
+                    run.initTransient = false
+                    if backupDryRun {
+                        // A dry run must write NOTHING, so probe for the repo instead of
+                        // initializing it. restic's typed exit codes let us name the exact
+                        // reason a repo can't be previewed, instead of one catch-all.
+                        let probe = run.backend.probe()
+                        run.initTransient = DestinationWait.isTransient(probe)
+                        switch probe {
+                        case .present:
+                            Console.success("\(run.destination.name): reachable (dry run — not initialized)  \(Credentials.redact(run.backend.repository))")
+                        case .absent:
+                            run.initError = "repository not created yet — run `--check` to create it; a dry run never initializes"
+                            Console.failure("\(run.destination.name): \(run.initError!)")
+                        case .locked:
+                            run.initError = "repository is locked by another restic operation — retry, or clear a stale lock with `--unlock`"
+                            Console.failure("\(run.destination.name): \(run.initError!)")
+                        case .wrongPassword:
+                            run.initError = "repository password is wrong — this destination's stored key cannot decrypt the repo"
+                            Console.failure("\(run.destination.name): \(run.initError!)")
+                        case .unreachable:
+                            run.initError = "repository not reachable (timeout / transport / auth) — run `--check` to diagnose; a dry run never initializes"
+                            Console.failure("\(run.destination.name): \(run.initError!)")
+                        }
+                        continue
                     }
-                    continue
+                    do {
+                        try run.backend.ensureInitialized()
+                        Console.success("\(run.destination.name): ready  \(Credentials.redact(run.backend.repository))")
+                    } catch {
+                        run.initError = "\(error)"
+                        run.initTransient = DestinationWait.isTransient(error)
+                        Console.failure("\(run.destination.name): unavailable — \(error)")
+                    }
                 }
-                do {
-                    try run.backend.ensureInitialized()
-                    Console.success("\(run.destination.name): ready  \(Credentials.redact(run.backend.repository))")
-                } catch {
-                    run.initError = "\(error)"
-                    Console.failure("\(run.destination.name): unavailable — \(error)")
-                }
+                attemptsMade += 1
+
+                // A cancel during init is handled below as cancellation, not as a
+                // reason to sit through the backoff.
+                if BackupCancellation.shared.isCancelled { break }
+                if runs.contains(where: { $0.ready }) { break }
+                guard let delay = DestinationWait.delayBeforeRetry(
+                        attemptsMade: attemptsMade,
+                        unattended: isatty(STDERR_FILENO) == 0,
+                        allTransient: runs.allSatisfy { $0.initTransient }) else { break }
+                Console.warn(DestinationWait.retryNotice(attemptsMade: attemptsMade, delay: delay))
+                if !DestinationWait.waitCancellable(delay, isCancelled: { BackupCancellation.shared.isCancelled }) { break }
             }
             // Cancelled during init (the interrupt makes a destination's init fail) — take
             // that as cancellation, not as "no destination could be initialized", so we

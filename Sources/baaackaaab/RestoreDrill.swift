@@ -148,6 +148,20 @@ func restoreDrillCommand() {
     guard dest.passwordAvailable else { Console.error(noPasswordNote(for: dest.name)); exit(1) }
     let backend = ResticBackend(destination: dest)
 
+    // Reachability first, with the unattended backoff: this job carries RunAtLoad
+    // + --catch-up like the backup timer, so its login/boot fire can land before
+    // Wi-Fi is up. Without the wait a monthly drill that raced the network was
+    // simply skipped — and being monthly, the next attempt is four weeks out.
+    let reachable = DestinationWait.awaitReachable(
+        probe: { backend.probe() },
+        unattended: isatty(STDERR_FILENO) == 0,
+        isCancelled: { BackupCancellation.shared.isCancelled },
+        sleep: { DestinationWait.waitCancellable($0, isCancelled: { BackupCancellation.shared.isCancelled }) })
+    if reachable == .unreachable {
+        Console.error("destination '\(dest.name)' is not reachable (timeout / transport) — the drill did not run. Nothing was restored and nothing was judged; run `baaackaaab --check` to diagnose the destination.")
+        exit(1)
+    }
+
     // Rotating sample: one drive folder + one photo batch, advancing across runs.
     let snaps: [ResticBackend.Snapshot]
     do { snaps = try backend.listSnapshots() }
