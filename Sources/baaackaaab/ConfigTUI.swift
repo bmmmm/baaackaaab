@@ -37,6 +37,14 @@ enum Screen { case home, editor, restore, fileBrowser, timer, runs }
 /// only for a monthly job (the restore drill); the others use the weekday keys.
 enum TimerField { case hour, minute, day }
 
+/// The schedules screen's vi-style split: Normal navigates the up/down job
+/// list (arrows select, nothing else moves), Edit changes the selected job's
+/// fields (left/right field, up/down value). Keeping "which job" and "what
+/// value" on separate modes means the arrow keys never do two different
+/// things depending on where you happen to be — the ambiguity that made the
+/// screen confusing before.
+enum TimerMode { case normal, edit }
+
 /// One job's probed schedule state, cached for the home dashboard.
 struct ScheduleRowState {
     let kind: LaunchdTimer.Kind
@@ -149,10 +157,7 @@ final class ConfigTUI {
     var timerField: TimerField = .hour  // which field up/down adjusts
     var timerState: (installed: Bool, loaded: Bool) = (false, false)
     var timerCurrent: Schedule?
-    // Guards against the very natural instinct to explore a freshly-entered (or
-    // freshly-switched-to) job with the arrow keys: the first up/down press is
-    // swallowed to "arm" adjustment rather than silently bumping the time.
-    var timerArmed = false
+    var timerMode: TimerMode = .normal
     // Set the moment any field diverges from what loadTimerFields() last loaded
     // (i.e. what's actually installed). Drives the leave-confirmation and the
     // "unapplied edit" note — install (i) or discard (d) clear it again.

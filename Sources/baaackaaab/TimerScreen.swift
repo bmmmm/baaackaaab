@@ -3,27 +3,33 @@ import Foundation
 // The command center's Schedules screen, split out of CommandCenter.swift to match
 // the per-screen file convention the Restore browser already follows.
 //
-// It edits all three scheduled jobs — backup, integrity check, restore drill — one
-// at a time: tab cycles the job, the fields below reflect whatever that job's
-// installed plist says, and i / u install (or rewrite) and remove it. o pauses or
-// resumes the job without touching its configured schedule (on/off, distinct from
-// i/u which write or delete it). Every write goes through the tested CLI flags
-// rather than a second plist writer here, so the TUI and `--install-*-timer` can
-// never drift apart.
+// It edits all three scheduled jobs — backup, integrity check, restore drill —
+// through a vi-style split (TimerMode): Normal mode's up/down arrows walk the
+// job list and nothing else moves; `e` drops into Edit mode for the selected
+// job, where left/right pick a field and up/down change its value. Keeping
+// "which job" and "what value" on separate modes means the arrow keys never
+// do two different things depending on where you happen to be — landing on
+// the screen and reaching for the arrows can no longer silently bump a real
+// schedule, because Normal mode's arrows don't touch values at all.
 //
-// Two safety nets sit on top of that: the first ↑/↓ press after landing on the
-// screen (or switching jobs) only "arms" adjustment instead of applying it — the
-// natural first move of poking around with the arrow keys can't silently bump a
-// real schedule. And any edit that hasn't been installed yet (d discards it) is
-// tracked, so leaving the screen with one pending prompts install-or-discard
-// instead of quietly throwing it away.
+// i / u install (or rewrite) and remove a job; o pauses or resumes it without
+// touching its configured schedule (on/off, distinct from i/u which write or
+// delete it). Every write goes through the tested CLI flags rather than a
+// second plist writer here, so the TUI and `--install-*-timer` can never
+// drift apart.
+//
+// An edit not yet installed is tracked (the yellow "unapplied edit" note) and
+// confirmed — install or discard — before it would otherwise be silently
+// thrown away by leaving Edit mode, switching jobs, or quitting; d discards
+// it immediately, no prompt needed, from either mode.
 extension ConfigTUI {
     // MARK: - Schedules screen
 
-    /// Open the schedules editor on the backup job, with its fields pre-filled from
-    /// whatever is installed.
+    /// Open the schedules editor on the backup job, in Normal mode, with its
+    /// fields pre-filled from whatever is installed.
     func enterTimer() {
         timerKind = .backup
+        timerMode = .normal
         loadTimerFields()
         screen = .timer
     }
@@ -51,20 +57,20 @@ extension ConfigTUI {
             if let d = s.dayOfMonth { timerDayOfMonth = d }
         }
         if timerField == .day && !timerKind.isMonthly { timerField = .hour }
-        // Fields now mirror what's on disk, so there is nothing pending — and
-        // any arrow-key press from before this (re)load must not carry over.
+        // Fields now mirror what's on disk, so there is nothing pending.
         timerTouched = false
-        timerArmed = false
     }
 
-    /// Move to the next job in the cycle and reload the editor from its plist.
-    /// Guarded like leaving the screen: an unapplied edit on the CURRENT job
-    /// would otherwise be silently thrown away by the reload.
-    func cycleTimerKind() {
+    /// Normal-mode list navigation: move the highlighted job by `delta` (±1,
+    /// wrapping) and reload the editor from its plist. Guarded like leaving
+    /// the screen — normally nothing is pending here (an Edit-mode edit is
+    /// always resolved, one way or another, before Edit mode is left), but
+    /// the check is a free safety net either way.
+    func selectTimerJob(by delta: Int) {
         guard confirmDiscardTimerEdits() else { return }
         let all = LaunchdTimer.Kind.allCases
         let i = all.firstIndex(of: timerKind) ?? 0
-        timerKind = all[(i + 1) % all.count]
+        timerKind = all[((i + delta) % all.count + all.count) % all.count]
         loadTimerFields()
     }
 
@@ -83,11 +89,18 @@ extension ConfigTUI {
         var lines: [String] = []
         lines.append(bold(fit("baaackaaab \u{2014} schedules", cols)))
         lines.append(cyan(fit("what runs unattended, and when", cols)))
+        // The vi-style mode indicator: bold green + the job name while editing
+        // (this is where the arrow keys change real values), muted cyan
+        // otherwise (arrow keys are just moving the selection).
+        switch timerMode {
+        case .normal: lines.append(cyan(fit("-- NORMAL --", cols)))
+        case .edit:   lines.append(bold(green(fit("-- EDIT: \(timerKind.title) --", cols))))
+        }
         lines.append("")
 
         let helpLines = wrapHelp(timerHelpLine(), cols)
         let footerH = 2 + helpLines.count
-        let contentH = max(1, rows - 3 - footerH)
+        let contentH = max(1, rows - 4 - footerH)
 
         var body: [String] = []
 
@@ -110,7 +123,8 @@ extension ConfigTUI {
         }
         body.append("")
 
-        body.append(divider("edit \(timerKind.title)", cols))
+        let sectionTitle = timerMode == .edit ? "editing \(timerKind.title)" : "\(timerKind.title) \u{2014} e to edit"
+        body.append(divider(sectionTitle, cols))
         let hh = String(format: "%02d", timerHour), mm = String(format: "%02d", timerMinute)
         let timeStr = "\(field(hh, .hour)):\(field(mm, .minute))"
         body.append(fit("  time:  \(timeStr)", cols))
@@ -146,22 +160,57 @@ extension ConfigTUI {
         draw(lines)
     }
 
-    /// Bracket a field's value when it has focus, pad it out when it doesn't, so
+    /// Bracket a field's value when Edit mode has it focused, pad it out
+    /// otherwise (including all of Normal mode, where nothing is focused), so
     /// the row keeps its width as focus moves.
     func field(_ value: String, _ which: TimerField) -> String {
-        timerField == which ? "[\(value)]" : " \(value) "
+        (timerMode == .edit && timerField == which) ? "[\(value)]" : " \(value) "
     }
 
     func timerHelpLine() -> String {
-        let dayKeys = timerKind.isMonthly ? "" : " \u{2022} 1-7 weekday \u{2022} 0 every day"
-        return "tab job \u{2022} \u{2191}/\u{2193} adjust (1st press arms) \u{2022} \u{2190}/\u{2192} field\(dayKeys) \u{2022} i install \u{2022} o on/off \u{2022} d discard \u{2022} u delete \u{2022} esc back"
+        switch timerMode {
+        case .normal:
+            return "\u{2191}/\u{2193} select job \u{2022} e edit \u{2022} i install \u{2022} o on/off \u{2022} d discard \u{2022} u delete \u{2022} esc back"
+        case .edit:
+            let dayKeys = timerKind.isMonthly ? "" : " \u{2022} 1-7 weekday \u{2022} 0 every day"
+            return "\u{2190}/\u{2192} field \u{2022} \u{2191}/\u{2193} adjust\(dayKeys) \u{2022} enter save+done \u{2022} i install \u{2022} o on/off \u{2022} d discard \u{2022} u delete \u{2022} esc done"
+        }
     }
 
     func handleTimer(_ key: Key) -> Bool {
+        switch timerMode {
+        case .normal: return handleTimerNormal(key)
+        case .edit:   return handleTimerEdit(key)
+        }
+    }
+
+    /// Normal mode: navigate the job list and issue whole-job commands.
+    /// Nothing here touches a field value — that only happens in Edit mode.
+    func handleTimerNormal(_ key: Key) -> Bool {
         switch key {
-        case .up: armOrAdjust(1)
-        case .down: armOrAdjust(-1)
-        case .tab: cycleTimerKind()
+        case .up: selectTimerJob(by: -1)
+        case .down, .tab: selectTimerJob(by: 1)
+        case .char("e"), .enter, .right: timerMode = .edit
+        case .char("i"): installTimerNow()
+        case .char("o"): toggleTimerOnOff()
+        case .char("d"): discardTimerEdit()
+        case .char("u"): uninstallTimerNow()
+        case .esc, .char("h"): if confirmDiscardTimerEdits() { screen = .home }
+        case .char("q"), .ctrlC: if confirmDiscardTimerEdits() && confirmQuit() { return false }
+        case .eof: return false
+        default: break
+        }
+        return true
+    }
+
+    /// Edit mode: change the selected job's fields. esc/h leaves back to
+    /// Normal — confirmed first if there's an unapplied edit, so a reflex
+    /// esc can't silently discard it. enter is a shortcut that installs AND
+    /// leaves, for "type the value, hit enter, done".
+    func handleTimerEdit(_ key: Key) -> Bool {
+        switch key {
+        case .up: adjustTimer(by: 1)
+        case .down: adjustTimer(by: -1)
         case .left: moveTimerField(by: -1)
         case .right: moveTimerField(by: 1)
         case .char("1"): toggleWeekday(1)
@@ -174,12 +223,10 @@ extension ConfigTUI {
         case .char("0"): clearTimerWeekdays()
         case .char("i"): installTimerNow()
         case .char("o"): toggleTimerOnOff()
-        case .char("d"):
-            let hadEdit = timerTouched
-            loadTimerFields()
-            if hadEdit { statusMsg = "edit discarded" }
+        case .char("d"): discardTimerEdit()
         case .char("u"): uninstallTimerNow()
-        case .esc, .char("h"): if confirmDiscardTimerEdits() { screen = .home }
+        case .enter: installTimerNow(); timerMode = .normal
+        case .esc, .char("h"): if confirmDiscardTimerEdits() { timerMode = .normal }
         case .char("q"), .ctrlC: if confirmDiscardTimerEdits() && confirmQuit() { return false }
         case .eof: return false
         default: break
@@ -197,20 +244,6 @@ extension ConfigTUI {
         let fields = timerFields()
         let i = fields.firstIndex(of: timerField) ?? 0
         timerField = fields[((i + delta) % fields.count + fields.count) % fields.count]
-    }
-
-    /// The first ↑/↓ press after entering the screen or switching jobs only
-    /// arms adjustment (a status-line hint, nothing else); the SAME direction
-    /// or the opposite one both count, since the point is just "you've now
-    /// deliberately touched the arrow keys here." Every press after that
-    /// adjusts normally.
-    func armOrAdjust(_ delta: Int) {
-        guard timerArmed else {
-            timerArmed = true
-            statusMsg = "\u{2191}/\u{2193} armed \u{2014} press again to change the value"
-            return
-        }
-        adjustTimer(by: delta)
     }
 
     /// Adjust the focused field: minute by 5 (wrapping 0–59), hour by 1 (wrapping
@@ -280,10 +313,20 @@ extension ConfigTUI {
         if code == 0 { statusMsg = "\(timerKind.title): " + (timerState.loaded ? "on" : "off") }
     }
 
-    /// Leaving the editor (esc, switching jobs, or quitting) while an edit
-    /// hasn't been installed would otherwise silently throw it away. Mirrors
-    /// confirmQuit()'s shape: install-or-discard, cancel by default. Returns
-    /// true when it's fine to proceed (nothing pending, installed, or discarded).
+    /// Immediately revert the fields to what's installed on disk — no prompt,
+    /// available from either mode. The explicit "abbrechen" a leave-confirm
+    /// prompt also offers, without needing to trigger one first.
+    func discardTimerEdit() {
+        let hadEdit = timerTouched
+        loadTimerFields()
+        if hadEdit { statusMsg = "edit discarded" }
+    }
+
+    /// Leaving an unapplied edit behind — via Edit mode's esc/h, switching
+    /// jobs, or quitting — would otherwise silently throw it away. Mirrors
+    /// confirmQuit()'s shape: install-or-discard, cancel (stay) by default.
+    /// Returns true when it's fine to proceed (nothing pending, installed, or
+    /// discarded).
     func confirmDiscardTimerEdits() -> Bool {
         guard timerTouched else { return true }
         drawPrompt("unapplied schedule edit \u{2014} i: install & continue   d: discard & continue   esc/enter: stay")
