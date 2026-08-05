@@ -42,6 +42,7 @@ struct ScheduleRowState {
     let kind: LaunchdTimer.Kind
     let installed: Bool
     let loaded: Bool
+    let paused: Bool
     let schedule: Schedule?
 }
 
@@ -148,6 +149,14 @@ final class ConfigTUI {
     var timerField: TimerField = .hour  // which field up/down adjusts
     var timerState: (installed: Bool, loaded: Bool) = (false, false)
     var timerCurrent: Schedule?
+    // Guards against the very natural instinct to explore a freshly-entered (or
+    // freshly-switched-to) job with the arrow keys: the first up/down press is
+    // swallowed to "arm" adjustment rather than silently bumping the time.
+    var timerArmed = false
+    // Set the moment any field diverges from what loadTimerFields() last loaded
+    // (i.e. what's actually installed). Drives the leave-confirmation and the
+    // "unapplied edit" note — install (i) or discard (d) clear it again.
+    var timerTouched = false
 
     // The home dashboard's schedules section, cached like the run history: probing
     // all three jobs spawns launchctl per job, so it is read once and dropped after

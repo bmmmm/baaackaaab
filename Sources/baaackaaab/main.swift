@@ -282,6 +282,15 @@ if cli.has("--timer-status") {
     LaunchdTimer.status()
     exit(0)
 }
+// Pause/resume: unload (or reload) the same plist without writing or deleting
+// it — the "off" half of on/off, distinct from install/uninstall above.
+if cli.has("--pause-timer") {
+    LaunchdTimer.pauseTimer(); exit(0)
+}
+if cli.has("--resume-timer") {
+    do { try LaunchdTimer.resumeTimer(); exit(0) }
+    catch { Console.error("\(error)"); exit(1) }
+}
 
 // Monthly restore-drill launchd timer. Installs/removes a per-user LaunchAgent
 // that runs `baaackaaab --restore-drill` on the configured day-of-month. Separate
@@ -292,6 +301,13 @@ if cli.has("--install-drill-timer") {
 }
 if cli.has("--uninstall-drill-timer") {
     do { try LaunchdTimer.uninstallDrill(); exit(0) }
+    catch { Console.error("\(error)"); exit(1) }
+}
+if cli.has("--pause-drill-timer") {
+    LaunchdTimer.pauseDrillTimer(); exit(0)
+}
+if cli.has("--resume-drill-timer") {
+    do { try LaunchdTimer.resumeDrillTimer(); exit(0) }
     catch { Console.error("\(error)"); exit(1) }
 }
 
@@ -305,6 +321,13 @@ if cli.has("--install-check-timer") {
 }
 if cli.has("--uninstall-check-timer") {
     do { try LaunchdTimer.uninstallCheck(); exit(0) }
+    catch { Console.error("\(error)"); exit(1) }
+}
+if cli.has("--pause-check-timer") {
+    LaunchdTimer.pauseCheckTimer(); exit(0)
+}
+if cli.has("--resume-check-timer") {
+    do { try LaunchdTimer.resumeCheckTimer(); exit(0) }
     catch { Console.error("\(error)"); exit(1) }
 }
 

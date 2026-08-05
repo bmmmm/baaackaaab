@@ -5,11 +5,14 @@ import Darwin
 
 enum TimerError: Error, CustomStringConvertible {
     case launchctl(Int32)
+    case notInstalled(String)
 
     var description: String {
         switch self {
         case .launchctl(let code):
             return "launchctl failed (code \(code)) — inspect `launchctl print gui/$(id -u)/\(LaunchdTimer.label)`"
+        case .notInstalled(let humanName):
+            return "no \(humanName) plist found — nothing to resume; install it first"
         }
     }
 }
@@ -158,6 +161,25 @@ enum LaunchdTimer {
             }
         }
 
+        /// Unload the job but keep its plist — the "off" half of on/off, distinct
+        /// from `uninstallFlag`, which deletes the schedule outright.
+        var pauseFlag: String {
+            switch self {
+            case .backup: return "--pause-timer"
+            case .check:  return "--pause-check-timer"
+            case .drill:  return "--pause-drill-timer"
+            }
+        }
+
+        /// Reload the same plist `pauseFlag` unloaded — the "on" half of on/off.
+        var resumeFlag: String {
+            switch self {
+            case .backup: return "--resume-timer"
+            case .check:  return "--resume-check-timer"
+            case .drill:  return "--resume-drill-timer"
+            }
+        }
+
         /// The drill fires on a day-of-month (launchd's `Day`); the other two on a
         /// weekday list (`Weekday`, empty = daily). Drives which field the editor
         /// offers — a weekday set on a monthly schedule would be silently ignored.
@@ -183,6 +205,19 @@ enum LaunchdTimer {
     /// Whether one job's plist is on disk and whether launchd has it loaded.
     /// Spawns launchctl — call it on refresh, never per render.
     static func state(_ kind: Kind) -> (installed: Bool, loaded: Bool) { stateOf(label: kind.label) }
+
+    /// Whether a job was explicitly paused (unloaded on purpose, plist kept) —
+    /// separate from `loaded`, which is also false when a job fails to load for
+    /// an unrelated reason. A plain marker file next to the credential store
+    /// (so BAAACKAAAB_SUPPORT_DIR-isolated tests never touch the real one), read
+    /// directly off disk with no launchctl spawn.
+    static func isPaused(_ kind: Kind) -> Bool {
+        FileManager.default.fileExists(atPath: pausedMarkerURL(for: kind.label).path)
+    }
+
+    private static func pausedMarkerURL(for label: String) -> URL {
+        CredentialFiles.dir.appendingPathComponent("\(label).paused")
+    }
 
     private static var home: URL { FileManager.default.homeDirectoryForCurrentUser }
     private static func plistURL(for label: String) -> URL {
@@ -310,6 +345,10 @@ enum LaunchdTimer {
             let legacy = launchctl(["load", "-w", plist.path])
             if legacy != 0 { throw TimerError.launchctl(legacy) }
         }
+        // A fresh install/rewrite always ends up loaded, so any leftover pause
+        // marker from before would now contradict reality (dashboard reading
+        // "off" for a job that just came back up).
+        try? FileManager.default.removeItem(at: pausedMarkerURL(for: label))
         return plist
     }
 
@@ -334,12 +373,75 @@ enum LaunchdTimer {
     private static func uninstall(label: String, humanName: String) throws {
         _ = launchctl(["bootout", "\(domain)/\(label)"])
         let plist = plistURL(for: label)
+        try? FileManager.default.removeItem(at: pausedMarkerURL(for: label))
         if FileManager.default.fileExists(atPath: plist.path) {
             try FileManager.default.removeItem(at: plist)
             Console.success("\(humanName) removed (\(plist.path))")
         } else {
             Console.note("no \(humanName) plist found — nothing to remove")
         }
+    }
+
+    // MARK: - Pause / resume (on/off)
+
+    /// Unload the backup job WITHOUT deleting its plist — the "off" half of
+    /// on/off. The configured schedule stays on disk; `resumeTimer` reloads the
+    /// identical file. Idempotent — pausing an already-unloaded job is harmless.
+    static func pauseTimer() {
+        Console.banner("baaackaaab", tagline: "scheduled backup")
+        pause(label: label, humanName: "timer", resumeFlag: Kind.backup.resumeFlag)
+    }
+    static func pauseDrillTimer() {
+        Console.banner("baaackaaab", tagline: "scheduled restore drill")
+        pause(label: drillLabel, humanName: "restore-drill timer", resumeFlag: Kind.drill.resumeFlag)
+    }
+    static func pauseCheckTimer() {
+        Console.banner("baaackaaab", tagline: "scheduled integrity check")
+        pause(label: checkLabel, humanName: "integrity-check timer", resumeFlag: Kind.check.resumeFlag)
+    }
+
+    /// Reload the backup job's plist unchanged — the "on" half of on/off.
+    /// Throws when nothing was ever installed (no plist on disk to load).
+    static func resumeTimer() throws {
+        Console.banner("baaackaaab", tagline: "scheduled backup")
+        try resume(label: label, humanName: "timer")
+    }
+    static func resumeDrillTimer() throws {
+        Console.banner("baaackaaab", tagline: "scheduled restore drill")
+        try resume(label: drillLabel, humanName: "restore-drill timer")
+    }
+    static func resumeCheckTimer() throws {
+        Console.banner("baaackaaab", tagline: "scheduled integrity check")
+        try resume(label: checkLabel, humanName: "integrity-check timer")
+    }
+
+    private static func pause(label: String, humanName: String, resumeFlag: String) {
+        let plist = plistURL(for: label)
+        guard FileManager.default.fileExists(atPath: plist.path) else {
+            Console.note("no \(humanName) plist found — nothing to pause")
+            return
+        }
+        _ = launchctl(["bootout", "\(domain)/\(label)"])
+        try? ensureDir(CredentialFiles.dir)
+        FileManager.default.createFile(atPath: pausedMarkerURL(for: label).path, contents: nil)
+        Console.success("\(humanName) paused — schedule kept on disk, will not fire until resumed")
+        Console.note("resume: baaackaaab \(resumeFlag)")
+    }
+
+    private static func resume(label: String, humanName: String) throws {
+        let plist = plistURL(for: label)
+        guard FileManager.default.fileExists(atPath: plist.path) else {
+            throw TimerError.notInstalled(humanName)
+        }
+        _ = launchctl(["bootout", "\(domain)/\(label)"])
+        if launchctl(["bootstrap", domain, plist.path]) != 0 {
+            _ = launchctl(["unload", plist.path])
+            let legacy = launchctl(["load", "-w", plist.path])
+            if legacy != 0 { throw TimerError.launchctl(legacy) }
+        }
+        try? FileManager.default.removeItem(at: pausedMarkerURL(for: label))
+        Console.success("\(humanName) resumed")
+        Console.note("verify: launchctl print \(domain)/\(label)")
     }
 
     /// Show whether the plist is present and what launchd knows about the job.

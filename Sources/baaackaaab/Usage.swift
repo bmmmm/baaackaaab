@@ -137,14 +137,21 @@ func printUsage() {
         ("--at <HH:MM>", "time of day (repeatable for several runs/day; default 12:00)"),
         ("--days <list>", "restrict to weekdays, e.g. mon,wed,fri (default: every day)"),
         ("--uninstall-timer", "remove the LaunchAgent, then exit"),
+        ("--pause-timer", "unload the LaunchAgent WITHOUT deleting it — the schedule stays, it just won't fire, then exit"),
+        ("--resume-timer", "reload the plist a --pause-timer unloaded, unchanged, then exit"),
         ("--timer-status", "show whether the timer is installed + loaded, then exit"),
         ("--install-drill-timer", "install a LaunchAgent that runs a MONTHLY restore drill, then exit"),
         ("--day <n>", "with --install-drill-timer, day-of-month 1…28 (default 1; --at sets the time, default 03:00)"),
         ("--uninstall-drill-timer", "remove the restore-drill LaunchAgent, then exit"),
+        ("--pause-drill-timer", "unload the restore-drill LaunchAgent WITHOUT deleting it, then exit"),
+        ("--resume-drill-timer", "reload the plist a --pause-drill-timer unloaded, unchanged, then exit"),
         ("--install-check-timer", "install a LaunchAgent that runs a rotating integrity check (--at / --days, like the backup timer), then exit"),
         ("--uninstall-check-timer", "remove the integrity-check LaunchAgent, then exit"),
+        ("--pause-check-timer", "unload the integrity-check LaunchAgent WITHOUT deleting it, then exit"),
+        ("--resume-check-timer", "reload the plist a --pause-check-timer unloaded, unchanged, then exit"),
     ])
     Console.note("The timer runs `baaackaaab --run-tag scheduled` (backs up the set). restic reads the credential files directly, so the unattended run needs no Keychain prompt — only a one-time Photos grant (`make release` + one manual backup, so a stable signature keeps the TCC grant across rebuilds).")
+    Console.note("Pause/resume toggles a job off and on without touching its configured schedule — for uninstall use --uninstall-*-timer instead, which deletes it.")
     Console.note("The backup timer also runs at login/boot (RunAtLoad) with a --catch-up marker: that run backs up only if the last successful backup is older than the schedule's interval (catching up a slot missed while the Mac was off), and exits quietly otherwise. Existing installs pick this up on the next --install-timer.")
     Console.note("The monthly restore-drill timer runs `baaackaaab --restore-drill`: it restore-verifies a rotating sample into a temp dir (read-only on the store), records the result in the run history, and posts a banner ONLY on failure. The command center shows the last verified restore; --doctor reports it too.")
     Console.note("The integrity-check timer runs `baaackaaab --verify-repo --rotate-read-data`: each run re-hashes the next rotating 1/8 of the pack data with `restic check` (read-only), records it, and banners only on failure — after 8 runs every pack has been re-read once (on-disk bit-rot detection the restore drill can't be). The command center and --doctor show the last check + slice position.")

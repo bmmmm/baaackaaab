@@ -255,6 +255,7 @@ extension ConfigTUI {
         let rows = LaunchdTimer.Kind.allCases.map { kind -> ScheduleRowState in
             let st = LaunchdTimer.state(kind)
             return ScheduleRowState(kind: kind, installed: st.installed, loaded: st.loaded,
+                                    paused: LaunchdTimer.isPaused(kind),
                                     schedule: LaunchdTimer.installedSchedule(kind))
         }
         scheduleRows = rows
@@ -273,14 +274,16 @@ extension ConfigTUI {
 
     /// One scheduled job on the dashboard: cadence + next fire time when it is
     /// healthy, yellow when a plist is present but launchd never loaded it (looks
-    /// scheduled, never fires), dim when the job is not scheduled at all.
+    /// scheduled, never fires), dim-paused when the operator turned it off on
+    /// purpose (o), dim when the job is not scheduled at all.
     func homeScheduleLine(_ row: ScheduleRowState, _ cols: Int) -> String {
         let (level, text) = ScheduleDashboard.row(kind: row.kind, installed: row.installed,
-                                                  loaded: row.loaded, schedule: row.schedule,
-                                                  now: Date())
+                                                  loaded: row.loaded, paused: row.paused,
+                                                  schedule: row.schedule, now: Date())
         switch level {
         case .ok:     return dim(fit("  \u{2713} " + text, cols))
         case .none:   return dim(fit("    " + text + " \u{2014} press t to schedule it", cols))
+        case .off:    return dim(fit("  \u{23F8} " + text, cols))
         case .broken: return yellow(fit("  ! " + text, cols))
         }
     }
@@ -351,7 +354,7 @@ extension ConfigTUI {
             ("r", "refresh remote status"),
             ("u", "check restic / server updates (contacts GitHub)"),
             ("R", "open restore browser"),
-            ("t", "schedules: see / change / delete the backup, check + drill timers"),
+            ("t", "schedules: see / change / pause / delete the backup, check + drill timers"),
             ("H", "runs: coverage calendar, full history + why a run failed"),
             ("esc / ?", "close this help"),
             ("q", "quit"),

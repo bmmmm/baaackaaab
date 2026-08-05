@@ -5,9 +5,18 @@ import Foundation
 //
 // It edits all three scheduled jobs — backup, integrity check, restore drill — one
 // at a time: tab cycles the job, the fields below reflect whatever that job's
-// installed plist says, and i / u install (or rewrite) and remove it. Every write
-// goes through the tested CLI flags rather than a second plist writer here, so the
-// TUI and `--install-*-timer` can never drift apart.
+// installed plist says, and i / u install (or rewrite) and remove it. o pauses or
+// resumes the job without touching its configured schedule (on/off, distinct from
+// i/u which write or delete it). Every write goes through the tested CLI flags
+// rather than a second plist writer here, so the TUI and `--install-*-timer` can
+// never drift apart.
+//
+// Two safety nets sit on top of that: the first ↑/↓ press after landing on the
+// screen (or switching jobs) only "arms" adjustment instead of applying it — the
+// natural first move of poking around with the arrow keys can't silently bump a
+// real schedule. And any edit that hasn't been installed yet (d discards it) is
+// tracked, so leaving the screen with one pending prompts install-or-discard
+// instead of quietly throwing it away.
 extension ConfigTUI {
     // MARK: - Schedules screen
 
@@ -42,10 +51,17 @@ extension ConfigTUI {
             if let d = s.dayOfMonth { timerDayOfMonth = d }
         }
         if timerField == .day && !timerKind.isMonthly { timerField = .hour }
+        // Fields now mirror what's on disk, so there is nothing pending — and
+        // any arrow-key press from before this (re)load must not carry over.
+        timerTouched = false
+        timerArmed = false
     }
 
     /// Move to the next job in the cycle and reload the editor from its plist.
+    /// Guarded like leaving the screen: an unapplied edit on the CURRENT job
+    /// would otherwise be silently thrown away by the reload.
     func cycleTimerKind() {
+        guard confirmDiscardTimerEdits() else { return }
         let all = LaunchdTimer.Kind.allCases
         let i = all.firstIndex(of: timerKind) ?? 0
         timerKind = all[(i + 1) % all.count]
@@ -81,13 +97,14 @@ extension ConfigTUI {
         for row in loadScheduleRows() {
             let selected = row.kind == timerKind
             let (level, text) = ScheduleDashboard.row(kind: row.kind, installed: row.installed,
-                                                      loaded: row.loaded, schedule: row.schedule,
-                                                      now: Date())
+                                                      loaded: row.loaded, paused: row.paused,
+                                                      schedule: row.schedule, now: Date())
             let marker = selected ? "\u{25B8} " : "  "
             let line = fit(marker + text, cols)
             switch level {
             case .ok:     body.append(selected ? green(line) : dim(line))
             case .none:   body.append(dim(line))
+            case .off:    body.append(selected ? cyan(line) : dim(line))
             case .broken: body.append(yellow(line))
             }
         }
@@ -116,6 +133,9 @@ extension ConfigTUI {
             body.append(dim(fit("  first run:  " + timerStampFmt.string(from: next)
                                 + " (" + ScheduleDashboard.countdown(from: Date(), to: next) + ")", cols)))
         }
+        if timerTouched {
+            body.append(yellow(fit("  unapplied edit \u{2014} i installs it, d discards it", cols)))
+        }
 
         if body.count < contentH { body += Array(repeating: "", count: contentH - body.count) }
         lines += clipBody(body, to: contentH, cols: cols)
@@ -134,13 +154,13 @@ extension ConfigTUI {
 
     func timerHelpLine() -> String {
         let dayKeys = timerKind.isMonthly ? "" : " \u{2022} 1-7 weekday \u{2022} 0 every day"
-        return "tab job \u{2022} \u{2191}/\u{2193} adjust \u{2022} \u{2190}/\u{2192} field\(dayKeys) \u{2022} i install/change \u{2022} u delete \u{2022} esc back"
+        return "tab job \u{2022} \u{2191}/\u{2193} adjust (1st press arms) \u{2022} \u{2190}/\u{2192} field\(dayKeys) \u{2022} i install \u{2022} o on/off \u{2022} d discard \u{2022} u delete \u{2022} esc back"
     }
 
     func handleTimer(_ key: Key) -> Bool {
         switch key {
-        case .up: adjustTimer(by: 1)
-        case .down: adjustTimer(by: -1)
+        case .up: armOrAdjust(1)
+        case .down: armOrAdjust(-1)
         case .tab: cycleTimerKind()
         case .left: moveTimerField(by: -1)
         case .right: moveTimerField(by: 1)
@@ -151,11 +171,16 @@ extension ConfigTUI {
         case .char("5"): toggleWeekday(5)
         case .char("6"): toggleWeekday(6)
         case .char("7"): toggleWeekday(0)   // 7 = Sunday (launchd weekday 0)
-        case .char("0"): if !timerKind.isMonthly { timerWeekdays.removeAll() }
+        case .char("0"): clearTimerWeekdays()
         case .char("i"): installTimerNow()
+        case .char("o"): toggleTimerOnOff()
+        case .char("d"):
+            let hadEdit = timerTouched
+            loadTimerFields()
+            if hadEdit { statusMsg = "edit discarded" }
         case .char("u"): uninstallTimerNow()
-        case .esc, .char("h"): screen = .home
-        case .char("q"), .ctrlC: if confirmQuit() { return false }
+        case .esc, .char("h"): if confirmDiscardTimerEdits() { screen = .home }
+        case .char("q"), .ctrlC: if confirmDiscardTimerEdits() && confirmQuit() { return false }
         case .eof: return false
         default: break
         }
@@ -174,6 +199,20 @@ extension ConfigTUI {
         timerField = fields[((i + delta) % fields.count + fields.count) % fields.count]
     }
 
+    /// The first ↑/↓ press after entering the screen or switching jobs only
+    /// arms adjustment (a status-line hint, nothing else); the SAME direction
+    /// or the opposite one both count, since the point is just "you've now
+    /// deliberately touched the arrow keys here." Every press after that
+    /// adjusts normally.
+    func armOrAdjust(_ delta: Int) {
+        guard timerArmed else {
+            timerArmed = true
+            statusMsg = "\u{2191}/\u{2193} armed \u{2014} press again to change the value"
+            return
+        }
+        adjustTimer(by: delta)
+    }
+
     /// Adjust the focused field: minute by 5 (wrapping 0–59), hour by 1 (wrapping
     /// 0–23), day-of-month by 1 (wrapping 1–28, the cap that makes a monthly job
     /// fire in February too). Five-minute steps are plenty for a daily backup.
@@ -183,17 +222,28 @@ extension ConfigTUI {
         case .hour:   timerHour = ((timerHour + delta) % 24 + 24) % 24
         case .day:    timerDayOfMonth = ((timerDayOfMonth - 1 + delta) % 28 + 28) % 28 + 1
         }
+        timerTouched = true
     }
 
     func toggleWeekday(_ wd: Int) {
         guard !timerKind.isMonthly else { return }
         if timerWeekdays.contains(wd) { timerWeekdays.remove(wd) } else { timerWeekdays.insert(wd) }
+        timerTouched = true
+    }
+
+    func clearTimerWeekdays() {
+        guard !timerKind.isMonthly, !timerWeekdays.isEmpty else { return }
+        timerWeekdays.removeAll()
+        timerTouched = true
     }
 
     /// Install the edited schedule by shelling out to the tested CLI (writes the
     /// plist + bootstraps launchd), then refresh the cached state. Installing over
-    /// an existing job rewrites it, so this is also the "change it" path.
-    func installTimerNow() {
+    /// an existing job rewrites it, so this is also the "change it" path. Returns
+    /// the child's exit code so callers (e.g. the leave-confirmation prompt) can
+    /// tell whether the install actually landed.
+    @discardableResult
+    func installTimerNow() -> Int32 {
         var args = [timerKind.installFlag, "--at", String(format: "%02d:%02d", timerHour, timerMinute)]
         if timerKind.isMonthly {
             args += ["--day", String(timerDayOfMonth)]
@@ -209,8 +259,46 @@ extension ConfigTUI {
         let code = runChildAndWait(args, label: "install \(timerKind.title) schedule")
         invalidateScheduleRows()
         refreshTimerState()
-        if code == 0 { statusMsg = "\(timerKind.title): " + previewSchedule().describe() }
+        if code == 0 {
+            statusMsg = "\(timerKind.title): " + previewSchedule().describe()
+            timerTouched = false
+        }
         // on failure runChildAndWait already set an actionable "exited with code N"
+        return code
+    }
+
+    /// Flip the selected job between on (loaded) and off (paused, plist kept) —
+    /// distinct from i/u, which write or delete the schedule itself. A no-op
+    /// when nothing is installed yet, since there is nothing to pause.
+    func toggleTimerOnOff() {
+        guard timerState.installed else { statusMsg = "nothing installed yet \u{2014} press i first"; return }
+        let pausing = timerState.loaded
+        let flag = pausing ? timerKind.pauseFlag : timerKind.resumeFlag
+        let code = runChildAndWait([flag], label: "\(pausing ? "pause" : "resume") \(timerKind.title) schedule")
+        invalidateScheduleRows()
+        refreshTimerState()
+        if code == 0 { statusMsg = "\(timerKind.title): " + (timerState.loaded ? "on" : "off") }
+    }
+
+    /// Leaving the editor (esc, switching jobs, or quitting) while an edit
+    /// hasn't been installed would otherwise silently throw it away. Mirrors
+    /// confirmQuit()'s shape: install-or-discard, cancel by default. Returns
+    /// true when it's fine to proceed (nothing pending, installed, or discarded).
+    func confirmDiscardTimerEdits() -> Bool {
+        guard timerTouched else { return true }
+        drawPrompt("unapplied schedule edit \u{2014} i: install & continue   d: discard & continue   esc/enter: stay")
+        while true {
+            switch readKey() {
+            case .char("i"), .char("I"):
+                return installTimerNow() == 0
+            case .char("d"), .char("D"):
+                loadTimerFields()
+                return true
+            case .enter, .esc, .ctrlC: return false
+            case .eof: return true
+            default: break
+            }
+        }
     }
 
     /// Remove the selected job's launchd schedule via the tested CLI, then refresh

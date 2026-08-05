@@ -174,7 +174,9 @@ func doctorCommand() {
 
     Console.section("Scheduled timer")
     let timer = LaunchdTimer.state()
-    if timer.installed && timer.loaded {
+    if LaunchdTimer.isPaused(.backup) {
+        Console.note("backup timer: paused (turned off on purpose) — `--resume-timer` to turn it back on")
+    } else if timer.installed && timer.loaded {
         Console.success("backup timer: installed and loaded")
     } else if timer.installed {
         Console.warn("backup timer: installed but not loaded — re-run `--install-timer` to (re)load it")
@@ -183,7 +185,9 @@ func doctorCommand() {
         Console.note("backup timer: not installed (optional) — `--install-timer` schedules a daily backup of the set")
     }
     let drillTimer = LaunchdTimer.drillState()
-    if drillTimer.installed && drillTimer.loaded {
+    if LaunchdTimer.isPaused(.drill) {
+        Console.note("restore-drill timer: paused (turned off on purpose) — `--resume-drill-timer` to turn it back on")
+    } else if drillTimer.installed && drillTimer.loaded {
         Console.success("restore-drill timer: installed and loaded")
     } else if drillTimer.installed {
         Console.warn("restore-drill timer: installed but not loaded — re-run `--install-drill-timer` to (re)load it")
@@ -192,7 +196,9 @@ func doctorCommand() {
         Console.note("restore-drill timer: not installed (optional) — `--install-drill-timer` schedules a monthly restore drill")
     }
     let checkTimer = LaunchdTimer.checkState()
-    if checkTimer.installed && checkTimer.loaded {
+    if LaunchdTimer.isPaused(.check) {
+        Console.note("integrity-check timer: paused (turned off on purpose) — `--resume-check-timer` to turn it back on")
+    } else if checkTimer.installed && checkTimer.loaded {
         Console.success("integrity-check timer: installed and loaded")
     } else if checkTimer.installed {
         Console.warn("integrity-check timer: installed but not loaded — re-run `--install-check-timer` to (re)load it")
