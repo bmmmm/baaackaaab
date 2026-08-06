@@ -150,9 +150,30 @@ expect "days:"
 # not carry — a silent partial paste is the failure mode being guarded here.
 # Which reason fires depends on the operator's own check schedule (a weekday
 # list or an every-day cadence), so only "dropped" itself is asserted.
-send "y"
+# First move the check's hour, so the yanked value provably DIFFERS from what
+# the drill already holds. Without this the assertion is worthless on the common
+# setup where both jobs sit at 03:00: the paste would change nothing and a
+# broken paste would pass just as green. The edit is undone again below, and
+# nothing is written either way.
+send "i"
+expect -- "-- EDIT: integrity check --"
+send "\033\[A"
+expect "unapplied edit"
+
+send "\x1b"
 expect -- "-- NORMAL --"
-expect "yanked integrity check"
+
+# Read the yanked time back out of the status line instead of hardcoding one —
+# the operator's own schedule is whatever it is.
+send "y"
+expect -re {yanked integrity check: [^\r\n]*at ([0-9][0-9]:[0-9][0-9])}
+set yanked $expect_out(1,string)
+
+# Undo the check's edit. The register must NOT follow it back: what was yanked
+# is a copy, not a live reference.
+send "u"
+expect -- "-- NORMAL --"
+expect "edit discarded"
 
 send "\033\[B"
 expect -- "-- NORMAL --"
@@ -160,6 +181,11 @@ expect "of each month"
 
 send "p"
 expect -- "-- NORMAL --"
+# The EFFECT, not the message: the drill's own preview now carries the yanked
+# time, which is a value it did not have a moment ago.
+expect "w installs: monthly on day"
+expect "$yanked"
+# ...and the lossy direction is named rather than silently swallowed.
 expect "put integrity check onto restore drill"
 expect "dropped"
 
