@@ -81,23 +81,6 @@ row itself stays green/cyan, so the row and the truth disagree.
 - Keep the existing note line; it carries the actionable "`w` installs it,
   `d` discards it".
 
-## 2. Colour the current job while it has unapplied changes
-
-Requested: as soon as something in the current schedule is changed, its colour
-changes.
-
-Today only a separate yellow note line appears ("unapplied edit — …"); the job
-row itself stays green/cyan, so the row and the truth disagree.
-
-- Selected job row renders **yellow** while `timerTouched`, instead of the
-  `.ok`/`.off` colour, so the list itself shows which job diverges from disk.
-- Per-field: render only the field(s) that actually differ from the *installed*
-  schedule (`timerCurrent`) in yellow — that answers "what did I change", not
-  just "something changed". Fields equal to what's installed stay normal even
-  while the job as a whole is dirty.
-- Keep the existing note line; it carries the actionable "`w` installs it,
-  `d` discards it".
-
 Put the comparison in a **pure function** (e.g. `TimerEdit.dirtyFields(edited:installed:)`
 returning a set of `TimerField` + a weekday/day-of-month flag) so it is unit-testable
 without a TTY. The renderer only picks colours from its result.
