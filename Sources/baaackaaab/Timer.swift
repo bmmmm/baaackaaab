@@ -97,6 +97,62 @@ struct Schedule {
         let days = weekdays.sorted().map { Self.weekdayName($0) }.joined(separator: ", ")
         return "\(days) at \(t)"
     }
+
+    /// The editor fields a yanked schedule turns into on a given job, plus what
+    /// the copy could not carry. See `Schedule.paste`.
+    struct Paste: Equatable {
+        var hour: Int
+        var minute: Int
+        var weekdays: [Int]      // empty = every day
+        var dayOfMonth: Int
+        /// Everything the source could not express on this job, worded for the
+        /// status line. Empty means the paste was lossless.
+        var dropped: [String]
+    }
+
+    /// Adapt `source` to the calendar shape of `kind`, given the target job's
+    /// CURRENT editor fields.
+    ///
+    /// One rule throughout: **whatever the source cannot express on this job is
+    /// left exactly as the target already had it**, and named in `dropped`.
+    /// launchd's monthly `Day` and daily/weekly `Weekday` are different plist
+    /// keys and each job reads only its own, so a paste across that boundary is
+    /// necessarily lossy — the failure mode worth engineering against is not the
+    /// loss but a SILENT loss, hence `dropped` rather than a best-effort guess.
+    /// The same rule covers the time-of-day: a source with no times at all
+    /// leaves the target's clock untouched instead of inventing midnight.
+    ///
+    /// Pure — directly unit-testable, and the renderer only reads its result.
+    static func paste(_ source: Schedule, onto kind: LaunchdTimer.Kind,
+                      target: (hour: Int, minute: Int, weekdays: [Int], dayOfMonth: Int)) -> Paste {
+        var dropped: [String] = []
+
+        // The editor holds ONE time; a multi-time schedule (only reachable via
+        // repeated --at on the CLI) collapses to its earliest.
+        let sorted = source.times.sorted { ($0.hour, $0.minute) < ($1.hour, $1.minute) }
+        let time = sorted.first ?? (hour: target.hour, minute: target.minute)
+        if sorted.count > 1 { dropped.append("\(sorted.count - 1) further time(s)") }
+
+        if kind.isMonthly {
+            // A monthly job fires on a day-of-month and ignores Weekday entirely.
+            guard let day = source.dayOfMonth else {
+                dropped.append(source.weekdays.isEmpty ? "its every-day cadence" : "its weekday list")
+                return Paste(hour: time.hour, minute: time.minute, weekdays: [],
+                             dayOfMonth: target.dayOfMonth, dropped: dropped)
+            }
+            return Paste(hour: time.hour, minute: time.minute, weekdays: [],
+                         dayOfMonth: day, dropped: dropped)
+        }
+
+        // A daily/weekly job has no Day key to put a day-of-month into.
+        if source.dayOfMonth != nil {
+            dropped.append("its day-of-month")
+            return Paste(hour: time.hour, minute: time.minute, weekdays: target.weekdays,
+                         dayOfMonth: target.dayOfMonth, dropped: dropped)
+        }
+        return Paste(hour: time.hour, minute: time.minute, weekdays: source.weekdays,
+                     dayOfMonth: target.dayOfMonth, dropped: dropped)
+    }
 }
 
 /// The scheduled-backup LaunchAgent. Installs a per-user launchd job that runs

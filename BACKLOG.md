@@ -113,6 +113,18 @@ the closest to the safety core and is worth doing first.
 
 ## TUI (TTY-only — operator-verifiable, not unit-testable)
 
+- [ ] **Schedules editor: per-field dirty colouring.** `Low` — deferred, not a
+  defect. An unwritten edit is announced by one yellow note ("unapplied edit —
+  w writes it, u undoes it"), which answers "something changed" but not "what".
+  Rendering the individual field(s) that differ from the INSTALLED schedule in
+  yellow would answer the second question. Deferred because the operator
+  confirmed the current colours read correctly (2026-08-06); pick it up only if
+  that stops being true. Sketch: a pure `dirtyFields(edited:installed:)` →
+  `Set<TimerField>` so it stays unit-testable without a TTY, with the renderer
+  only choosing colours from its result. Open question if revisited: a job that
+  is not installed at all has no baseline, so everything is "new" rather than
+  "changed" — decide whether that reads dirty from the first keystroke.
+
 - [x] **Unicode display width: layout counts graphemes, not terminal cells.**
   `Low-Med` — done (operator-verifiable: build green; runtime needs a real TTY)
   - `fit` (ConfigTUI.swift:1643-1647), the reverse-video cursor padding

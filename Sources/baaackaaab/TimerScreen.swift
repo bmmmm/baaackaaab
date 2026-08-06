@@ -208,7 +208,7 @@ extension ConfigTUI {
     func timerHelpLine() -> String {
         switch timerMode {
         case .normal:
-            return "\u{2191}/\u{2193} select job \u{2022} i edit \u{2022} w write \u{2022} u undo \u{2022} o on/off \u{2022} x delete \u{2022} esc back"
+            return "\u{2191}/\u{2193} select job \u{2022} i edit \u{2022} w write \u{2022} u undo \u{2022} y yank \u{2022} p put \u{2022} o on/off \u{2022} x delete \u{2022} esc back"
         case .edit:
             let dayKeys = timerKind.isMonthly ? "" : " \u{2022} 1-7 weekday \u{2022} 0 every day"
             return "\u{2190}/\u{2192} field \u{2022} \u{2191}/\u{2193} adjust\(dayKeys) \u{2022} enter/w write \u{2022} u undo \u{2022} esc normal"
@@ -241,6 +241,8 @@ extension ConfigTUI {
         case .char("u"): discardTimerEdit()      // vi's undo: revert to what's installed
         case .char("x"): uninstallTimerNow()     // delete the schedule itself
         case .char("o"): toggleTimerOnOff()
+        case .char("y"): yankTimerSchedule()     // vi's yank
+        case .char("p"): putTimerSchedule()      // vi's put
         case .esc, .char("h"): if confirmDiscardTimerEdits() { screen = .home }
         case .char("q"), .ctrlC: if confirmDiscardTimerEdits() && confirmQuit() { return false }
         case .eof: return false
@@ -294,7 +296,7 @@ extension ConfigTUI {
         // What is left in Normal is the whole-JOB commands, which are about the
         // schedule rather than the edit. Swallowing them silently reads as a
         // dead keyboard, so point at the door instead.
-        case .char(let c) where "xoq".contains(c):
+        case .char(let c) where "xoqyp".contains(c):
             statusMsg = "\(c) is a normal-mode command \u{2014} press esc first"
         default: break
         }
@@ -378,6 +380,46 @@ extension ConfigTUI {
         invalidateScheduleRows()
         refreshTimerState()
         if code == 0 { statusMsg = "\(timerKind.title): " + (timerState.loaded ? "on" : "off") }
+    }
+
+    /// Yank the schedule as DISPLAYED — an unwritten edit included, so what you
+    /// see is what you copy — into the session clipboard.
+    func yankTimerSchedule() {
+        let copied = previewSchedule()
+        timerClipboard = (timerKind, copied)
+        statusMsg = "yanked \(timerKind.title): " + copied.describe()
+    }
+
+    /// Put the yanked schedule onto the selected job by filling its editor
+    /// fields. It deliberately does NOT write: the paste lands as an ordinary
+    /// unapplied edit, so nothing reaches launchd without an explicit w, and a
+    /// paste onto the wrong job costs a u rather than a reinstall.
+    func putTimerSchedule() {
+        guard let clip = timerClipboard else {
+            statusMsg = "nothing yanked yet \u{2014} press y on a job first"
+            return
+        }
+        let before = (timerHour, timerMinute, timerWeekdays, timerDayOfMonth)
+        let put = Schedule.paste(clip.schedule, onto: timerKind,
+                                 target: (hour: timerHour, minute: timerMinute,
+                                          weekdays: timerWeekdays.sorted(), dayOfMonth: timerDayOfMonth))
+        timerHour = put.hour
+        timerMinute = put.minute
+        timerWeekdays = Set(put.weekdays)
+        timerDayOfMonth = put.dayOfMonth
+        // Only a paste that MOVED something is an edit. Putting a job onto
+        // itself would otherwise raise an "unapplied edit" over no change at all.
+        if (timerHour, timerMinute, timerWeekdays, timerDayOfMonth) != before { timerTouched = true }
+
+        // What was dropped leads, because it is the part only this message can
+        // tell you. The "w installs it / u undoes it" guidance is deliberately
+        // NOT repeated here — the unapplied-edit note right above already says
+        // it, and a status line long enough to carry both gets truncated on a
+        // narrow terminal exactly where the actionable half sits.
+        var msg = "put \(clip.kind.title) onto \(timerKind.title)"
+        if !put.dropped.isEmpty { msg += " \u{2014} dropped " + put.dropped.joined(separator: " + ") }
+        if !timerTouched { msg += " \u{2014} no change" }
+        statusMsg = msg
     }
 
     /// Immediately revert the fields to what's installed on disk — no prompt,

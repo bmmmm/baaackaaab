@@ -192,4 +192,76 @@ final class ScheduleTests: XCTestCase {
         XCTAssertNil(LaunchdTimer.schedule(fromPlistData: Data(xml.utf8)))
         XCTAssertNil(LaunchdTimer.schedule(fromPlistData: Data("not a plist".utf8)))
     }
+
+    // MARK: - Yank / put across the monthly ↔ weekly boundary
+    //
+    // launchd's monthly `Day` and daily/weekly `Weekday` are different plist keys
+    // and each job reads only its own, so a paste across that line is necessarily
+    // lossy. What must never happen is a SILENT loss — every case below pins both
+    // halves: what carried, and that what could not was reported.
+
+    /// The target's current fields, i.e. what a paste leaves alone when the
+    /// source has nothing to say about that dimension.
+    private let target = (hour: 9, minute: 30, weekdays: [1, 3], dayOfMonth: 7)
+
+    func testPasteWithinTheSameShapeCarriesEverything() {
+        let source = Schedule(times: [(hour: 20, minute: 15)], weekdays: [2, 4])
+        let put = Schedule.paste(source, onto: .backup, target: target)
+        XCTAssertEqual(put.hour, 20)
+        XCTAssertEqual(put.minute, 15)
+        XCTAssertEqual(put.weekdays, [2, 4])
+        XCTAssertTrue(put.dropped.isEmpty, "a same-shape paste is lossless: \(put.dropped)")
+    }
+
+    func testPasteOntoMonthlyKeepsTheTargetsDayAndReportsTheWeekdays() {
+        let source = Schedule(times: [(hour: 20, minute: 15)], weekdays: [2, 4])
+        let put = Schedule.paste(source, onto: .drill, target: target)
+        XCTAssertEqual(put.hour, 20)
+        XCTAssertEqual(put.minute, 15)
+        XCTAssertEqual(put.dayOfMonth, 7, "the drill's own day-of-month must survive a weekly paste")
+        XCTAssertTrue(put.weekdays.isEmpty, "a monthly job ignores Weekday — carrying it would be a silent no-op")
+        XCTAssertEqual(put.dropped, ["its weekday list"])
+    }
+
+    func testPasteOfADailyScheduleOntoMonthlyReportsTheLostCadence() {
+        // "every day" is not a weekday list, but it is still something a monthly
+        // job cannot honour — it must not pass as a lossless paste.
+        let source = Schedule(times: [(hour: 6, minute: 0)], weekdays: [])
+        let put = Schedule.paste(source, onto: .drill, target: target)
+        XCTAssertEqual(put.dayOfMonth, 7)
+        XCTAssertEqual(put.dropped, ["its every-day cadence"])
+    }
+
+    func testPasteOntoWeeklyKeepsTheTargetsWeekdaysAndReportsTheDayOfMonth() {
+        let source = Schedule(times: [(hour: 4, minute: 45)], weekdays: [], dayOfMonth: 12)
+        let put = Schedule.paste(source, onto: .check, target: target)
+        XCTAssertEqual(put.hour, 4)
+        XCTAssertEqual(put.minute, 45)
+        XCTAssertEqual(put.weekdays, [1, 3], "the check's own weekdays must survive a monthly paste")
+        XCTAssertEqual(put.dropped, ["its day-of-month"])
+    }
+
+    func testMonthlyToMonthlyCarriesTheDayOfMonth() {
+        let source = Schedule(times: [(hour: 4, minute: 45)], weekdays: [], dayOfMonth: 12)
+        let put = Schedule.paste(source, onto: .drill, target: target)
+        XCTAssertEqual(put.dayOfMonth, 12)
+        XCTAssertTrue(put.dropped.isEmpty, "monthly onto monthly is lossless: \(put.dropped)")
+    }
+
+    func testMultiTimeSourceCollapsesToItsEarliestAndSaysSo() {
+        // Only reachable via repeated --at on the CLI; the editor holds one time.
+        let source = Schedule(times: [(hour: 18, minute: 0), (hour: 6, minute: 30)], weekdays: [])
+        let put = Schedule.paste(source, onto: .backup, target: target)
+        XCTAssertEqual(put.hour, 6, "the earliest time wins, not the first in the array")
+        XCTAssertEqual(put.minute, 30)
+        XCTAssertEqual(put.dropped, ["1 further time(s)"])
+    }
+
+    func testSourceWithNoTimesLeavesTheTargetsClockAlone() {
+        // Same rule as the day dimension: what the source cannot express is left
+        // as the target had it, rather than silently inventing midnight.
+        let put = Schedule.paste(Schedule(times: [], weekdays: [5]), onto: .backup, target: target)
+        XCTAssertEqual(put.hour, 9)
+        XCTAssertEqual(put.minute, 30)
+    }
 }

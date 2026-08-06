@@ -143,6 +143,32 @@ expect -- "-- NORMAL --"
 # row is gone and the weekday row is back.
 expect "days:"
 
+# Yank and put. y copies the displayed schedule; p fills another job's fields
+# from it and deliberately does NOT write, so this stays read-only towards the
+# operator's real LaunchAgents. The check -> drill direction is the lossy one
+# (a weekday job onto a monthly one), and the paste has to NAME what it could
+# not carry — a silent partial paste is the failure mode being guarded here.
+# Which reason fires depends on the operator's own check schedule (a weekday
+# list or an every-day cadence), so only "dropped" itself is asserted.
+send "y"
+expect -- "-- NORMAL --"
+expect "yanked integrity check"
+
+send "\033\[B"
+expect -- "-- NORMAL --"
+expect "of each month"
+
+send "p"
+expect -- "-- NORMAL --"
+expect "put integrity check onto restore drill"
+expect "dropped"
+
+# Undo, so the screen is left exactly as it was found. Nothing was written
+# either way — p only fills fields — but leaving a pending edit behind would
+# make the next section's state depend on this one.
+send "u"
+expect -- "-- NORMAL --"
+
 send "\x1b"
 expect "command center"
 

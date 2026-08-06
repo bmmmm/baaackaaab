@@ -158,6 +158,12 @@ final class ConfigTUI {
     var timerState: (installed: Bool, loaded: Bool) = (false, false)
     var timerCurrent: Schedule?
     var timerMode: TimerMode = .normal
+    // vi's yank register for schedules: y copies the DISPLAYED schedule (edit
+    // included), p fills another job's fields from it. Session-only and never
+    // written to disk — it holds a cadence, not a decision, and a stale one
+    // surviving a restart would be a trap rather than a convenience. The source
+    // job rides along so the status line can name both ends of the copy.
+    var timerClipboard: (kind: LaunchdTimer.Kind, schedule: Schedule)?
     // Set the moment any field diverges from what loadTimerFields() last loaded
     // (i.e. what's actually installed). Survives a mode switch untouched, so it
     // drives the "unapplied edit" note and the confirmation on the paths that

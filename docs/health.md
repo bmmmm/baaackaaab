@@ -20,12 +20,33 @@ stable signature then keeps alive across rebuilds.
 
 All three schedules — this one, the restore drill and the integrity check below —
 are also visible and editable in the command center. Its **schedules** panel lists
-each job's cadence and next run; `t` opens the editor, where `tab` picks the job,
-`i` installs or changes it, and `u` deletes it. The editor drives the same CLI
-flags shown here, so the two paths cannot drift apart. Two states it calls out that
-a plain listing hides: a plist that is present but was never **loaded** into
-launchd (it looks scheduled and never fires), and a job that is **not scheduled at
-all**.
+each job's cadence and next run; `t` opens the editor. It drives the same CLI flags
+shown here, so the two paths cannot drift apart.
+
+The editor is modal, in the vi sense, because the arrow keys otherwise have to
+mean two things at once — "which job" and "what value" — and landing on the screen
+then risks nudging a live schedule:
+
+- **Normal** (`-- NORMAL --`) — `↑`/`↓` select the job, and every command lives
+  here: `i` edit, `w` write (install or change), `u` undo, `y` yank a schedule,
+  `p` put it onto another job, `o` turn the job off/on, `x` delete it, `esc` back.
+  Nothing here changes a field value.
+- **Edit** (`-- EDIT: <job> --`, entered with `i`) — `←`/`→` pick a field, `↑`/`↓`
+  change it, `1`-`7` toggle weekdays, `0` means every day. `w`/`enter` write and
+  `u` undoes, both returning to Normal; `esc` returns without resolving, leaving
+  the edit pending.
+
+Nothing reaches launchd without an explicit `w`. `p` only fills in fields, so a
+paste is undone with `u` rather than a reinstall — and because a monthly job
+(the drill) fires on a day-of-month while the others fire on weekdays, a paste
+across that boundary keeps the target's own day dimension and says in the status
+line what it could not carry.
+
+Two states the panel calls out that a plain listing hides: a plist that is present
+but was never **loaded** into launchd (it looks scheduled and never fires), and a
+job that is **not scheduled at all**. A job you turned off with `o` reads as
+**off** rather than broken — its schedule is intact and `o` brings it straight
+back (`--pause-*-timer` / `--resume-*-timer` on the CLI).
 
 ## Catch-up on boot/login
 
