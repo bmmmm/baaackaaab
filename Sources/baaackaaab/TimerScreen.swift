@@ -4,24 +4,31 @@ import Foundation
 // the per-screen file convention the Restore browser already follows.
 //
 // It edits all three scheduled jobs — backup, integrity check, restore drill —
-// through a vi-style split (TimerMode): Normal mode's up/down arrows walk the
-// job list and nothing else moves; `e` drops into Edit mode for the selected
-// job, where left/right pick a field and up/down change its value. Keeping
-// "which job" and "what value" on separate modes means the arrow keys never
-// do two different things depending on where you happen to be — landing on
-// the screen and reaching for the arrows can no longer silently bump a real
-// schedule, because Normal mode's arrows don't touch values at all.
+// through a vi-style split (TimerMode), and the split is strict, because a
+// half-modal screen is worse than none:
 //
-// i / u install (or rewrite) and remove a job; o pauses or resumes it without
-// touching its configured schedule (on/off, distinct from i/u which write or
-// delete it). Every write goes through the tested CLI flags rather than a
-// second plist writer here, so the TUI and `--install-*-timer` can never
-// drift apart.
+//   Normal (vi's normal mode) — up/down walk the job list, and EVERY command
+//     lives here: i/e edit, w write, u undo, o on/off, x delete. Nothing here
+//     touches a field value, so landing on the screen and reaching for the
+//     arrows cannot bump a real schedule.
+//   Edit (vi's insert mode) — ONLY field editing: left/right pick a field,
+//     up/down change its value, digits toggle weekdays. esc returns to Normal
+//     and leaves the edit pending, exactly like leaving vi's insert mode.
 //
-// An edit not yet installed is tracked (the yellow "unapplied edit" note) and
-// confirmed — install or discard — before it would otherwise be silently
-// thrown away by leaving Edit mode, switching jobs, or quitting; d discards
-// it immediately, no prompt needed, from either mode.
+// The commands deliberately do NOT exist in Edit mode. They used to, and that
+// was the bug: discarding from inside Edit reset the fields but left the mode
+// alone, so a screen that looked finished still had the arrows editing values
+// instead of selecting the next job.
+//
+// w writes (installs or rewrites) and x deletes a job; o pauses or resumes it
+// without touching its configured schedule (on/off, distinct from w/x which
+// write or delete it). Every write goes through the tested CLI flags rather
+// than a second plist writer here, so the TUI and `--install-*-timer` can
+// never drift apart.
+//
+// An unwritten edit is tracked (the yellow "unapplied edit" note) and survives
+// a mode switch untouched. It is only confirmed — write or undo — where it
+// would actually be LOST: switching jobs, leaving the screen, or quitting.
 extension ConfigTUI {
     // MARK: - Schedules screen
 
@@ -142,13 +149,13 @@ extension ConfigTUI {
             body.append(yellow(fit("  note: this job has several times; the editor sets one \u{2014} installing replaces all with it (use --at repeatedly on the CLI for several)", cols)))
         }
         body.append("")
-        body.append(dim(fit("  i installs: " + previewSchedule().describe(), cols)))
+        body.append(dim(fit("  w installs: " + previewSchedule().describe(), cols)))
         if let next = previewSchedule().nextFireDate(after: Date()) {
             body.append(dim(fit("  first run:  " + timerStampFmt.string(from: next)
                                 + " (" + ScheduleDashboard.countdown(from: Date(), to: next) + ")", cols)))
         }
         if timerTouched {
-            body.append(yellow(fit("  unapplied edit \u{2014} i installs it, d discards it", cols)))
+            body.append(yellow(fit("  unapplied edit \u{2014} w writes it, u undoes it", cols)))
         }
 
         if body.count < contentH { body += Array(repeating: "", count: contentH - body.count) }
@@ -170,10 +177,10 @@ extension ConfigTUI {
     func timerHelpLine() -> String {
         switch timerMode {
         case .normal:
-            return "\u{2191}/\u{2193} select job \u{2022} e edit \u{2022} i install \u{2022} o on/off \u{2022} d discard \u{2022} u delete \u{2022} esc back"
+            return "\u{2191}/\u{2193} select job \u{2022} i edit \u{2022} w write \u{2022} u undo \u{2022} o on/off \u{2022} x delete \u{2022} esc back"
         case .edit:
             let dayKeys = timerKind.isMonthly ? "" : " \u{2022} 1-7 weekday \u{2022} 0 every day"
-            return "\u{2190}/\u{2192} field \u{2022} \u{2191}/\u{2193} adjust\(dayKeys) \u{2022} enter save+done \u{2022} i install \u{2022} o on/off \u{2022} d discard \u{2022} u delete \u{2022} esc done"
+            return "\u{2190}/\u{2192} field \u{2022} \u{2191}/\u{2193} adjust\(dayKeys) \u{2022} enter write+done \u{2022} esc normal"
         }
     }
 
@@ -184,17 +191,20 @@ extension ConfigTUI {
         }
     }
 
-    /// Normal mode: navigate the job list and issue whole-job commands.
-    /// Nothing here touches a field value — that only happens in Edit mode.
+    /// Normal mode — vi's normal mode: EVERY command lives here, and nothing
+    /// here touches a field value. Keeping the whole-job commands out of Edit
+    /// mode is what makes the split mean something: when a command works in
+    /// both modes, the mode is decoration, and "which does the arrow key do"
+    /// becomes unanswerable again.
     func handleTimerNormal(_ key: Key) -> Bool {
         switch key {
-        case .up: selectTimerJob(by: -1)
-        case .down, .tab: selectTimerJob(by: 1)
-        case .char("e"), .enter, .right: timerMode = .edit
-        case .char("i"): installTimerNow()
+        case .up, .char("k"): selectTimerJob(by: -1)
+        case .down, .char("j"), .tab: selectTimerJob(by: 1)
+        case .char("i"), .char("e"), .enter, .right: timerMode = .edit
+        case .char("w"): installTimerNow()
+        case .char("u"): discardTimerEdit()      // vi's undo: revert to what's installed
+        case .char("x"): uninstallTimerNow()     // delete the schedule itself
         case .char("o"): toggleTimerOnOff()
-        case .char("d"): discardTimerEdit()
-        case .char("u"): uninstallTimerNow()
         case .esc, .char("h"): if confirmDiscardTimerEdits() { screen = .home }
         case .char("q"), .ctrlC: if confirmDiscardTimerEdits() && confirmQuit() { return false }
         case .eof: return false
@@ -203,10 +213,15 @@ extension ConfigTUI {
         return true
     }
 
-    /// Edit mode: change the selected job's fields. esc/h leaves back to
-    /// Normal — confirmed first if there's an unapplied edit, so a reflex
-    /// esc can't silently discard it. enter is a shortcut that installs AND
-    /// leaves, for "type the value, hit enter, done".
+    /// Edit mode — vi's insert mode: ONLY field editing. esc returns to Normal
+    /// and leaves the edit pending, exactly like leaving vi's insert mode,
+    /// which neither writes nor discards; w and u in Normal do that. No prompt
+    /// on the way out, because nothing is lost by the mode switch itself.
+    ///
+    /// Deliberately no whole-job commands here. When `d` (discard) lived in
+    /// this mode it reset the fields but left the mode alone: the screen went
+    /// clean, read as "done", and the arrows silently kept editing values
+    /// instead of moving to the next job.
     func handleTimerEdit(_ key: Key) -> Bool {
         switch key {
         case .up: adjustTimer(by: 1)
@@ -221,13 +236,13 @@ extension ConfigTUI {
         case .char("6"): toggleWeekday(6)
         case .char("7"): toggleWeekday(0)   // 7 = Sunday (launchd weekday 0)
         case .char("0"): clearTimerWeekdays()
-        case .char("i"): installTimerNow()
-        case .char("o"): toggleTimerOnOff()
-        case .char("d"): discardTimerEdit()
-        case .char("u"): uninstallTimerNow()
+        // Write-and-leave: the "set the value, hit enter, done" shortcut. It
+        // exits to Normal, so it cannot strand anyone in Edit mode.
         case .enter: installTimerNow(); timerMode = .normal
-        case .esc, .char("h"): if confirmDiscardTimerEdits() { timerMode = .normal }
-        case .char("q"), .ctrlC: if confirmDiscardTimerEdits() && confirmQuit() { return false }
+        case .esc: timerMode = .normal
+        // Ctrl-C stays an escape hatch from every mode; plain q is a Normal-mode
+        // command, so it does not fire mid-edit.
+        case .ctrlC: if confirmDiscardTimerEdits() && confirmQuit() { return false }
         case .eof: return false
         default: break
         }
@@ -304,7 +319,7 @@ extension ConfigTUI {
     /// distinct from i/u, which write or delete the schedule itself. A no-op
     /// when nothing is installed yet, since there is nothing to pause.
     func toggleTimerOnOff() {
-        guard timerState.installed else { statusMsg = "nothing installed yet \u{2014} press i first"; return }
+        guard timerState.installed else { statusMsg = "nothing installed yet \u{2014} press w to write it first"; return }
         let pausing = timerState.loaded
         let flag = pausing ? timerKind.pauseFlag : timerKind.resumeFlag
         let code = runChildAndWait([flag], label: "\(pausing ? "pause" : "resume") \(timerKind.title) schedule")
@@ -322,19 +337,19 @@ extension ConfigTUI {
         if hadEdit { statusMsg = "edit discarded" }
     }
 
-    /// Leaving an unapplied edit behind — via Edit mode's esc/h, switching
-    /// jobs, or quitting — would otherwise silently throw it away. Mirrors
-    /// confirmQuit()'s shape: install-or-discard, cancel (stay) by default.
-    /// Returns true when it's fine to proceed (nothing pending, installed, or
-    /// discarded).
+    /// Prompts only where an unapplied edit would actually be LOST: switching
+    /// jobs (the reload wipes it) and leaving the screen or quitting. Moving
+    /// between Edit and Normal never asks, because the edit survives that.
+    /// Mirrors confirmQuit()'s shape: write-or-undo, cancel (stay) by default.
+    /// Returns true when it's fine to proceed.
     func confirmDiscardTimerEdits() -> Bool {
         guard timerTouched else { return true }
-        drawPrompt("unapplied schedule edit \u{2014} i: install & continue   d: discard & continue   esc/enter: stay")
+        drawPrompt("unapplied schedule edit \u{2014} w: write & continue   u: undo & continue   esc/enter: stay")
         while true {
             switch readKey() {
-            case .char("i"), .char("I"):
+            case .char("w"), .char("W"):
                 return installTimerNow() == 0
-            case .char("d"), .char("D"):
+            case .char("u"), .char("U"):
                 loadTimerFields()
                 return true
             case .enter, .esc, .ctrlC: return false

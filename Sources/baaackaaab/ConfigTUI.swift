@@ -159,8 +159,9 @@ final class ConfigTUI {
     var timerCurrent: Schedule?
     var timerMode: TimerMode = .normal
     // Set the moment any field diverges from what loadTimerFields() last loaded
-    // (i.e. what's actually installed). Drives the leave-confirmation and the
-    // "unapplied edit" note — install (i) or discard (d) clear it again.
+    // (i.e. what's actually installed). Survives a mode switch untouched, so it
+    // drives the "unapplied edit" note and the confirmation on the paths that
+    // would LOSE it — w (write) or u (undo) clear it again.
     var timerTouched = false
 
     // The home dashboard's schedules section, cached like the run history: probing

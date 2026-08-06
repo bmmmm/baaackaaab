@@ -29,16 +29,16 @@ enum ScheduleDashboard {
             return (.none, "\(name)  not scheduled")
         }
         guard let schedule else {
-            return (.broken, "\(name)  installed, but its schedule is unreadable — reinstall it (i)")
+            return (.broken, "\(name)  installed, but its schedule is unreadable — reinstall it (w)")
         }
         if paused {
             return (.off, "\(name)  \(schedule.describe())  ·  off — turn it back on (o)")
         }
         guard loaded else {
-            return (.broken, "\(name)  \(schedule.describe()) — plist present but NOT loaded, so it never fires; reinstall it (i)")
+            return (.broken, "\(name)  \(schedule.describe()) — plist present but NOT loaded, so it never fires; reinstall it (w)")
         }
         guard let next = schedule.nextFireDate(after: now) else {
-            return (.broken, "\(name)  \(schedule.describe()) — no fire time; reinstall it (i)")
+            return (.broken, "\(name)  \(schedule.describe()) — no fire time; reinstall it (w)")
         }
         return (.ok, "\(name)  \(schedule.describe())  ·  next \(countdown(from: now, to: next))")
     }

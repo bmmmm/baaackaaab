@@ -11,7 +11,9 @@
 #      home:      "command center"          (header)
 #      editor:    "configure backup set"    (header)
 #      schedules: "scheduled jobs"          (section divider)
-#                 "i installs:"             (schedule preview line)
+#                 "w installs:"             (schedule preview line)
+#                 "-- NORMAL --"/"-- EDIT:" (mode badge; needs `expect --`,
+#                                            the leading dashes look like flags)
 #      restore w/o destinations: "no repository" (home status line)
 #    The home schedules section is matched by its per-job STATE words
 #    ("next in" / "not scheduled" / "NOT loaded"), which no other panel emits —
@@ -58,27 +60,60 @@ expect "command center"
 
 # Schedules screen and back. READ-ONLY by contract: LaunchAgents are NOT isolated
 # by BAAACKAAAB_SUPPORT_DIR, so this screen shows the operator's REAL timers —
-# never send "i" (install) or "u" (uninstall) here. Navigation and the preview
-# line are pure computation, so they are safe to drive.
+# never send "w" (write), "x" (delete) or "o" (on/off) here. Navigation, mode
+# switching and the preview line are pure computation, so they are safe to drive.
+# Note "i" is SAFE now: it enters Edit mode (vi's insert), it does not install.
+# Patterns below follow the screen's RENDER order within one frame — expect
+# consumes the stream sequentially, so asking for the mode badge (line 3) after
+# the "scheduled jobs" divider (line 5) waits for the NEXT repaint and times out
+# on a screen that is already correct. Order per frame:
+#   mode badge -> "scheduled jobs" -> job rows -> section divider ->
+#   time/days -> "w installs:" -> "first run:" -> "unapplied edit" -> status
 send "t"
+expect -- "-- NORMAL --"
 expect "scheduled jobs"
-expect "edit backup"
-expect "i installs:"
+expect "w installs:"
 
-# tab cycles job -> job. The drill is monthly, so it must offer a day-of-month
-# field instead of the weekday keys (launchd ignores Weekday on a Day schedule).
-send "\t"
-expect "edit integrity check"
-send "\t"
-expect "edit restore drill"
+# The mode split is the screen's core contract, so prove both halves.
+# Normal mode: down/down select the JOB and never touch a value. Landing on the
+# drill is asserted through "of each month", which ONLY a monthly job renders
+# (launchd ignores Weekday on a Day schedule) and which no machine's own
+# schedule values can change.
+send "\033\[B"
+expect -- "-- NORMAL --"
+send "\033\[B"
+expect -- "-- NORMAL --"
 expect "of each month"
 
-# Editing a field must reach the preview, not just repaint the widget: focus the
-# day field (right, right) and step it down one, wrapping 1 -> 28.
+# i enters Edit mode (vi's insert) on the drill — the badge names the job.
+send "i"
+expect -- "-- EDIT: restore drill --"
+
+# Editing must reach the preview, not just repaint the widget: focus the day
+# field (right, right) and step it. Asserted via the dirty note rather than a
+# literal day number, which depends on the operator's real drill schedule.
 send "\033\[C"
 send "\033\[C"
 send "\033\[B"
-expect "monthly on day 28"
+expect "unapplied edit"
+
+# esc leaves Edit for Normal WITHOUT prompting, and the edit stays pending —
+# leaving insert mode neither writes nor discards, exactly like vi.
+send "\x1b"
+expect -- "-- NORMAL --"
+expect "unapplied edit"
+
+# u is undo, and it lands in Normal mode, so the very next arrow selects a job
+# instead of editing a value. This is the regression the strict split exists
+# for: discarding from inside Edit used to leave the screen looking finished
+# while the arrows kept changing the time.
+send "u"
+expect "edit discarded"
+send "\033\[A"
+expect -- "-- NORMAL --"
+# Up from the drill is the integrity check: a weekday job, so the day-of-month
+# row is gone and the weekday row is back.
+expect "days:"
 
 send "\x1b"
 expect "command center"
