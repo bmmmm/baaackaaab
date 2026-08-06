@@ -16,14 +16,14 @@ concurrency:
 
 jobs:
   build-test:
-    # Matrix: newest + oldest still-hosted macOS. Package.swift declares
-    # macOS 13 as the deployment floor, but GitHub retired the macos-13
-    # runners — macos-14 is the closest hosted check that a newer-SDK API
-    # doesn't silently break the older-OS claim.
+    # Matrix: the two currently-supported hosted macOS images. macos-14 is
+    # being deprecated by GitHub and its default toolchain is stuck below
+    # the swift-tools-version 6.0 Package.swift requires, so it no longer
+    # buys a meaningful older-OS check.
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, macos-15]
+        os: [macos-15, macos-26]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
