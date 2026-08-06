@@ -171,15 +171,31 @@ extension ConfigTUI {
         lines += clipBody(body, to: contentH, cols: cols)
 
         lines.append("")
-        // This screen's guidance ("press i to edit …", "x is a normal-mode
-        // command …") rides the status line, where dim grey buried it among the
-        // permanently-dim footer. Lift the whole line while it carries a
-        // message. The colour has to wrap fit() rather than sit inside it —
-        // fit() measures display width and would count the escape bytes.
-        lines.append(statusMsg.isEmpty ? dim(fit(statusLine(), cols))
-                                       : bold(cyan(fit(statusLine(), cols))))
+        lines.append(timerStatusLine(cols))
         for hl in helpLines { lines.append(dim(fit(hl, cols))) }
         draw(lines)
+    }
+
+    /// The status line with ONLY its message lit up. This screen's guidance
+    /// ("press i to edit …", "x is a normal-mode command …") rides that line,
+    /// where dim grey buried it in the permanently-dim footer — but colouring
+    /// the whole line lights the standing "N folders • M albums" prefix too,
+    /// which never changes and so draws the eye away from what did.
+    ///
+    /// Colour is applied AFTER fit() and only to the trailing message, because
+    /// fit() measures display width and would count escape bytes as content —
+    /// which is also why a message that fit() truncated is left dim: there is
+    /// no longer a whole message in there to highlight.
+    func timerStatusLine(_ cols: Int) -> String {
+        let line = fit(statusLine(), cols)
+        guard !statusMsg.isEmpty,
+              // statusLine() appends the message last, so the LAST occurrence is
+              // it — a message that happens to repeat a prefix word ("albums")
+              // must not match the prefix instead.
+              let msg = line.range(of: statusMsg, options: .backwards)
+        else { return dim(line) }
+        return dim(String(line[line.startIndex..<msg.lowerBound]))
+             + bold(cyan(String(line[msg.lowerBound...])))
     }
 
     /// Bracket a field's value when Edit mode has it focused, pad it out
