@@ -7,12 +7,31 @@
 - **All three schedules are visible and editable in the command center.** The home
   dashboard gained a `schedules` panel listing every unattended job — backup,
   integrity check, restore drill — with its cadence and next run (`daily at 20:00
-  · next in 21h`). `t` opens the editor, where `tab` picks the job, `i` installs or
-  changes it and `u` deletes it; previously only the backup timer was reachable
-  there and the other two were CLI-only. The editor offers a day-of-month field
+  · next in 21h`); previously only the backup timer was reachable there and the
+  other two were CLI-only. `t` opens the editor, which offers a day-of-month field
   for the monthly drill instead of the weekday keys launchd would ignore, and every
   write still goes through the tested `--install-*-timer` flags, so the TUI and the
   CLI cannot drift apart.
+- **The schedules editor is modal, in the vi sense.** Its arrow keys otherwise had
+  to mean two things at once — "which job" and "what value" — so landing on the
+  screen and reaching for them could nudge a live schedule. **Normal** (`↑`/`↓`
+  select the job) owns every command: `i` edit, `w` write, `u` undo, `y` yank,
+  `p` put, `o` on/off, `x` delete. **Edit** (`i`) only edits fields. `w` and `u`
+  resolve an edit from either mode and always return to Normal, so the mode can
+  never outlive the edit it belonged to; leaving the screen or switching job with
+  an unwritten edit asks first.
+- **Jobs can be turned off without losing their schedule** (`o`, or
+  `--pause-timer` / `--resume-timer` and the `-check-` / `-drill-` variants). The
+  plist stays on disk and launchd simply unloads it, so turning the job back on
+  restores the same cadence — previously the only way to stop a job was to delete
+  it and retype its schedule later. A paused job reads as **off** rather than as
+  broken.
+- **A schedule can be copied between jobs** (`y` yanks, `p` puts). `p` fills the
+  target's fields without writing, so a paste onto the wrong job costs a `u`
+  rather than a reinstall. The monthly drill and the weekday-based jobs use
+  different launchd keys, so a paste across that boundary keeps whatever the
+  source cannot express as the target already had it and **names what it
+  dropped** — a silent partial paste being the failure mode worth avoiding.
 - **A plist that launchd never loaded is now called out.** Such a job looks
   scheduled in every listing and never fires; the dashboard flags it in yellow
   instead of rendering it as healthy.
