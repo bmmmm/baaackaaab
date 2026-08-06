@@ -25,6 +25,26 @@ struct RunCancelled: Error {}
 // construction — the compiler just can't prove the NSLock discipline, hence
 // "unchecked". This is what lets `static let shared` be a concurrency-safe global.
 final class BackupCancellation: @unchecked Sendable {
+    /// What the armed job is doing. The cancel notice has to state what a cancel
+    /// actually leaves behind, and that differs per job: only a backup uploads.
+    /// Telling an operator who interrupted a read-only check that "data already
+    /// uploaded is kept" describes an upload that never happened — the kind of
+    /// hardcoded state claim that makes the rest of the output less trustworthy.
+    enum JobKind {
+        case backup, check, drill
+
+        var cancelNote: String {
+            switch self {
+            case .backup:
+                return "cancelling — interrupting restic; data already uploaded is kept (dedup reuses it next run)"
+            case .check:
+                return "cancelling — interrupting restic; the integrity check only reads, so the repository is untouched and the slice simply did not run"
+            case .drill:
+                return "cancelling — interrupting restic; the drill only reads, and its partial restore is discarded with the temp directory"
+            }
+        }
+    }
+
     static let shared = BackupCancellation()
     // Internal (not private) so tests can exercise the arm/cancel/interrupt
     // state machine on a throwaway instance WITHOUT contaminating the shared
@@ -41,6 +61,7 @@ final class BackupCancellation: @unchecked Sendable {
     private var current: Process?
     private var cancelledFlag = false
     private var armed = false
+    private var job: JobKind = .backup                 // set by arm(); drives the cancel notice
     private var sources: [DispatchSourceSignal] = []   // retained for the run's life
 
     /// Set once a SIGINT/SIGTERM has been seen. The backup loops poll this between
@@ -66,8 +87,11 @@ final class BackupCancellation: @unchecked Sendable {
 
     /// Install the SIGINT/SIGTERM sources for the duration of a run. Idempotent —
     /// arming twice is a no-op, so it is safe to call unconditionally at run start.
-    func arm() {
-        lock.lock(); let already = armed; armed = true; lock.unlock()
+    /// `job` names what is running, so the cancel notice describes that job's
+    /// actual aftermath; a re-arm still records it, since the caller that re-armed
+    /// is the one whose work a later cancel would interrupt.
+    func arm(as job: JobKind) {
+        lock.lock(); let already = armed; armed = true; self.job = job; lock.unlock()
         guard !already else { return }
         for sig in [SIGINT, SIGTERM] {
             signal(sig, SIG_IGN)   // disable default termination; the source observes it
@@ -89,10 +113,10 @@ final class BackupCancellation: @unchecked Sendable {
         let first = !cancelledFlag
         cancelledFlag = true
         let proc = current
+        let note = job.cancelNote
         lock.unlock()
         if first {
-            FileHandle.standardError.write(Data(
-                "\ncancelling — interrupting restic; data already uploaded is kept (dedup reuses it next run)\n".utf8))
+            FileHandle.standardError.write(Data("\n\(note)\n".utf8))
         }
         proc?.interrupt()
     }

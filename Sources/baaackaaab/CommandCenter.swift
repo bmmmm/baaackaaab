@@ -212,7 +212,12 @@ extension ConfigTUI {
         let (level, text) = DrillDashboard.line(lastDrill: loadLastDrill(), now: Date())
         switch level {
         case .none:   return dim(fit("  " + text, cols))
-        case .ok:     return dim(fit("  \u{2713} " + text, cols))
+        // Green, not dim: a passing drill is the most expensive evidence this
+        // tool produces — an actual restore, verified byte for byte. Rendering
+        // it in the same grey as "nothing here yet" understated the one line
+        // that answers "is the backup real". Matches the run and destination
+        // rows, which have always been green when clean.
+        case .ok:     return green(fit("  \u{2713} " + text, cols))
         case .stale:  return yellow(fit("  \u{2717} " + text, cols))
         case .failed: return red(fit("  \u{2717} " + text, cols))
         }
@@ -229,7 +234,7 @@ extension ConfigTUI {
             interval: LaunchdTimer.installedCheckSchedule()?.intendedInterval())
         switch level {
         case .none:   return dim(fit("  " + text, cols))
-        case .ok:     return dim(fit("  \u{2713} " + text, cols))
+        case .ok:     return green(fit("  \u{2713} " + text, cols))
         case .stale:  return yellow(fit("  ! " + text, cols))
         case .failed: return red(fit("  \u{2717} " + text, cols))
         }
@@ -281,7 +286,7 @@ extension ConfigTUI {
                                                   loaded: row.loaded, paused: row.paused,
                                                   schedule: row.schedule, now: Date())
         switch level {
-        case .ok:     return dim(fit("  \u{2713} " + text, cols))
+        case .ok:     return green(fit("  \u{2713} " + text, cols))
         case .none:   return dim(fit("    " + text + " \u{2014} press t to schedule it", cols))
         case .off:    return dim(fit("  \u{23F8} " + text, cols))
         case .broken: return yellow(fit("  ! " + text, cols))
@@ -297,7 +302,9 @@ extension ConfigTUI {
             lastSuccess: loadLastSuccessfulBackup(), interval: loadBackupInterval(), now: Date())
         switch level {
         case .none:    return dim(fit("  " + text, cols))
-        case .ok:      return dim(fit("  " + text, cols))
+        // Carries the tick the other status lines have, so the healthy states
+        // read as one column rather than as three different conventions.
+        case .ok:      return green(fit("  \u{2713} " + text, cols))
         case .overdue: return yellow(fit("  \u{2717} " + text, cols))
         }
     }

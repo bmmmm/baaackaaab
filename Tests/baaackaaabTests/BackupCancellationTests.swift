@@ -29,7 +29,7 @@ final class BackupCancellationTests: XCTestCase {
     // finishing its sleep.
     func testSignalCancelsAndInterruptsRegisteredChild() throws {
         let c = BackupCancellation()
-        c.arm()
+        c.arm(as: .backup)
 
         let child = Process()
         child.executableURL = URL(fileURLWithPath: "/bin/sleep")
@@ -56,7 +56,7 @@ final class BackupCancellationTests: XCTestCase {
     // fresh upload afterwards would ignore them.
     func testSetCurrentAfterCancelInterruptsImmediately() throws {
         let c = BackupCancellation()
-        c.arm()
+        c.arm(as: .backup)
         kill(getpid(), SIGTERM)   // process-directed — see the test above
         let deadline = Date().addingTimeInterval(5)
         while !c.isCancelled && Date() < deadline { usleep(20_000) }
@@ -69,5 +69,29 @@ final class BackupCancellationTests: XCTestCase {
         c.setCurrent(child)   // must interrupt at once
         child.waitUntilExit()
         XCTAssertNotEqual(child.terminationStatus, 0)
+    }
+
+    // MARK: - Cancel notice wording
+
+    // The notice states what a cancel LEAVES BEHIND, and only a backup uploads.
+    // Telling someone who interrupted a read-only check that "data already
+    // uploaded is kept" describes an upload that never happened.
+    func testOnlyTheBackupNoticeMentionsUploadedData() {
+        XCTAssertTrue(BackupCancellation.JobKind.backup.cancelNote.contains("uploaded"))
+        XCTAssertFalse(BackupCancellation.JobKind.check.cancelNote.contains("uploaded"))
+        XCTAssertFalse(BackupCancellation.JobKind.drill.cancelNote.contains("uploaded"))
+    }
+
+    func testTheReadOnlyJobsSayTheStoreIsUntouched() {
+        XCTAssertTrue(BackupCancellation.JobKind.check.cancelNote.contains("only reads"))
+        XCTAssertTrue(BackupCancellation.JobKind.drill.cancelNote.contains("only reads"))
+    }
+
+    func testEveryJobHasItsOwnNotice() {
+        let notes = [BackupCancellation.JobKind.backup, .check, .drill].map { $0.cancelNote }
+        XCTAssertEqual(Set(notes).count, notes.count, "a shared notice would be the bug this fixes")
+        for note in notes {
+            XCTAssertTrue(note.hasPrefix("cancelling — interrupting restic;"), note)
+        }
     }
 }

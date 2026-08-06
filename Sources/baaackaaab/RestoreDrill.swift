@@ -123,7 +123,7 @@ func restoreDrillCommand() {
     Console.banner("baaackaaab", tagline: "restore drill — scheduled proof a backup restores")
     // Arm cancellation so a SIGTERM/SIGINT interrupts the running
     // `restore --verify` child instead of orphaning it with the repo lock held.
-    BackupCancellation.shared.arm()
+    BackupCancellation.shared.arm(as: .drill)
     let sampleCount = cli.positiveInt("--sample", default: 5)
     let budget = cli.positiveInt("--max-bytes", default: 500_000_000, unit: "bytes")
 

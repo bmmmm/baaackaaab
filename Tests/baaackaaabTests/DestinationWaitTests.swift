@@ -157,7 +157,9 @@ final class DestinationWaitTests: XCTestCase {
         XCTAssertFalse(DestinationWait.waitCancellable(5, slice: 0.01, isCancelled: { true }))
     }
 
-    func testWaitCancellableSleepsTheFullDelayWhenNotCancelled() {
+    func testWaitCancellableSleepsRatherThanReturningAtOnce() {
+        // A lower bound only: asserting how long a sleep takes from ABOVE would be
+        // a claim about the machine's load, and this suite gates every push.
         let started = Date()
         XCTAssertTrue(DestinationWait.waitCancellable(0.2, slice: 0.05, isCancelled: { false }))
         XCTAssertGreaterThanOrEqual(Date().timeIntervalSince(started), 0.15)

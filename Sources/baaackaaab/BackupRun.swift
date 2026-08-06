@@ -118,7 +118,7 @@ struct BackupRun {
             // SIGTERM from here on interrupts the in-flight restic and unwinds to the
             // cancelled summary instead of hard-killing us. Armed this early so a cancel
             // during repository init is handled too, not just one during a backup.
-            BackupCancellation.shared.arm()
+            BackupCancellation.shared.arm(as: .backup)
 
             // Resolve exclude-files once for the whole run: expand the tilde (restic
             // does NOT expand `~`, the shell would) and drop any that no longer exist
