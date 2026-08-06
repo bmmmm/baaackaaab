@@ -39,15 +39,26 @@ Landed keymap:
 | Key | Normal | Edit |
 |-----|--------|------|
 | `↑`/`↓`, `j`/`k` | select job | adjust focused field |
-| `←`/`→` | — | move field |
+| `←`/`→` | hint: "press i to edit" | move field |
 | `1`-`7`, `0` | — | weekdays (non-monthly jobs) |
 | `i`, `e`, `Enter` | → Edit mode | — |
-| `w` | write (install/rewrite) | — |
-| `u` | undo (revert to installed) | — |
-| `x` | delete the schedule | — |
-| `o` | on/off (pause/resume) | — |
+| `w` | write (install/rewrite) | hint: normal-mode command |
+| `u` | undo (revert to installed) | hint: normal-mode command |
+| `x` | delete the schedule | hint: normal-mode command |
+| `o` | on/off (pause/resume) | hint: normal-mode command |
 | `Enter` | → Edit mode | write + back to Normal |
 | `esc` | back to home (confirm if dirty) | back to Normal, edit stays pending |
+
+Two rules the first cut broke, both worth keeping in mind for §3:
+
+- **No arrow key may change the mode.** `→` used to enter Edit, so an arrow
+  silently started editing a live schedule without anyone pressing `i` — the
+  exact thing the split exists to prevent. Left/right now emit a hint instead.
+- **Every hint names a key that works in the CURRENT mode.** The dirty note said
+  "u undoes it" while in Edit, where `u` does nothing; pressing it did nothing
+  and the screen read as stuck. Both the note and the preview label now switch
+  with the mode (`w installs:` / `enter installs:`), and a normal-mode key
+  pressed in Edit says where it lives rather than being swallowed.
 
 Decisions taken (both were open in the first draft):
 

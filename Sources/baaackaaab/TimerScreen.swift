@@ -149,13 +149,20 @@ extension ConfigTUI {
             body.append(yellow(fit("  note: this job has several times; the editor sets one \u{2014} installing replaces all with it (use --at repeatedly on the CLI for several)", cols)))
         }
         body.append("")
-        body.append(dim(fit("  w installs: " + previewSchedule().describe(), cols)))
+        // Both hints name the key that works in the CURRENT mode. Advertising a
+        // Normal-mode key while in Edit is what made the screen feel stuck: the
+        // note said "u undoes it", u does nothing here, and nothing explained why.
+        let writeKey = timerMode == .edit ? "enter" : "w"
+        body.append(dim(fit("  \(writeKey) installs: " + previewSchedule().describe(), cols)))
         if let next = previewSchedule().nextFireDate(after: Date()) {
             body.append(dim(fit("  first run:  " + timerStampFmt.string(from: next)
                                 + " (" + ScheduleDashboard.countdown(from: Date(), to: next) + ")", cols)))
         }
         if timerTouched {
-            body.append(yellow(fit("  unapplied edit \u{2014} w writes it, u undoes it", cols)))
+            let undoHint = timerMode == .edit
+                ? "  unapplied edit \u{2014} enter writes it, esc then u undoes it"
+                : "  unapplied edit \u{2014} w writes it, u undoes it"
+            body.append(yellow(fit(undoHint, cols)))
         }
 
         if body.count < contentH { body += Array(repeating: "", count: contentH - body.count) }
@@ -200,7 +207,12 @@ extension ConfigTUI {
         switch key {
         case .up, .char("k"): selectTimerJob(by: -1)
         case .down, .char("j"), .tab: selectTimerJob(by: 1)
-        case .char("i"), .char("e"), .enter, .right: timerMode = .edit
+        case .char("i"), .char("e"), .enter: timerMode = .edit
+        // Left/right are Edit-mode field motions and do NOT enter it. Right used
+        // to, which meant an arrow key silently started editing a live schedule —
+        // exactly what the mode split exists to prevent. Say where the door is
+        // instead of doing nothing.
+        case .left, .right: statusMsg = "press i to edit \(timerKind.title)"
         case .char("w"): installTimerNow()
         case .char("u"): discardTimerEdit()      // vi's undo: revert to what's installed
         case .char("x"): uninstallTimerNow()     // delete the schedule itself
@@ -222,6 +234,12 @@ extension ConfigTUI {
     /// this mode it reset the fields but left the mode alone: the screen went
     /// clean, read as "done", and the arrows silently kept editing values
     /// instead of moving to the next job.
+    ///
+    /// The corollary the first cut missed: a mode that rejects keys has to SAY
+    /// so, and every hint has to name a key that works in the CURRENT mode.
+    /// Otherwise the strictness reads as breakage — the note advertised "u
+    /// undoes it" while u did nothing here, which felt like being trapped in
+    /// the edit with only esc as a way out.
     func handleTimerEdit(_ key: Key) -> Bool {
         switch key {
         case .up: adjustTimer(by: 1)
@@ -244,6 +262,11 @@ extension ConfigTUI {
         // command, so it does not fire mid-edit.
         case .ctrlC: if confirmDiscardTimerEdits() && confirmQuit() { return false }
         case .eof: return false
+        // The whole-job commands live in Normal only. Swallowing them silently
+        // reads as a dead keyboard — the operator presses u to undo, nothing
+        // moves, and the screen looks stuck. Point at the door instead.
+        case .char(let c) where "wuxoq".contains(c):
+            statusMsg = "\(c) is a normal-mode command \u{2014} press esc first"
         default: break
         }
         return true

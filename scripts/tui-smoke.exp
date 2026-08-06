@@ -85,6 +85,17 @@ send "\033\[B"
 expect -- "-- NORMAL --"
 expect "of each month"
 
+# Left/right must NOT open Edit mode. Right used to, so an arrow key silently
+# started editing a live schedule without the operator ever pressing i.
+# Render order again: the badge is line 3, the status line is the second-last —
+# so the badge is asserted FIRST, within the same frame.
+send "\033\[C"
+expect -- "-- NORMAL --"
+expect "press i to edit"
+send "\033\[D"
+expect -- "-- NORMAL --"
+expect "press i to edit"
+
 # i enters Edit mode (vi's insert) on the drill — the badge names the job.
 send "i"
 expect -- "-- EDIT: restore drill --"
@@ -95,13 +106,24 @@ expect -- "-- EDIT: restore drill --"
 send "\033\[C"
 send "\033\[C"
 send "\033\[B"
+# In Edit the hint must name an Edit key. It used to say "u undoes it" here,
+# where u does nothing — which read as being trapped in the edit.
+expect "enter writes it"
+
+# A normal-mode command pressed in Edit says where it lives instead of looking
+# like a dead keyboard. u is the one the old hint wrongly advertised. The note
+# (body) renders before the status line, so assert it in that order.
+send "u"
+# It really did NOT undo — the edit is still pending...
 expect "unapplied edit"
+# ...and the status line says where u actually lives.
+expect "normal-mode command"
 
 # esc leaves Edit for Normal WITHOUT prompting, and the edit stays pending —
 # leaving insert mode neither writes nor discards, exactly like vi.
 send "\x1b"
 expect -- "-- NORMAL --"
-expect "unapplied edit"
+expect "w writes it, u undoes it"
 
 # u is undo, and it lands in Normal mode, so the very next arrow selects a job
 # instead of editing a value. This is the regression the strict split exists
