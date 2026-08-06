@@ -7,18 +7,23 @@ import Foundation
 // through a vi-style split (TimerMode), and the split is strict, because a
 // half-modal screen is worse than none:
 //
-//   Normal (vi's normal mode) — up/down walk the job list, and EVERY command
+//   Normal (vi's normal mode) — up/down walk the job list, and every command
 //     lives here: i/e edit, w write, u undo, o on/off, x delete. Nothing here
 //     touches a field value, so landing on the screen and reaching for the
-//     arrows cannot bump a real schedule.
-//   Edit (vi's insert mode) — ONLY field editing: left/right pick a field,
-//     up/down change its value, digits toggle weekdays. esc returns to Normal
-//     and leaves the edit pending, exactly like leaving vi's insert mode.
+//     arrows cannot bump a real schedule. No key here changes the mode except
+//     the explicit i/e/enter — an arrow that opened Edit would defeat the point.
+//   Edit (vi's insert mode) — field editing (left/right pick a field, up/down
+//     change its value, digits toggle weekdays), plus the two commands that
+//     RESOLVE the edit: w writes it, u undoes it. esc leaves it pending.
 //
-// The commands deliberately do NOT exist in Edit mode. They used to, and that
-// was the bug: discarding from inside Edit reset the fields but left the mode
-// alone, so a screen that looked finished still had the arrows editing values
-// instead of selecting the next job.
+// The line between the modes is what a key does to the EDIT, not tidiness:
+// w and u resolve it and always return to Normal, so the mode can never
+// outlive the edit it belonged to. That outliving was the original bug —
+// discarding from inside Edit reset the fields but left the mode alone, so a
+// screen that looked finished still had the arrows editing values instead of
+// selecting the next job. The whole-JOB commands (x delete, o on/off) are
+// about the schedule rather than the edit, so they stay in Normal, and pressing
+// one in Edit says where it lives instead of being silently swallowed.
 //
 // w writes (installs or rewrites) and x deletes a job; o pauses or resumes it
 // without touching its configured schedule (on/off, distinct from w/x which
@@ -149,27 +154,30 @@ extension ConfigTUI {
             body.append(yellow(fit("  note: this job has several times; the editor sets one \u{2014} installing replaces all with it (use --at repeatedly on the CLI for several)", cols)))
         }
         body.append("")
-        // Both hints name the key that works in the CURRENT mode. Advertising a
-        // Normal-mode key while in Edit is what made the screen feel stuck: the
-        // note said "u undoes it", u does nothing here, and nothing explained why.
-        let writeKey = timerMode == .edit ? "enter" : "w"
-        body.append(dim(fit("  \(writeKey) installs: " + previewSchedule().describe(), cols)))
+        // No mode split in these hints: w and u resolve the edit from either
+        // mode, so both keys are always true. They needed a mode-specific
+        // wording only while Edit rejected them — a hint naming a key that does
+        // nothing right now is what made the screen feel stuck.
+        body.append(dim(fit("  w installs: " + previewSchedule().describe(), cols)))
         if let next = previewSchedule().nextFireDate(after: Date()) {
             body.append(dim(fit("  first run:  " + timerStampFmt.string(from: next)
                                 + " (" + ScheduleDashboard.countdown(from: Date(), to: next) + ")", cols)))
         }
         if timerTouched {
-            let undoHint = timerMode == .edit
-                ? "  unapplied edit \u{2014} enter writes it, esc then u undoes it"
-                : "  unapplied edit \u{2014} w writes it, u undoes it"
-            body.append(yellow(fit(undoHint, cols)))
+            body.append(yellow(fit("  unapplied edit \u{2014} w writes it, u undoes it", cols)))
         }
 
         if body.count < contentH { body += Array(repeating: "", count: contentH - body.count) }
         lines += clipBody(body, to: contentH, cols: cols)
 
         lines.append("")
-        lines.append(dim(fit(statusLine(), cols)))
+        // This screen's guidance ("press i to edit …", "x is a normal-mode
+        // command …") rides the status line, where dim grey buried it among the
+        // permanently-dim footer. Lift the whole line while it carries a
+        // message. The colour has to wrap fit() rather than sit inside it —
+        // fit() measures display width and would count the escape bytes.
+        lines.append(statusMsg.isEmpty ? dim(fit(statusLine(), cols))
+                                       : bold(cyan(fit(statusLine(), cols))))
         for hl in helpLines { lines.append(dim(fit(hl, cols))) }
         draw(lines)
     }
@@ -187,7 +195,7 @@ extension ConfigTUI {
             return "\u{2191}/\u{2193} select job \u{2022} i edit \u{2022} w write \u{2022} u undo \u{2022} o on/off \u{2022} x delete \u{2022} esc back"
         case .edit:
             let dayKeys = timerKind.isMonthly ? "" : " \u{2022} 1-7 weekday \u{2022} 0 every day"
-            return "\u{2190}/\u{2192} field \u{2022} \u{2191}/\u{2193} adjust\(dayKeys) \u{2022} enter write+done \u{2022} esc normal"
+            return "\u{2190}/\u{2192} field \u{2022} \u{2191}/\u{2193} adjust\(dayKeys) \u{2022} enter/w write \u{2022} u undo \u{2022} esc normal"
         }
     }
 
@@ -256,16 +264,21 @@ extension ConfigTUI {
         case .char("0"): clearTimerWeekdays()
         // Write-and-leave: the "set the value, hit enter, done" shortcut. It
         // exits to Normal, so it cannot strand anyone in Edit mode.
-        case .enter: installTimerNow(); timerMode = .normal
+        // Resolving the edit works from here too, and both paths land in Normal.
+        // THAT is what makes it safe — the mode never outlives the edit it
+        // belonged to, which was the whole defect. Requiring esc first was a
+        // keystroke that bought nothing: after u there is no edit left to guard.
+        case .enter, .char("w"): installTimerNow(); timerMode = .normal
+        case .char("u"): discardTimerEdit(); timerMode = .normal
         case .esc: timerMode = .normal
         // Ctrl-C stays an escape hatch from every mode; plain q is a Normal-mode
         // command, so it does not fire mid-edit.
         case .ctrlC: if confirmDiscardTimerEdits() && confirmQuit() { return false }
         case .eof: return false
-        // The whole-job commands live in Normal only. Swallowing them silently
-        // reads as a dead keyboard — the operator presses u to undo, nothing
-        // moves, and the screen looks stuck. Point at the door instead.
-        case .char(let c) where "wuxoq".contains(c):
+        // What is left in Normal is the whole-JOB commands, which are about the
+        // schedule rather than the edit. Swallowing them silently reads as a
+        // dead keyboard, so point at the door instead.
+        case .char(let c) where "xoq".contains(c):
             statusMsg = "\(c) is a normal-mode command \u{2014} press esc first"
         default: break
         }

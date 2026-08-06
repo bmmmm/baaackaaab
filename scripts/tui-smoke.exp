@@ -106,31 +106,37 @@ expect -- "-- EDIT: restore drill --"
 send "\033\[C"
 send "\033\[C"
 send "\033\[B"
-# In Edit the hint must name an Edit key. It used to say "u undoes it" here,
-# where u does nothing — which read as being trapped in the edit.
-expect "enter writes it"
-
-# A normal-mode command pressed in Edit says where it lives instead of looking
-# like a dead keyboard. u is the one the old hint wrongly advertised. The note
-# (body) renders before the status line, so assert it in that order.
-send "u"
-# It really did NOT undo — the edit is still pending...
-expect "unapplied edit"
-# ...and the status line says where u actually lives.
-expect "normal-mode command"
-
-# esc leaves Edit for Normal WITHOUT prompting, and the edit stays pending —
-# leaving insert mode neither writes nor discards, exactly like vi.
-send "\x1b"
-expect -- "-- NORMAL --"
+# Both hint keys are true in BOTH modes now, so the note never has to change
+# wording — a hint naming a key that does nothing in the current mode is what
+# made the screen read as stuck.
 expect "w writes it, u undoes it"
 
-# u is undo, and it lands in Normal mode, so the very next arrow selects a job
-# instead of editing a value. This is the regression the strict split exists
-# for: discarding from inside Edit used to leave the screen looking finished
-# while the arrows kept changing the time.
+# A whole-JOB command is still Normal-only and says where it lives instead of
+# looking like a dead keyboard. Asserted with q rather than x or o: if a future
+# change ever let it through, the worst case is the app quitting and this gate
+# failing loudly — not the operator's real drill schedule being deleted.
+# The note (body) renders before the status line, so assert in that order.
+send "q"
+expect "unapplied edit"
+expect "normal-mode command"
+
+# esc leaves Edit for Normal WITHOUT resolving — the edit stays pending,
+# exactly like leaving vi's insert mode.
+send "\x1b"
+expect -- "-- NORMAL --"
+expect "unapplied edit"
+
+# Back into Edit, because undo has to work from THERE in one keystroke: u
+# undoes AND returns to Normal, with no esc confirmation in between.
+send "i"
+expect -- "-- EDIT: restore drill --"
 send "u"
+expect -- "-- NORMAL --"
 expect "edit discarded"
+
+# ...and the very next arrow selects a job instead of editing a value. This is
+# the regression the split exists for: discarding from inside Edit used to
+# leave the screen looking finished while the arrows kept changing the time.
 send "\033\[A"
 expect -- "-- NORMAL --"
 # Up from the drill is the integrity check: a weekday job, so the day-of-month

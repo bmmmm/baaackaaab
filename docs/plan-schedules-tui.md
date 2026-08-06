@@ -42,23 +42,33 @@ Landed keymap:
 | `←`/`→` | hint: "press i to edit" | move field |
 | `1`-`7`, `0` | — | weekdays (non-monthly jobs) |
 | `i`, `e`, `Enter` | → Edit mode | — |
-| `w` | write (install/rewrite) | hint: normal-mode command |
-| `u` | undo (revert to installed) | hint: normal-mode command |
+| `w`, `Enter` | write (install/rewrite) | write + back to Normal |
+| `u` | undo (revert to installed) | undo + back to Normal |
 | `x` | delete the schedule | hint: normal-mode command |
 | `o` | on/off (pause/resume) | hint: normal-mode command |
-| `Enter` | → Edit mode | write + back to Normal |
 | `esc` | back to home (confirm if dirty) | back to Normal, edit stays pending |
 
-Two rules the first cut broke, both worth keeping in mind for §3:
+The dividing line is **what a key does to the EDIT**, not tidiness:
+
+- `w` and `u` RESOLVE the edit, so they work in both modes and always land in
+  Normal. That return is what keeps them safe — the mode can never outlive the
+  edit it belonged to, which was the original defect. Requiring `esc` first
+  bought nothing: after an undo there is no edit left to guard.
+- `x` and `o` act on the JOB, not the edit, so they stay in Normal. Pressed in
+  Edit they say where they live rather than being silently swallowed — a mode
+  that rejects a key has to say so, or the strictness reads as a dead keyboard.
+
+Three rules earlier cuts broke, worth keeping in mind for §3:
 
 - **No arrow key may change the mode.** `→` used to enter Edit, so an arrow
-  silently started editing a live schedule without anyone pressing `i` — the
-  exact thing the split exists to prevent. Left/right now emit a hint instead.
-- **Every hint names a key that works in the CURRENT mode.** The dirty note said
-  "u undoes it" while in Edit, where `u` does nothing; pressing it did nothing
-  and the screen read as stuck. Both the note and the preview label now switch
-  with the mode (`w installs:` / `enter installs:`), and a normal-mode key
-  pressed in Edit says where it lives rather than being swallowed.
+  silently started editing a live schedule without anyone pressing `i`.
+- **Never advertise a key that does nothing in the current mode.** The dirty
+  note said "u undoes it" while Edit rejected `u`. Now that `w`/`u` work in
+  both modes the hints need no mode-conditional wording at all — the fix that
+  made the rule unnecessary is better than the one that satisfied it.
+- **Guidance must be visible.** The status line carrying "press i to edit …"
+  was dim grey inside a permanently-dim footer and went unread; it is now bold
+  cyan whenever it holds a message.
 
 Decisions taken (both were open in the first draft):
 
