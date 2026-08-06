@@ -3,3 +3,10 @@
 tmp/
 *.xcodeproj
 .DS_Store
+
+# Claude Code's per-machine state. Named individually rather than ignoring the
+# whole directory, so a shared project config (.claude/settings.json, agents,
+# skills) can still be committed later without fighting the ignore rule.
+.claude/settings.local.json
+.claude/.cc-writes/
+.claude/worktrees/
