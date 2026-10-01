@@ -1,0 +1,277 @@
+#!/usr/bin/expect -f
+# TUI smoke: drive the command center on a real pty — screens, SIGWINCH, clean
+# exit. Run via scripts/tui-smoke.sh, which builds the isolated environment.
+#
+# Pattern rules (hard-learned):
+#  * ASCII only — Tcl does not read this file as UTF-8, so matching the em-dash
+#    headers ("baaackaaab <emdash> timer") silently never fires. Match an ASCII
+#    substring of each screen instead.
+#  * unique per screen — footer key hints ("R restore", "t schedules") false-
+#    positive on bare words; use text only that screen renders:
+#      home:      "command center"          (header)
+#      editor:    "configure backup set"    (header)
+#      schedules: "scheduled jobs"          (section divider)
+#                 "w installs:"             (schedule preview line)
+#                 "-- NORMAL --"/"-- EDIT:" (mode badge; needs `expect --`,
+#                                            the leading dashes look like flags)
+#      restore w/o destinations: "no repository" (home status line)
+#    The home schedules section is matched by its per-job STATE words
+#    ("next in" / "not scheduled" / "NOT loaded"), which no other panel emits —
+#    matching "schedules" would pass on the footer hint alone with the section
+#    missing entirely (that false pass happened while this was written).
+
+set timeout 30
+set bin [lindex $argv 0]
+set config [lindex $argv 1]
+
+# Tall enough that the whole dashboard is above the fold — the schedules section
+# sits low, and a 24-row default would legitimately clip it (the app then says so,
+# but this gate is here to see the section itself). The later resize goes to 40,
+# so it is still a real size change.
+set stty_init "rows 45 columns 100"
+
+proc fail {msg} {
+    puts "\nFAIL: $msg"
+    exit 1
+}
+
+spawn $bin --center --config $config
+
+# Registered AFTER spawn: expect_after binds to the spawn_id current at
+# REGISTRATION time — before spawn that is the user stdin, which under a
+# headless runner is at EOF immediately and fails every expect on the spot.
+expect_after {
+    timeout { fail "timed out waiting for expected screen text" }
+    eof     { fail "TUI exited unexpectedly" }
+}
+
+expect "command center"
+
+# The home dashboard states every scheduled job's status. Which state each job is
+# in depends on the operator's real LaunchAgents, so match the set of state words
+# rather than any one of them.
+expect -re {next in|not scheduled|NOT loaded|unreadable}
+
+# Editor and back (ESC returns home when the center launched the editor).
+send "e"
+expect "configure backup set"
+send "\x1b"
+expect "command center"
+
+# Schedules screen and back. READ-ONLY by contract: LaunchAgents are NOT isolated
+# by BAAACKAAAB_SUPPORT_DIR, so this screen shows the operator's REAL timers —
+# never send "w" (write), "x" (delete) or "o" (on/off) here. Navigation, mode
+# switching and the preview line are pure computation, so they are safe to drive.
+# Note "i" is SAFE now: it enters Edit mode (vi's insert), it does not install.
+# Patterns below follow the screen's RENDER order within one frame — expect
+# consumes the stream sequentially, so asking for the mode badge (line 3) after
+# the "scheduled jobs" divider (line 5) waits for the NEXT repaint and times out
+# on a screen that is already correct. Order per frame:
+#   mode badge -> "scheduled jobs" -> job rows -> section divider ->
+#   time/days -> "w installs:" -> "first run:" -> "unapplied edit" -> status
+send "t"
+expect -- "-- NORMAL --"
+expect "scheduled jobs"
+expect "w installs:"
+
+# The mode split is the screen's core contract, so prove both halves.
+# Normal mode: down/down select the JOB and never touch a value. Landing on the
+# drill is asserted through "of each month", which ONLY a monthly job renders
+# (launchd ignores Weekday on a Day schedule) and which no machine's own
+# schedule values can change.
+send "\033\[B"
+expect -- "-- NORMAL --"
+send "\033\[B"
+expect -- "-- NORMAL --"
+expect "of each month"
+
+# Left/right must NOT open Edit mode. Right used to, so an arrow key silently
+# started editing a live schedule without the operator ever pressing i.
+# Render order again: the badge is line 3, the status line is the second-last —
+# so the badge is asserted FIRST, within the same frame.
+send "\033\[C"
+expect -- "-- NORMAL --"
+expect "press i to edit"
+send "\033\[D"
+expect -- "-- NORMAL --"
+expect "press i to edit"
+
+# i enters Edit mode (vi's insert) on the drill — the badge names the job.
+send "i"
+expect -- "-- EDIT: restore drill --"
+
+# Editing must reach the preview, not just repaint the widget: focus the day
+# field (right, right) and step it. Asserted via the dirty note rather than a
+# literal day number, which depends on the operator's real drill schedule.
+send "\033\[C"
+send "\033\[C"
+send "\033\[B"
+# Both hint keys are true in BOTH modes now, so the note never has to change
+# wording — a hint naming a key that does nothing in the current mode is what
+# made the screen read as stuck.
+expect "w writes it, u undoes it"
+
+# A whole-JOB command is still Normal-only and says where it lives instead of
+# looking like a dead keyboard. Asserted with q rather than x or o: if a future
+# change ever let it through, the worst case is the app quitting and this gate
+# failing loudly — not the operator's real drill schedule being deleted.
+# The note (body) renders before the status line, so assert in that order.
+send "q"
+expect "unapplied edit"
+expect "normal-mode command"
+
+# esc leaves Edit for Normal WITHOUT resolving — the edit stays pending,
+# exactly like leaving vi's insert mode.
+send "\x1b"
+expect -- "-- NORMAL --"
+expect "unapplied edit"
+
+# Back into Edit, because undo has to work from THERE in one keystroke: u
+# undoes AND returns to Normal, with no esc confirmation in between.
+send "i"
+expect -- "-- EDIT: restore drill --"
+send "u"
+expect -- "-- NORMAL --"
+expect "edit discarded"
+
+# ...and the very next arrow selects a job instead of editing a value. This is
+# the regression the split exists for: discarding from inside Edit used to
+# leave the screen looking finished while the arrows kept changing the time.
+send "\033\[A"
+expect -- "-- NORMAL --"
+# Up from the drill is the integrity check: a weekday job, so the day-of-month
+# row is gone and the weekday row is back.
+expect "days:"
+
+# Yank and put. y copies the displayed schedule; p fills another job's fields
+# from it and deliberately does NOT write, so this stays read-only towards the
+# operator's real LaunchAgents. The check -> drill direction is the lossy one
+# (a weekday job onto a monthly one), and the paste has to NAME what it could
+# not carry — a silent partial paste is the failure mode being guarded here.
+# Which reason fires depends on the operator's own check schedule (a weekday
+# list or an every-day cadence), so only "dropped" itself is asserted.
+# First move the check's hour, so the yanked value provably DIFFERS from what
+# the drill already holds. Without this the assertion is worthless on the common
+# setup where both jobs sit at 03:00: the paste would change nothing and a
+# broken paste would pass just as green. The edit is undone again below, and
+# nothing is written either way.
+send "i"
+expect -- "-- EDIT: integrity check --"
+send "\033\[A"
+expect "unapplied edit"
+
+send "\x1b"
+expect -- "-- NORMAL --"
+
+# Read the yanked time back out of the status line instead of hardcoding one —
+# the operator's own schedule is whatever it is.
+send "y"
+expect -re {yanked integrity check: [^\r\n]*at ([0-9][0-9]:[0-9][0-9])}
+set yanked $expect_out(1,string)
+
+# Undo the check's edit. The register must NOT follow it back: what was yanked
+# is a copy, not a live reference.
+send "u"
+expect -- "-- NORMAL --"
+expect "edit discarded"
+
+send "\033\[B"
+expect -- "-- NORMAL --"
+expect "of each month"
+
+send "p"
+expect -- "-- NORMAL --"
+# The EFFECT, not the message: the drill's own preview now carries the yanked
+# time, which is a value it did not have a moment ago.
+expect "w installs: monthly on day"
+expect "$yanked"
+# ...and the lossy direction is named rather than silently swallowed.
+expect "put integrity check onto restore drill"
+expect "dropped"
+
+# Undo, so the screen is left exactly as it was found. Nothing was written
+# either way — p only fills fields — but leaving a pending edit behind would
+# make the next section's state depend on this one.
+send "u"
+expect -- "-- NORMAL --"
+
+send "\x1b"
+expect "command center"
+
+# Runs screen: coverage calendar + history + the failure detail. Read-only, and
+# the run history IS isolated by BAAACKAAAB_SUPPORT_DIR, so an empty store here
+# is the expected state — assert the panels render, not their contents.
+send "H"
+expect "history, coverage"
+expect "calendar"
+# Either the legend under a rendered grid, or the empty-store notice in its
+# place — an isolated store has no history, the operator's has three months.
+expect -re {no run|no runs recorded yet}
+
+# l pages the run log through --log-tail. The log lives outside the isolated
+# support dir, so it may or may not exist — both paths must return cleanly.
+send "l"
+expect "run log"
+expect "press any key to return"
+# Drain to quiet BEFORE the keypress: the app is still re-enabling raw mode and
+# reclaiming the tty foreground when that prompt is printed, and a key sent into
+# that window is swallowed — the return to the runs screen then never comes and
+# reads as a hang. Same reason the resize proof below drains first.
+set save_timeout $timeout
+set timeout 1
+expect {
+    -re ".+" { exp_continue }
+    timeout {}
+}
+set timeout $save_timeout
+send " "
+expect "history, coverage"
+
+send "\x1b"
+expect "command center"
+
+# Restore with NO destinations (isolated support dir): stays on home with the
+# actionable status line — and never issues a live snapshot query.
+send "R"
+expect "no repository"
+# Drain until QUIET before the resize proof. Two failure modes this kills
+# (both hit 2026-08-04): screen anchors like "command center" recur in every
+# home frame, so without a drain the next expect matches stale BACKLOG bytes
+# instead of the redraw; and during the exec/sleep no-read phase the app can
+# block mid-frame in write() on the full pty buffer — a deadlock once the
+# script stops reading. After 1s of silence the buffer is empty and the app
+# is provably idle in its input loop.
+# (expect has NO -timeout flag — an inline one silently becomes a glob
+# pattern; the timeout VARIABLE is the only per-wait control.)
+set save_timeout $timeout
+set timeout 1
+expect {
+    -re ".+" { exp_continue }
+    timeout {}
+}
+set timeout $save_timeout
+
+# Resize: stty sets the new pty size, but empirically does NOT deliver
+# SIGWINCH to the child on macOS (verified 2026-08-04: no redraw ever came) —
+# send the signal explicitly. The buffer is drained and the app idle, so the
+# "command center" below can only come from the resize-triggered redraw.
+exec stty rows 40 cols 100 < $spawn_out(slave,name)
+exec kill -WINCH [exp_pid]
+expect "command center"
+
+# Quit (set untouched -> no confirm prompt) and require a clean exit status.
+# Local eof/timeout branches override the expect_after ones — do NOT try to
+# "clear" expect_after with `expect_after {}`: that registers an EMPTY glob
+# pattern that matches instantly, faking an eof and parking `wait` on a
+# still-running app (deadlock; cost a debugging session on 2026-08-04).
+# The local timeout branch matters too: falling through to `wait` without
+# one would turn a hung TUI into a silent hang instead of a clean FAIL.
+send "q"
+expect {
+    eof { }
+    timeout { fail "TUI did not exit after q" }
+}
+catch wait result
+set status [lindex $result 3]
+if {$status != 0} { fail "TUI exited with status $status" }
+puts "\nPASS: TUI smoke (screens + SIGWINCH + clean exit)"

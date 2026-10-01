@@ -1,0 +1,8 @@
+.build/
+.swiftpm/
+tmp/
+*.xcodeproj
+.DS_Store
+
+# Claude Code's per-machine state.
+.claude/

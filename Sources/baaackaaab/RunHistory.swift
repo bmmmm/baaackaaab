@@ -1,0 +1,339 @@
+import Foundation
+
+// Append-only run history: one NDJSON line per backup run under the support dir.
+// It is the unattended timer's black box — a scheduled run prints to a log nobody
+// reads, so this is where "did last night's backup succeed, and to which
+// destinations" actually lives. The dashboard reads the tail of it.
+//
+// Contains no secrets: run tag, timestamps, verified/total counts, per-destination
+// name + ok flag + (already-redacted) restic error string. Written 0600 anyway,
+// to match the rest of the store.
+
+enum RunHistoryError: Error, CustomStringConvertible {
+    case cannotOpen(String)
+    case shortWrite(written: Int, expected: Int)
+
+    var description: String {
+        switch self {
+        case .cannotOpen(let why): return "could not open run history for append: \(why)"
+        case .shortWrite(let w, let e): return "run history append was truncated (\(w)/\(e) bytes)"
+        }
+    }
+}
+
+/// One recorded backup run. Times are ISO-8601; `exitCode` mirrors the process
+/// exit (0 ok, 2 partial/failed, 1 crashed early, 130 cancelled).
+///
+/// A restore-drill run is stored in the SAME history with `kind == "drill"` and
+/// the drill-only fields (`bytes`, `snapshots`) set — the dashboard keeps drills
+/// out of the "recent runs" list and counts them separately for the "last
+/// verified restore" line. A scheduled integrity check is stored likewise with
+/// `kind == "check"` and `slice` set to the 1-based read-data slice it covered.
+/// The added fields are optionals encoded with `encodeIfPresent`, so a backup
+/// record's on-disk JSON is byte-identical to before (no new keys) — the
+/// append-only history stays forward/backward-readable.
+struct RunRecord: Codable {
+    let runTag: String
+    let start: Date
+    let end: Date
+    let exitCode: Int
+    let verified: Int
+    let total: Int
+    let sourceFailures: Int
+    let destinations: [Dest]
+    /// nil / "backup" = a normal backup run; "drill" = a scheduled restore drill;
+    /// "check" = a scheduled rotating integrity check.
+    let kind: String?
+    /// Restore-drill only: total bytes restored + byte-verified this drill.
+    let bytes: Int?
+    /// Restore-drill only: the snapshot ids the drill exercised.
+    let snapshots: [String]?
+    /// Integrity-check only: the 1-based read-data slice (i of t) this run
+    /// re-read, so the next run can advance the rotation and the dashboard can
+    /// show the coverage position.
+    let slice: Int?
+
+    /// Per-destination outcome for the run. `error` is nil on success; on failure
+    /// it is the restic error description (already redacted, never a secret).
+    ///
+    /// The four churn fields are this run's metrics aggregated across every restic
+    /// snapshot written to the destination (a run can produce several — Photos are
+    /// batched). They are optionals encoded with `encodeIfPresent`, so a record
+    /// from before this feature (no metrics) and one that legitimately had none
+    /// (dry run / all-skipped) both stay byte-identical to the old format — the
+    /// history remains forward/backward-readable. They feed the churn tripwire's
+    /// baseline; nothing else is persisted for it.
+    struct Dest: Codable {
+        let name: String
+        let ok: Bool
+        let error: String?
+        let dataAdded: Int64?
+        let filesChanged: Int64?
+        let filesNew: Int64?
+        let bytesProcessed: Int64?
+
+        enum CodingKeys: String, CodingKey {
+            case name, ok, error
+            case dataAdded = "data_added"
+            case filesChanged = "files_changed"
+            case filesNew = "files_new"
+            case bytesProcessed = "bytes_processed"
+        }
+
+        // Explicit init so the churn fields default to nil — existing call sites
+        // (the crash-early path, the drill, the tests) keep compiling unchanged.
+        init(name: String, ok: Bool, error: String?,
+             dataAdded: Int64? = nil, filesChanged: Int64? = nil,
+             filesNew: Int64? = nil, bytesProcessed: Int64? = nil) {
+            self.name = name
+            self.ok = ok
+            self.error = error
+            self.dataAdded = dataAdded
+            self.filesChanged = filesChanged
+            self.filesNew = filesNew
+            self.bytesProcessed = bytesProcessed
+        }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case runTag = "run_tag"
+        case start, end
+        case exitCode = "exit"
+        case verified, total
+        case sourceFailures = "source_failures"
+        case destinations
+        case kind, bytes, snapshots, slice
+    }
+
+    // Explicit init so the drill/check fields default to nil — existing backup
+    // call sites (BackupRun, the crash-early path, the tests) keep compiling
+    // unchanged.
+    init(runTag: String, start: Date, end: Date, exitCode: Int, verified: Int, total: Int,
+         sourceFailures: Int, destinations: [Dest],
+         kind: String? = nil, bytes: Int? = nil, snapshots: [String]? = nil,
+         slice: Int? = nil) {
+        self.runTag = runTag
+        self.start = start
+        self.end = end
+        self.exitCode = exitCode
+        self.verified = verified
+        self.total = total
+        self.sourceFailures = sourceFailures
+        self.destinations = destinations
+        self.kind = kind
+        self.bytes = bytes
+        self.snapshots = snapshots
+        self.slice = slice
+    }
+
+    /// True when every destination got every byte and nothing was skipped (for a
+    /// drill: every sampled file restored + verified; for a check: every
+    /// destination passed `restic check`).
+    var clean: Bool { exitCode == 0 }
+
+    /// A restore-drill record rather than a backup run.
+    var isDrill: Bool { kind == "drill" }
+
+    /// A scheduled integrity-check record rather than a backup run.
+    var isCheck: Bool { kind == "check" }
+
+    /// A real backup run (not a drill or an integrity check) — what the dashboard
+    /// counts as an actual backup for the "recent runs" list and the overdue gate.
+    var isBackup: Bool { !isDrill && !isCheck }
+}
+
+enum RunHistory {
+    /// ~/Library/Application Support/baaackaaab/runs.ndjson (honors the
+    /// BAAACKAAAB_SUPPORT_DIR override via CredentialFiles.dir, so tests and a
+    /// relocated store keep their history together with their credentials).
+    static var file: URL { CredentialFiles.dir.appendingPathComponent("runs.ndjson") }
+
+    private static func encoder() -> JSONEncoder {
+        let e = JSONEncoder()
+        e.dateEncodingStrategy = .iso8601
+        return e
+    }
+
+    private static func decoder() -> JSONDecoder {
+        let d = JSONDecoder()
+        d.dateDecodingStrategy = .iso8601
+        return d
+    }
+
+    /// Compact the history once it exceeds `rotateAtRecords`, keeping the newest
+    /// `rotateKeepRecords` — the file is otherwise strictly append-only and
+    /// grows without bound over years of daily runs, with every read
+    /// (`allRecords`) re-parsing the whole thing. Generous thresholds: ~5 years
+    /// of daily backup+check records fit before the first rotation, and the
+    /// kept tail is far deeper than every consumer's window (baseline 30,
+    /// dashboard 20, drill/check anchors are monthly/daily). Atomic
+    /// temp+rename, same pattern as every other store write; best-effort like
+    /// append itself — a failed rotation costs nothing but deferred compaction.
+    static let rotateAtRecords = 5_000
+    static let rotateKeepRecords = 2_000
+
+    private static func rotateIfNeeded() {
+        // Cheap size gate first — parsing the whole file on every append would
+        // be exactly the cost this rotation exists to bound. ~0.5 MB is well
+        // below rotateAtRecords worth of real records, so the count check
+        // (which needs the parse) only runs once the file is plausibly close.
+        var st = stat()
+        guard stat(file.path, &st) == 0, st.st_size > 512_000 else { return }
+        let records = allRecords()
+        guard records.count > rotateAtRecords else { return }
+        let keep = records.suffix(rotateKeepRecords)
+        let enc = encoder()
+        var data = Data()
+        for rec in keep {
+            guard let line = try? enc.encode(rec) else { continue }
+            data.append(line)
+            data.append(0x0A)
+        }
+        let fm = FileManager.default
+        let tmp = CredentialFiles.dir.appendingPathComponent(
+            ".runs.ndjson.tmp-\(ProcessInfo.processInfo.processIdentifier)")
+        if fm.fileExists(atPath: tmp.path) { try? fm.removeItem(at: tmp) }
+        guard fm.createFile(atPath: tmp.path, contents: data,
+                            attributes: [.posixPermissions: 0o600]) else { return }
+        if rename(tmp.path, file.path) != 0 { try? fm.removeItem(at: tmp) }
+    }
+
+    /// Append one record as a single JSON line, creating the file 0600 on first
+    /// write. Best-effort by contract: recording history must NEVER fail a backup,
+    /// so callers invoke this as `try?` — a full disk or a permission glitch costs
+    /// a log line, not the run.
+    static func append(_ record: RunRecord) throws {
+        rotateIfNeeded()
+        var data = try encoder().encode(record)
+        data.append(0x0A)   // newline — one record per line (NDJSON)
+        let fm = FileManager.default
+        try fm.createDirectory(at: CredentialFiles.dir, withIntermediateDirectories: true,
+                               attributes: [.posixPermissions: 0o700])
+        if !fm.fileExists(atPath: file.path) {
+            fm.createFile(atPath: file.path, contents: nil,
+                          attributes: [.posixPermissions: 0o600])
+        }
+        // O_APPEND makes the kernel seek-to-end and write atomically per write(2),
+        // so two concurrent runs (rare — restic repo-locks anyway) can't seek to
+        // the same offset and clobber each other's line. The record is one short
+        // NDJSON line written in a single write call, which preserves that
+        // atomicity (a partial write split could interleave with another writer).
+        let fd = open(file.path, O_WRONLY | O_APPEND)
+        guard fd >= 0 else { throw RunHistoryError.cannotOpen(String(cString: strerror(errno))) }
+        defer { close(fd) }
+
+        // Capture the pre-write size so a partial/failed write can be rolled back.
+        // A single write(2) may return fewer bytes than requested (a near-full disk,
+        // a signal), leaving a newline-less fragment; the NEXT O_APPEND record would
+        // then concatenate onto it, merging two JSON objects into one undecodable
+        // line and losing BOTH. So we loop until every byte lands and, on any error,
+        // ftruncate the fragment back off — the file stays a clean sequence of whole
+        // NDJSON lines (recent() only tolerates a truncated TRAILING line, not a
+        // fragment in the middle).
+        var st = stat()
+        let preSize: off_t = fstat(fd, &st) == 0 ? st.st_size : -1
+
+        let count = data.count
+        var total = 0
+        let ok = data.withUnsafeBytes { raw -> Bool in
+            guard let base = raw.baseAddress else { return false }
+            while total < count {
+                let n = write(fd, base + total, count - total)
+                if n > 0 { total += n; continue }
+                if n < 0 && errno == EINTR { continue }   // interrupted — retry
+                return false                               // real error — give up
+            }
+            return true
+        }
+        guard ok && total == count else {
+            if preSize >= 0 { ftruncate(fd, preSize) }
+            throw RunHistoryError.shortWrite(written: total, expected: count)
+        }
+    }
+
+    /// Every record in file order (oldest → newest). Tolerant of a corrupt line
+    /// ANYWHERE (a crash mid-write, an O_APPEND interleaving): that line is dropped
+    /// rather than failing the whole read.
+    private static func allRecords() -> [RunRecord] {
+        guard let data = FileManager.default.contents(atPath: file.path),
+              let text = String(data: data, encoding: .utf8) else { return [] }
+        let dec = decoder()
+        return text.split(separator: "\n").compactMap { line -> RunRecord? in
+            guard let d = line.data(using: .utf8) else { return nil }
+            return try? dec.decode(RunRecord.self, from: d)
+        }
+    }
+
+    /// The last `limit` records, newest first, for the dashboard.
+    static func recent(_ limit: Int) -> [RunRecord] {
+        Array(allRecords().suffix(limit).reversed())
+    }
+
+    /// Every record that ENDED at or after `date`, newest first — the runs screen's
+    /// feed. Bounded by a date rather than by a count because its calendar covers a
+    /// fixed span: a count deep enough for three months of backup+check records
+    /// would be an arbitrary number that silently clips the grid once a second
+    /// timer is added.
+    static func since(_ date: Date) -> [RunRecord] {
+        allRecords().filter { $0.end >= date }.reversed()
+    }
+
+    /// The newest restore-drill record, or nil if none has run — the source for
+    /// the dashboard's "last verified restore" line and doctor's drill verdict.
+    /// Scans the whole history: a drill is monthly, so it can sit far behind the
+    /// daily backup records `recent()` returns.
+    static func lastDrill() -> RunRecord? {
+        allRecords().last { $0.isDrill }
+    }
+
+    /// How many restore drills have been recorded — the rotation cursor the drill
+    /// uses to advance its sampled source across successive runs. Scoped to one
+    /// destination when given: the cursor must not advance because a DIFFERENT
+    /// destination was drilled by hand, or the rotation skips a source on the
+    /// next scheduled (primary) drill. nil counts all drills (dashboard totals).
+    static func drillCount(destination: String? = nil) -> Int {
+        allRecords().reduce(0) { count, rec in
+            guard rec.isDrill else { return count }
+            if let destination,
+               !rec.destinations.contains(where: { $0.name == destination }) { return count }
+            return count + 1
+        }
+    }
+
+    /// The last `limit` SUCCESSFUL backup records that name `destination`,
+    /// newest first — the churn-anomaly baseline feed. Filtering happens BEFORE
+    /// the window is applied: a shared `recent(30)` window shrank the effective
+    /// per-destination baseline by 1/N destinations plus every interleaved
+    /// drill/check record, making the tripwire noisier than the window-size
+    /// constant implies.
+    static func recentBackups(_ limit: Int, destination: String) -> [RunRecord] {
+        Array(allRecords().filter { rec in
+            rec.isBackup && rec.exitCode == 0
+                && rec.destinations.contains { $0.name == destination }
+        }.suffix(limit).reversed())
+    }
+
+    /// The newest scheduled integrity-check record, or nil if none has run — the
+    /// source for the dashboard's "last integrity check" line and the rotation
+    /// cursor the next check advances from. Scans the whole history: a check may
+    /// sit behind more frequent backup records.
+    static func lastCheck() -> RunRecord? {
+        allRecords().last { $0.isCheck }
+    }
+
+    /// The newest SUCCESSFUL backup run (exit 0, not a drill or check), or nil if
+    /// none — the anchor for the catch-up staleness gate and the dashboard's
+    /// overdue judgment. A partial/failed backup does not count as "backed up".
+    static func lastSuccessfulBackup() -> RunRecord? {
+        allRecords().last { $0.isBackup && $0.clean }
+    }
+
+    /// The newest backup-kind record regardless of outcome, or nil if none — the
+    /// status export's `last_run` anchor. Scans the whole history: with the
+    /// backup timer dead but the daily check timer alive, the last real backup
+    /// can sit arbitrarily far behind the `recent()` window, and `last_run`
+    /// reporting "never backed up" in that state is exactly the wrong signal.
+    static func lastBackup() -> RunRecord? {
+        allRecords().last { $0.isBackup }
+    }
+}

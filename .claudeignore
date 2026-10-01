@@ -1,0 +1,23 @@
+# Build artifacts
+.build/
+.swiftpm/
+tmp/
+
+# macOS metadata
+.DS_Store
+*.xcodeproj
+
+# Secrets — never index or read
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*credentials*
+*secret*
+*token*
+.ssh/
+id_*
+*_host_key

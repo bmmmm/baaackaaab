@@ -1,0 +1,702 @@
+import Foundation
+#if canImport(Darwin)
+import Darwin
+#endif
+
+enum TimerError: Error, CustomStringConvertible {
+    case launchctl(Int32)
+    case notInstalled(String)
+
+    var description: String {
+        switch self {
+        case .launchctl(let code):
+            return "launchctl failed (code \(code)) — inspect `launchctl print gui/$(id -u)/\(LaunchdTimer.label)`"
+        case .notInstalled(let humanName):
+            return "no \(humanName) plist found — nothing to resume; install it first"
+        }
+    }
+}
+
+/// A backup schedule: one or more times of day, optionally restricted to specific
+/// weekdays. An empty `weekdays` means every day. Weekday numbers follow launchd's
+/// StartCalendarInterval convention: 0 (or 7) = Sunday, 1 = Monday … 6 = Saturday.
+/// The launchd job fires once per (weekday × time) combination.
+struct Schedule {
+    var times: [(hour: Int, minute: Int)]
+    var weekdays: [Int]      // empty = daily
+    /// Non-nil = a MONTHLY schedule that fires on this day-of-month (launchd's
+    /// `Day` key). Used by the restore-drill timer; a monthly schedule ignores
+    /// `weekdays`. nil keeps the daily/weekly behaviour above.
+    var dayOfMonth: Int? = nil
+
+    /// Short three-letter weekday name (Sun…Sat) for a launchd weekday number.
+    static func weekdayName(_ wd: Int) -> String {
+        let names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+        return names[((wd % 7) + 7) % 7]
+    }
+
+    /// The intended interval between scheduled runs — the anchor for the catch-up
+    /// staleness gate and the dashboard's overdue judgment. Daily (or monthly)
+    /// collapses to its base period; a weekday list uses the LARGEST gap between
+    /// consecutive scheduled days, so a run is only "overdue" once the longest
+    /// normal quiet stretch has passed (mon/wed/fri → 3 days, from Fri to Mon).
+    /// Times-of-day are ignored: day granularity is what the boot catch-up needs.
+    func intendedInterval() -> TimeInterval {
+        let day: TimeInterval = 86_400
+        if dayOfMonth != nil { return 30 * day }        // monthly (drill/check use their own gates)
+        if weekdays.isEmpty { return day }              // daily
+        return Double(Self.maxWeekdayGap(weekdays)) * day
+    }
+
+    /// The largest gap (in days) between consecutive scheduled weekdays, treating
+    /// the week as a cycle (so a single day → 7, and the wrap from the last day
+    /// back to the first is included). Pure — directly unit-testable.
+    static func maxWeekdayGap(_ weekdays: [Int]) -> Int {
+        let ds = Set(weekdays.map { (($0 % 7) + 7) % 7 }).sorted()
+        guard let first = ds.first, let last = ds.last else { return 1 }
+        if ds.count == 1 { return 7 }
+        var gap = (first + 7) - last                    // wrap-around gap
+        for i in 1..<ds.count { gap = max(gap, ds[i] - ds[i - 1]) }
+        return gap
+    }
+
+    /// The next moment this schedule fires after `now`, computed from the same
+    /// keys launchd reads. nil when it can never fire (no times). Walks forward a
+    /// day at a time and builds every candidate through `Calendar`, so month
+    /// lengths and DST shifts are handled by the calendar rather than by
+    /// arithmetic on 86_400. Pure — directly unit-testable.
+    func nextFireDate(after now: Date, calendar: Calendar = .current) -> Date? {
+        guard !times.isEmpty else { return nil }
+        let sorted = times.sorted { ($0.hour, $0.minute) < ($1.hour, $1.minute) }
+        // 400 days is past the worst case for a monthly schedule (a day-of-month
+        // plus a leap year); daily and weekly ones resolve inside the first week.
+        for offset in 0...400 {
+            guard let day = calendar.date(byAdding: .day, value: offset, to: now) else { continue }
+            let comps = calendar.dateComponents([.weekday, .day], from: day)
+            if let dom = dayOfMonth {
+                guard comps.day == dom else { continue }
+            } else if !weekdays.isEmpty {
+                // Calendar's weekday is 1-based from Sunday; launchd's is 0-based.
+                guard let wd = comps.weekday,
+                      weekdays.contains(where: { (($0 % 7) + 7) % 7 == wd - 1 }) else { continue }
+            }
+            for t in sorted {
+                if let fire = calendar.date(bySettingHour: t.hour, minute: t.minute, second: 0, of: day),
+                   fire > now { return fire }
+            }
+        }
+        return nil
+    }
+
+    /// Human-readable summary, e.g. "daily at 12:00", "Mon, Wed, Fri at 09:00,
+    /// 18:00", or "monthly on day 1 at 03:00".
+    func describe() -> String {
+        let t = times.map { String(format: "%02d:%02d", $0.hour, $0.minute) }.joined(separator: ", ")
+        if let d = dayOfMonth { return "monthly on day \(d) at \(t)" }
+        if weekdays.isEmpty { return "daily at \(t)" }
+        let days = weekdays.sorted().map { Self.weekdayName($0) }.joined(separator: ", ")
+        return "\(days) at \(t)"
+    }
+
+    /// The editor fields a yanked schedule turns into on a given job, plus what
+    /// the copy could not carry. See `Schedule.paste`.
+    struct Paste: Equatable {
+        var hour: Int
+        var minute: Int
+        var weekdays: [Int]      // empty = every day
+        var dayOfMonth: Int
+        /// Everything the source could not express on this job, worded for the
+        /// status line. Empty means the paste was lossless.
+        var dropped: [String]
+    }
+
+    /// Adapt `source` to the calendar shape of `kind`, given the target job's
+    /// CURRENT editor fields.
+    ///
+    /// One rule throughout: **whatever the source cannot express on this job is
+    /// left exactly as the target already had it**, and named in `dropped`.
+    /// launchd's monthly `Day` and daily/weekly `Weekday` are different plist
+    /// keys and each job reads only its own, so a paste across that boundary is
+    /// necessarily lossy — the failure mode worth engineering against is not the
+    /// loss but a SILENT loss, hence `dropped` rather than a best-effort guess.
+    /// The same rule covers the time-of-day: a source with no times at all
+    /// leaves the target's clock untouched instead of inventing midnight.
+    ///
+    /// Pure — directly unit-testable, and the renderer only reads its result.
+    static func paste(_ source: Schedule, onto kind: LaunchdTimer.Kind,
+                      target: (hour: Int, minute: Int, weekdays: [Int], dayOfMonth: Int)) -> Paste {
+        var dropped: [String] = []
+
+        // The editor holds ONE time; a multi-time schedule (only reachable via
+        // repeated --at on the CLI) collapses to its earliest.
+        let sorted = source.times.sorted { ($0.hour, $0.minute) < ($1.hour, $1.minute) }
+        let time = sorted.first ?? (hour: target.hour, minute: target.minute)
+        if sorted.count > 1 { dropped.append("\(sorted.count - 1) further time(s)") }
+
+        if kind.isMonthly {
+            // A monthly job fires on a day-of-month and ignores Weekday entirely.
+            guard let day = source.dayOfMonth else {
+                dropped.append(source.weekdays.isEmpty ? "its every-day cadence" : "its weekday list")
+                return Paste(hour: time.hour, minute: time.minute, weekdays: [],
+                             dayOfMonth: target.dayOfMonth, dropped: dropped)
+            }
+            return Paste(hour: time.hour, minute: time.minute, weekdays: [],
+                         dayOfMonth: day, dropped: dropped)
+        }
+
+        // A daily/weekly job has no Day key to put a day-of-month into.
+        if source.dayOfMonth != nil {
+            dropped.append("its day-of-month")
+            return Paste(hour: time.hour, minute: time.minute, weekdays: target.weekdays,
+                         dayOfMonth: target.dayOfMonth, dropped: dropped)
+        }
+        return Paste(hour: time.hour, minute: time.minute, weekdays: source.weekdays,
+                     dayOfMonth: target.dayOfMonth, dropped: dropped)
+    }
+}
+
+/// The scheduled-backup LaunchAgent. Installs a per-user launchd job that runs
+/// this binary daily with `--run-tag scheduled` — which is non-bare, so under
+/// launchd (no TTY) it goes straight to the backup of the declarative set
+/// instead of opening the TUI or printing usage.
+///
+/// The job runs in the user's GUI (aqua) session, so it can reach Photos (with a
+/// granted TCC entitlement) — same identity as an interactive run. The restic
+/// secrets come from the 0600 credential files (read directly by restic), so the
+/// run needs no Keychain and no live login session for the secrets. The one
+/// thing still keyed on code identity is the Photos TCC grant: build with a
+/// stable signing identity (`make release` re-signs after each build), otherwise
+/// an ad-hoc binary's identity churns on every rebuild and resets that grant.
+/// With a stable identity, grant Photos once and it persists.
+enum LaunchdTimer {
+    static let label = "io.baaackaaab.backup"
+    /// The MONTHLY restore-drill LaunchAgent — a separate label + plist from the
+    /// backup timer, so the two schedules install/uninstall independently.
+    static let drillLabel = "io.baaackaaab.drill"
+    /// The rotating integrity-check LaunchAgent — again its own label + plist, so
+    /// the check schedule is independent of the backup and drill schedules.
+    static let checkLabel = "io.baaackaaab.check"
+
+    /// The three scheduled jobs as one enumerable thing, so the dashboard and the
+    /// schedules editor iterate over them instead of repeating a
+    /// backup/check/drill switch at every call site. Each case knows its plist
+    /// label, the CLI flags that install/remove it, and its install defaults.
+    enum Kind: String, CaseIterable {
+        case backup, check, drill
+
+        var label: String {
+            switch self {
+            case .backup: return LaunchdTimer.label
+            case .check:  return LaunchdTimer.checkLabel
+            case .drill:  return LaunchdTimer.drillLabel
+            }
+        }
+
+        /// Short dashboard name — what this job does, not what it is called.
+        var title: String {
+            switch self {
+            case .backup: return "backup"
+            case .check:  return "integrity check"
+            case .drill:  return "restore drill"
+            }
+        }
+
+        var installFlag: String {
+            switch self {
+            case .backup: return "--install-timer"
+            case .check:  return "--install-check-timer"
+            case .drill:  return "--install-drill-timer"
+            }
+        }
+
+        var uninstallFlag: String {
+            switch self {
+            case .backup: return "--uninstall-timer"
+            case .check:  return "--uninstall-check-timer"
+            case .drill:  return "--uninstall-drill-timer"
+            }
+        }
+
+        /// Unload the job but keep its plist — the "off" half of on/off, distinct
+        /// from `uninstallFlag`, which deletes the schedule outright.
+        var pauseFlag: String {
+            switch self {
+            case .backup: return "--pause-timer"
+            case .check:  return "--pause-check-timer"
+            case .drill:  return "--pause-drill-timer"
+            }
+        }
+
+        /// Reload the same plist `pauseFlag` unloaded — the "on" half of on/off.
+        var resumeFlag: String {
+            switch self {
+            case .backup: return "--resume-timer"
+            case .check:  return "--resume-check-timer"
+            case .drill:  return "--resume-drill-timer"
+            }
+        }
+
+        /// The drill fires on a day-of-month (launchd's `Day`); the other two on a
+        /// weekday list (`Weekday`, empty = daily). Drives which field the editor
+        /// offers — a weekday set on a monthly schedule would be silently ignored.
+        var isMonthly: Bool { self == .drill }
+
+        /// What a fresh install lands on when the operator changes nothing —
+        /// mirrors the CLI defaults in `CLIArguments.schedule()/drillSchedule()`.
+        var defaultTime: (hour: Int, minute: Int) {
+            switch self {
+            case .backup: return (12, 0)
+            case .check, .drill: return (3, 0)
+            }
+        }
+    }
+
+    /// The installed schedule for one job, read back from its plist. nil when the
+    /// job is not installed or its plist is unparseable.
+    static func installedSchedule(_ kind: Kind) -> Schedule? {
+        guard let data = try? Data(contentsOf: plistURL(for: kind.label)) else { return nil }
+        return schedule(fromPlistData: data)
+    }
+
+    /// Whether one job's plist is on disk and whether launchd has it loaded.
+    /// Spawns launchctl — call it on refresh, never per render.
+    static func state(_ kind: Kind) -> (installed: Bool, loaded: Bool) { stateOf(label: kind.label) }
+
+    /// Whether a job was explicitly paused (unloaded on purpose, plist kept) —
+    /// separate from `loaded`, which is also false when a job fails to load for
+    /// an unrelated reason. A plain marker file next to the credential store
+    /// (so BAAACKAAAB_SUPPORT_DIR-isolated tests never touch the real one), read
+    /// directly off disk with no launchctl spawn.
+    static func isPaused(_ kind: Kind) -> Bool {
+        FileManager.default.fileExists(atPath: pausedMarkerURL(for: kind.label).path)
+    }
+
+    private static func pausedMarkerURL(for label: String) -> URL {
+        CredentialFiles.dir.appendingPathComponent("\(label).paused")
+    }
+
+    private static var home: URL { FileManager.default.homeDirectoryForCurrentUser }
+    private static func plistURL(for label: String) -> URL {
+        home.appendingPathComponent("Library/LaunchAgents/\(label).plist")
+    }
+    private static var plistURL: URL { plistURL(for: label) }
+    private static var logURL: URL { home.appendingPathComponent("Library/Logs/baaackaaab.log") }
+    private static var domain: String { "gui/\(getuid())" }
+
+    // MARK: - Install / uninstall / status
+
+    /// Write (or rewrite) the LaunchAgent and load it. `configPath` is passed to
+    /// the scheduled run only when it differs from the default, so the timer backs
+    /// up the same set the user edits. `schedule` carries one or more times and an
+    /// optional weekday restriction; launchd fires once per (weekday × time).
+    static func install(schedule: Schedule, configPath: URL) throws {
+        Console.banner("baaackaaab", tagline: "scheduled backup")
+
+        let exe = executablePath()
+        // `--catch-up` + RunAtLoad make the job also fire once at login/boot and
+        // catch up a backup missed while the Mac was off. The marker gates the run
+        // through a staleness check first (fresh → quiet skip; overdue → back up),
+        // so the extra login/boot fire is cheap and the duplicate right after a
+        // normal calendar run is swallowed.
+        var program = [exe, "--run-tag", "scheduled", "--catch-up"]
+        if configPath.path != BackupSet.defaultPath().path {
+            program += ["--config", configPath.path]
+        }
+
+        let plist = try writeAndLoad(label: label, program: program, schedule: schedule, runAtLoad: true)
+
+        Console.section("LaunchAgent", detail: plist.path)
+        Console.info([
+            ("binary", exe),
+            ("schedule", "\(schedule.describe()) (runs at next wake if asleep)"),
+            ("run-tag", "scheduled"),
+            ("log", logURL.path),
+        ])
+
+        let set = (try? BackupSet.load(from: configPath)) ?? BackupSet()
+        if set.isEmpty {
+            Console.warn("the backup set is empty — the scheduled run backs up nothing until you add folders (`baaackaaab --configure`)")
+        }
+
+        Console.success("timer installed and loaded")
+        Console.warn("Build with `make release` so the binary carries a stable code-signing identity — then its Photos (TCC) grant survives rebuilds. restic reads the credential files directly, so no Keychain grant is needed; the only one-time grant is Photos: run one manual backup of a Photos album so the unattended run isn't blocked on a prompt it can't answer. Verify the path end-to-end with `baaackaaab --check`. If you ever rebuild with bare `swift build`, re-run `make sign` to restore the identity.")
+        Console.note("verify:  launchctl print \(domain)/\(label)\nlogs:    tail -f \(logURL.path)\nremove:  baaackaaab --uninstall-timer")
+    }
+
+    /// Install (or rewrite) the MONTHLY restore-drill LaunchAgent. It runs
+    /// `baaackaaab --restore-drill`, which restore-verifies a rotating sample into
+    /// a temp dir, records the outcome, and banners only on a FAILED drill. Reads
+    /// its destination from the store (defaults to the primary), so it needs no
+    /// --config — the drill exercises the repo's snapshots, not the backup set.
+    static func installDrill(schedule: Schedule) throws {
+        Console.banner("baaackaaab", tagline: "scheduled restore drill")
+
+        let exe = executablePath()
+        // RunAtLoad + `--catch-up`, same machinery as the backup timer: a Mac
+        // that is asleep/off at the scheduled hour every month would otherwise
+        // NEVER drill — StartCalendarInterval alone has no boot/login make-up
+        // fire. The gate keeps the login fire cheap (fresh → quiet skip).
+        let plist = try writeAndLoad(label: drillLabel, program: [exe, "--restore-drill", "--catch-up"],
+                                     schedule: schedule, runAtLoad: true)
+
+        Console.section("LaunchAgent", detail: plist.path)
+        Console.info([
+            ("binary", exe),
+            ("schedule", "\(schedule.describe()) (runs at next wake if asleep)"),
+            ("action", "restore-drill (read-only; proves a rotating sample restores)"),
+            ("log", logURL.path),
+        ])
+        Console.success("restore-drill timer installed and loaded")
+        Console.note("The drill is read-only against the store and banners only on failure. It reuses the Photos-independent restore path, so no extra grant is needed beyond what the backup timer already requires.")
+        Console.note("verify:  launchctl print \(domain)/\(drillLabel)\nlogs:    tail -f \(logURL.path)\nremove:  baaackaaab --uninstall-drill-timer")
+    }
+
+    /// Install (or rewrite) the rotating integrity-check LaunchAgent. It runs
+    /// `baaackaaab --verify-repo --rotate-read-data`, which advances a read-data
+    /// slice (1/8 of the pack data per run), re-hashes it with `restic check`,
+    /// records the outcome, and banners only on a FAILED check. Reads its
+    /// destinations from the store, so it needs no --config — the check exercises
+    /// the repos, not the backup set. `schedule` is daily/weekly like the backup
+    /// timer (`--at` / `--days`), so the operator picks the re-read cadence.
+    static func installCheck(schedule: Schedule) throws {
+        Console.banner("baaackaaab", tagline: "scheduled integrity check")
+
+        let exe = executablePath()
+        // RunAtLoad + `--catch-up`, same machinery as the backup timer — without
+        // it a laptop that is routinely asleep at the scheduled hour never
+        // advances the read-data rotation, and the "8 runs = full coverage"
+        // bit-rot guarantee silently stalls.
+        let plist = try writeAndLoad(label: checkLabel, program: [exe, "--verify-repo", "--rotate-read-data", "--catch-up"],
+                                     schedule: schedule, runAtLoad: true)
+
+        Console.section("LaunchAgent", detail: plist.path)
+        Console.info([
+            ("binary", exe),
+            ("schedule", "\(schedule.describe()) (runs at next wake if asleep)"),
+            ("action", "verify-repo --rotate-read-data (read-only; re-reads 1/8 of pack data per run)"),
+            ("log", logURL.path),
+        ])
+        Console.success("integrity-check timer installed and loaded")
+        Console.note("Each run re-reads one rotating eighth of the pack data with `restic check`; after 8 runs every pack has been re-hashed once — the on-disk bit-rot detector the restore drill cannot be. Read-only against the store, banners only on failure.")
+        Console.note("verify:  launchctl print \(domain)/\(checkLabel)\nlogs:    tail -f \(logURL.path)\nremove:  baaackaaab --uninstall-check-timer")
+    }
+
+    /// Write the plist for `label` and (re)load it via launchctl. Shared by the
+    /// backup and restore-drill installers. Returns the plist path for the caller
+    /// to report. Reloads cleanly: bootout any prior instance (ignore "not
+    /// loaded"), then bootstrap; fall back to the legacy load/unload verbs where
+    /// bootstrap is unavailable.
+    private static func writeAndLoad(label: String, program: [String], schedule: Schedule,
+                                     runAtLoad: Bool = false) throws -> URL {
+        let plist = plistURL(for: label)
+        try ensureDir(plist.deletingLastPathComponent())
+        try ensureDir(logURL.deletingLastPathComponent())
+
+        let xml = plistXML(label: label, program: program, schedule: schedule, log: logURL.path, runAtLoad: runAtLoad)
+        try xml.write(to: plist, atomically: true, encoding: .utf8)
+
+        _ = launchctl(["bootout", "\(domain)/\(label)"])
+        if launchctl(["bootstrap", domain, plist.path]) != 0 {
+            _ = launchctl(["unload", plist.path])
+            let legacy = launchctl(["load", "-w", plist.path])
+            if legacy != 0 { throw TimerError.launchctl(legacy) }
+        }
+        // A fresh install/rewrite always ends up loaded, so any leftover pause
+        // marker from before would now contradict reality (dashboard reading
+        // "off" for a job that just came back up).
+        try? FileManager.default.removeItem(at: pausedMarkerURL(for: label))
+        return plist
+    }
+
+    /// Unload the backup job and delete its plist. Idempotent.
+    static func uninstall() throws {
+        Console.banner("baaackaaab", tagline: "scheduled backup")
+        try uninstall(label: label, humanName: "timer")
+    }
+
+    /// Unload the restore-drill job and delete its plist. Idempotent.
+    static func uninstallDrill() throws {
+        Console.banner("baaackaaab", tagline: "scheduled restore drill")
+        try uninstall(label: drillLabel, humanName: "restore-drill timer")
+    }
+
+    /// Unload the integrity-check job and delete its plist. Idempotent.
+    static func uninstallCheck() throws {
+        Console.banner("baaackaaab", tagline: "scheduled integrity check")
+        try uninstall(label: checkLabel, humanName: "integrity-check timer")
+    }
+
+    private static func uninstall(label: String, humanName: String) throws {
+        _ = launchctl(["bootout", "\(domain)/\(label)"])
+        let plist = plistURL(for: label)
+        try? FileManager.default.removeItem(at: pausedMarkerURL(for: label))
+        if FileManager.default.fileExists(atPath: plist.path) {
+            try FileManager.default.removeItem(at: plist)
+            Console.success("\(humanName) removed (\(plist.path))")
+        } else {
+            Console.note("no \(humanName) plist found — nothing to remove")
+        }
+    }
+
+    // MARK: - Pause / resume (on/off)
+
+    /// Unload the backup job WITHOUT deleting its plist — the "off" half of
+    /// on/off. The configured schedule stays on disk; `resumeTimer` reloads the
+    /// identical file. Idempotent — pausing an already-unloaded job is harmless.
+    static func pauseTimer() {
+        Console.banner("baaackaaab", tagline: "scheduled backup")
+        pause(label: label, humanName: "timer", resumeFlag: Kind.backup.resumeFlag)
+    }
+    static func pauseDrillTimer() {
+        Console.banner("baaackaaab", tagline: "scheduled restore drill")
+        pause(label: drillLabel, humanName: "restore-drill timer", resumeFlag: Kind.drill.resumeFlag)
+    }
+    static func pauseCheckTimer() {
+        Console.banner("baaackaaab", tagline: "scheduled integrity check")
+        pause(label: checkLabel, humanName: "integrity-check timer", resumeFlag: Kind.check.resumeFlag)
+    }
+
+    /// Reload the backup job's plist unchanged — the "on" half of on/off.
+    /// Throws when nothing was ever installed (no plist on disk to load).
+    static func resumeTimer() throws {
+        Console.banner("baaackaaab", tagline: "scheduled backup")
+        try resume(label: label, humanName: "timer")
+    }
+    static func resumeDrillTimer() throws {
+        Console.banner("baaackaaab", tagline: "scheduled restore drill")
+        try resume(label: drillLabel, humanName: "restore-drill timer")
+    }
+    static func resumeCheckTimer() throws {
+        Console.banner("baaackaaab", tagline: "scheduled integrity check")
+        try resume(label: checkLabel, humanName: "integrity-check timer")
+    }
+
+    private static func pause(label: String, humanName: String, resumeFlag: String) {
+        let plist = plistURL(for: label)
+        guard FileManager.default.fileExists(atPath: plist.path) else {
+            Console.note("no \(humanName) plist found — nothing to pause")
+            return
+        }
+        _ = launchctl(["bootout", "\(domain)/\(label)"])
+        try? ensureDir(CredentialFiles.dir)
+        FileManager.default.createFile(atPath: pausedMarkerURL(for: label).path, contents: nil)
+        Console.success("\(humanName) paused — schedule kept on disk, will not fire until resumed")
+        Console.note("resume: baaackaaab \(resumeFlag)")
+    }
+
+    private static func resume(label: String, humanName: String) throws {
+        let plist = plistURL(for: label)
+        guard FileManager.default.fileExists(atPath: plist.path) else {
+            throw TimerError.notInstalled(humanName)
+        }
+        _ = launchctl(["bootout", "\(domain)/\(label)"])
+        if launchctl(["bootstrap", domain, plist.path]) != 0 {
+            _ = launchctl(["unload", plist.path])
+            let legacy = launchctl(["load", "-w", plist.path])
+            if legacy != 0 { throw TimerError.launchctl(legacy) }
+        }
+        try? FileManager.default.removeItem(at: pausedMarkerURL(for: label))
+        Console.success("\(humanName) resumed")
+        Console.note("verify: launchctl print \(domain)/\(label)")
+    }
+
+    /// Show whether the plist is present and what launchd knows about the job.
+    static func status() {
+        Console.banner("baaackaaab", tagline: "scheduled backup")
+        Console.section("LaunchAgent", detail: plistURL.path)
+        guard FileManager.default.fileExists(atPath: plistURL.path) else {
+            Console.note("not installed — run `baaackaaab --install-timer` (optionally `--at HH:MM`)")
+            return
+        }
+        Console.info([("plist", "present"), ("log", logURL.path)])
+        Console.step("launchctl print \(domain)/\(label):")
+        _ = launchctl(["print", "\(domain)/\(label)"])   // inherits stdout, shows live state
+
+        // The companion schedules (restore drill, integrity check) install/uninstall
+        // independently, so surface their presence here too — one place answers
+        // "what is scheduled".
+        Console.section("Companion timers")
+        for (human, st) in [("restore-drill timer", drillState()), ("integrity-check timer", checkState())] {
+            if st.installed && st.loaded { Console.success("\(human): installed and loaded") }
+            else if st.installed { Console.warn("\(human): installed but not loaded — re-run its --install-*-timer to (re)load it") }
+            else { Console.note("\(human): not installed") }
+        }
+    }
+
+    /// Whether the backup timer plist is on disk and whether launchd has it loaded,
+    /// read WITHOUT printing (unlike `status()`). For the doctor diagnostic.
+    static func state() -> (installed: Bool, loaded: Bool) { stateOf(label: label) }
+
+    /// Same probe for the restore-drill timer.
+    static func drillState() -> (installed: Bool, loaded: Bool) { stateOf(label: drillLabel) }
+
+    /// Same probe for the integrity-check timer.
+    static func checkState() -> (installed: Bool, loaded: Bool) { stateOf(label: checkLabel) }
+
+    private static func stateOf(label: String) -> (installed: Bool, loaded: Bool) {
+        let plist = plistURL(for: label)
+        let installed = FileManager.default.fileExists(atPath: plist.path)
+        guard installed else { return (false, false) }
+        return (true, launchctlQuiet(["print", "\(domain)/\(label)"]) == 0)
+    }
+
+    /// launchctl with output discarded — for the quiet `state()` probe.
+    private static func launchctlQuiet(_ args: [String]) -> Int32 {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        proc.arguments = args
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+        do { try proc.run() } catch { return -1 }
+        proc.waitUntilExit()
+        return proc.terminationStatus
+    }
+
+    // MARK: - Helpers
+
+    /// The real (symlink-resolved) path to this executable, embedded into the
+    /// plist so launchd invokes a stable absolute path.
+    private static func executablePath() -> String {
+        if let p = Bundle.main.executablePath {
+            return URL(fileURLWithPath: p).resolvingSymlinksInPath().path
+        }
+        return CommandLine.arguments.first ?? "baaackaaab"
+    }
+
+    private static func ensureDir(_ url: URL) throws {
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+    }
+
+    @discardableResult
+    private static func launchctl(_ args: [String]) -> Int32 {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        proc.arguments = args
+        do { try proc.run() } catch { return -1 }
+        proc.waitUntilExit()
+        return proc.terminationStatus
+    }
+
+    /// The StartCalendarInterval value for a schedule: a single `<dict>` for one
+    /// entry, an `<array>` of dicts for several. launchd fires the job once per
+    /// entry. A monthly schedule (`dayOfMonth` set) emits a `Day` key and ignores
+    /// weekdays; a daily/weekly one emits an optional `Weekday`.
+    private static func calendarIntervalXML(_ schedule: Schedule) -> String {
+        let weekdayDim: [Int?] = schedule.dayOfMonth != nil
+            ? [nil]   // monthly: the day-of-month carries the calendar entry, not a weekday
+            : (schedule.weekdays.isEmpty ? [nil] : schedule.weekdays.sorted().map { Optional($0) })
+        var entries: [(weekday: Int?, day: Int?, hour: Int, minute: Int)] = []
+        for wd in weekdayDim { for t in schedule.times { entries.append((wd, schedule.dayOfMonth, t.hour, t.minute)) } }
+        if entries.isEmpty { entries = [(nil, schedule.dayOfMonth, 12, 0)] }   // never emit an empty interval
+
+        func dict(_ e: (weekday: Int?, day: Int?, hour: Int, minute: Int), indent: String) -> String {
+            var body = ""
+            if let wd = e.weekday {
+                body += "\(indent)    <key>Weekday</key>\n\(indent)    <integer>\(wd)</integer>\n"
+            }
+            if let d = e.day {
+                body += "\(indent)    <key>Day</key>\n\(indent)    <integer>\(d)</integer>\n"
+            }
+            body += "\(indent)    <key>Hour</key>\n\(indent)    <integer>\(e.hour)</integer>\n"
+            body += "\(indent)    <key>Minute</key>\n\(indent)    <integer>\(e.minute)</integer>"
+            return "\(indent)<dict>\n\(body)\n\(indent)</dict>"
+        }
+
+        if entries.count == 1 {
+            return dict(entries[0], indent: "    ")
+        }
+        let dicts = entries.map { dict($0, indent: "        ") }.joined(separator: "\n")
+        return "    <array>\n\(dicts)\n    </array>"
+    }
+
+    /// Read the installed plist's schedule back (times + weekdays), for the TUI to
+    /// show the current state. nil when no plist is present or it can't be parsed.
+    static func installedSchedule() -> Schedule? {
+        guard let data = try? Data(contentsOf: plistURL) else { return nil }
+        return schedule(fromPlistData: data)
+    }
+
+    /// The drill / check timers' installed schedules, for their catch-up gates
+    /// and the check dashboard's staleness judgment. Same read-back as
+    /// `installedSchedule`, different plist.
+    static func installedDrillSchedule() -> Schedule? {
+        guard let data = try? Data(contentsOf: plistURL(for: drillLabel)) else { return nil }
+        return schedule(fromPlistData: data)
+    }
+    static func installedCheckSchedule() -> Schedule? {
+        guard let data = try? Data(contentsOf: plistURL(for: checkLabel)) else { return nil }
+        return schedule(fromPlistData: data)
+    }
+
+    /// The schedule encoded in a LaunchAgent plist. Split from
+    /// `installedSchedule` (and internal, like `plistXML`) so the
+    /// write→read round-trip is unit-testable without touching the real
+    /// LaunchAgents directory — a wrong schedule is a silently missed backup.
+    static func schedule(fromPlistData data: Data) -> Schedule? {
+        guard let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
+        else { return nil }
+        var raw: [[String: Any]] = []
+        if let arr = plist["StartCalendarInterval"] as? [[String: Any]] { raw = arr }
+        else if let one = plist["StartCalendarInterval"] as? [String: Any] { raw = [one] }
+        else { return nil }
+
+        var timeKeys = [String]()
+        var times = [(hour: Int, minute: Int)]()
+        var weekdays = Set<Int>()
+        var dayOfMonth: Int? = nil
+        for e in raw {
+            let h = (e["Hour"] as? NSNumber)?.intValue ?? 0
+            let m = (e["Minute"] as? NSNumber)?.intValue ?? 0
+            let key = "\(h):\(m)"
+            if !timeKeys.contains(key) { timeKeys.append(key); times.append((h, m)) }
+            if let wd = (e["Weekday"] as? NSNumber)?.intValue { weekdays.insert(wd % 7) }
+            if let d = (e["Day"] as? NSNumber)?.intValue { dayOfMonth = d }
+        }
+        return Schedule(times: times, weekdays: weekdays.sorted(), dayOfMonth: dayOfMonth)
+    }
+
+    static func plistXML(label: String, program: [String], schedule: Schedule, log: String,
+                         runAtLoad: Bool = false) -> String {
+        let args = program.map { "        <string>\(xmlEscape($0))</string>" }.joined(separator: "\n")
+        // RunAtLoad fires the job once when launchd loads it (login/boot) in
+        // addition to the calendar schedule — the boot catch-up path. All three
+        // timers (backup, drill, check) set it and pair it with `--catch-up`,
+        // which exits quietly when the last run is recent enough.
+        let runAtLoadXML = runAtLoad ? "    <key>RunAtLoad</key>\n    <true/>\n" : ""
+        return """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+            <key>Label</key>
+            <string>\(label)</string>
+            <key>ProgramArguments</key>
+            <array>
+        \(args)
+            </array>
+        \(runAtLoadXML)    <key>StartCalendarInterval</key>
+        \(calendarIntervalXML(schedule))
+            <key>StandardOutPath</key>
+            <string>\(xmlEscape(log))</string>
+            <key>StandardErrorPath</key>
+            <string>\(xmlEscape(log))</string>
+            <key>EnvironmentVariables</key>
+            <dict>
+                <key>PATH</key>
+                <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+            </dict>
+            <key>ProcessType</key>
+            <string>Background</string>
+            <key>LowPriorityIO</key>
+            <true/>
+        </dict>
+        </plist>
+        """
+    }
+
+    private static func xmlEscape(_ s: String) -> String {
+        s.replacingOccurrences(of: "&", with: "&amp;")
+         .replacingOccurrences(of: "<", with: "&lt;")
+         .replacingOccurrences(of: ">", with: "&gt;")
+    }
+}

@@ -1,0 +1,295 @@
+# Backlog
+
+Findings from a deep-dive read of the codebase, each re-verified against the
+source before being listed here. Line numbers are anchors and will drift; the
+file + symbol is the stable reference. Severity is relative to this tool's threat
+model (one-way backup, read+append-only toward the store, single user).
+
+Nothing here is a known live data-loss bug in normal operation. The Drive item is
+the closest to the safety core and is worth doing first.
+
+## Data integrity
+
+- [x] **Drive: `verified` flag is recorded, never used as a backup gate; small
+  within-folder re-eviction window remains.** `Med-Low` — done
+  - `DriveAcquirer.materializeAndVerify` (DriveAcquirer.swift:100-139) records
+    `verified: size >= 0` per file, but the Drive backup hands restic the *live
+    folder tree* wholesale (`backupToAll(paths: [url], …)`, main.swift:1647). The
+    real gate is the *throw* on the first dataless stub (DriveAcquirer.swift:122),
+    which skips the whole folder. A file that is non-dataless but whose size read
+    fails is recorded `verified: false` (DriveAcquirer.swift:126-134) and **still
+    backed up** — contradicting the invariant documented in Staging.swift:7-14
+    ("the orchestrator refuses to back up anything that did not pass
+    verification"). That invariant holds for Photos (a failed resource is deleted
+    from the batch dir before backup, PhotosAcquirer.swift:146-148), not for Drive.
+  - Residual TOCTOU: materialize-all-then-restic-reads-all means a file
+    materialized early in a large folder can be re-evicted by the FileProvider
+    under storage pressure before restic reads it at the end → restic captures a
+    0-byte stub while the manifest says `verified`. The cross-folder window is
+    already closed (per-folder materialize right before its backup,
+    main.swift:1619-1648); only this within-folder window remains. Low probability
+    (needs storage pressure mid-run) but it is exactly what the verify machinery
+    exists to prevent.
+  - Fix sketch: re-check `isDataless` immediately before/after restic reads each
+    file, or back up from a verified staging copy instead of in place (costs the
+    disk the in-place design avoids — weigh against the ~11 GB set on a
+    disk-constrained Mac). At minimum, make the documented invariant true: fail
+    the folder when any regular file ends up `verified: false`.
+  - Non-issue confirmed: skipping symlinks/dirs in the materialize pass
+    (`guard isFile`) is correct — they carry no cloud byte-content to fault in.
+  - Resolution: chose the minimal gate + a post-backup re-eviction check over a
+    staging copy. (a) `materializeAndVerify` now THROWS `verificationFailed` when
+    a regular file's size can't be read, so the whole folder is skipped — every
+    drive item recorded is now `verified: true` and the Staging invariant holds.
+    (b) After each folder's backup, `BackupRun` re-walks it metadata-only
+    (`previewDataless`, lstat, no fault-in); any file that became dataless again
+    means restic may have captured a stub mid-read, so the folder is reported as
+    a failure and the next run re-captures it (a recheck that can't run warns, it
+    does not fail the already-successful backup). The staging copy was rejected:
+    it would cost the ~11 GB the in-place design avoids AND store ephemeral
+    staging paths in the snapshot, breaking restore-to-original-location for
+    Drive. Staging.swift's docstring (which wrongly claimed a full copy) was
+    corrected. Compile green; runtime needs a real backup against the store
+    (operator-verified).
+
+## CLI strictness / UX
+
+- [x] **Unknown flags fall through to a real backup.** `Med` — done (10637a4)
+  - No unknown-flag rejection. A typo'd subcommand (e.g. `--restoree`,
+    `--snapshot s` without a real command) matches none of the dispatch `if`s
+    (main.swift:1206-1388) and falls through to the backup path (main.swift:1390+)
+    — silently running a full backup of the set instead of erroring.
+  - Fix sketch: after dispatch, validate that every `--flag` token is a known
+    flag; exit with an actionable "unknown flag X" otherwise.
+
+- [x] **`--dry-run` still materializes the entire Drive set.** `Med` — done
+  - `materializeAndVerify` runs regardless of `backupDryRun` (main.swift:1640);
+    only Photos are skipped on a dry run. A "preview" therefore downloads every
+    dataless Drive stub from iCloud (potentially the full ~11 GB). The comment
+    (main.swift:1411-1414) frames materialize as a "read-only coordinated read" —
+    true (no write-back), but not free in time/bandwidth.
+  - Fix sketch: on a dry run, *count/report* dataless files without faulting them
+    in (stat the dataless flag, don't coordinate-read), or document the cost
+    loudly in the dry-run banner.
+
+- [x] **`--limit-upload` collides with source flags → silently diverts to
+  set-management.** `Med` — done (4398d0b)
+  - `--limit-upload` is in the set-management trigger list (main.swift:1383-1388),
+    so `baaackaaab --drive-folder ~/X --limit-upload 2048` runs `manageBackupSet`
+    and exits — the ad-hoc backup never happens and `--drive-folder` is ignored.
+    There is no ad-hoc throttle path at all: `backup()` reads the throttle from the
+    set (`configLimitUploadKiBps`, main.swift:1404), never from argv.
+  - Fix sketch: reject `--limit-upload` combined with source flags with a message
+    pointing at the set-only nature, or support a true per-run throttle.
+
+## Robustness
+
+- [x] **restic probe timeout terminates with SIGTERM only, no SIGKILL
+  escalation.** `Low` — done
+  - On timeout the bounded read-only probes call `proc.terminate()` (SIGTERM),
+    wait 5 s, then throw regardless of whether the child died
+    (ResticBackend.swift:716-719 and 791-795). A restic child wedged in a state
+    that ignores SIGTERM is leaked (the reaper thread blocks too). Only affects
+    read-only queries (cat config / snapshots / stats / ls), never a writing
+    backup we must not kill mid-flight.
+  - Fix sketch: after the 5 s grace, `kill(proc.processIdentifier, SIGKILL)` if
+    still running.
+
+- [x] **`RunHistory.append` is not locked against concurrent runs.** `Low` — done
+  - `seekToEnd` + `write` without `flock`/`O_APPEND` (RunHistory.swift:67-81). Two
+    concurrent processes can seek to the same offset and one overwrites the
+    other's line. Concurrent backups are rare (restic repo-locks anyway) and the
+    reader tolerates a corrupt trailing line (RunHistory.swift:86-95), so impact
+    is a lost diagnostic line at most.
+  - Fix sketch: open with `O_APPEND` or take an `flock` around the write.
+
+- [x] **Photos authorization timeout is reported as `notDetermined`, not "timed
+  out".** `Low` — done
+  - `requestAuthorization` returns `.notDetermined` on a 300 s timeout
+    (PhotosAcquirer.swift:206-217); the caller then throws
+    `notAuthorized("notDetermined")` (PhotosAcquirer.swift:60-61), which reads as
+    "first run will prompt" rather than "the prompt machinery wedged". Diagnostic
+    accuracy only.
+
+## TUI (TTY-only — operator-verifiable, not unit-testable)
+
+- [ ] **Schedules editor: per-field dirty colouring.** `Low` — deferred, not a
+  defect. An unwritten edit is announced by one yellow note ("unapplied edit —
+  w writes it, u undoes it"), which answers "something changed" but not "what".
+  Rendering the individual field(s) that differ from the INSTALLED schedule in
+  yellow would answer the second question. Deferred because the operator
+  confirmed the current colours read correctly (2026-08-06); pick it up only if
+  that stops being true. Sketch: a pure `dirtyFields(edited:installed:)` →
+  `Set<TimerField>` so it stays unit-testable without a TTY, with the renderer
+  only choosing colours from its result. Open question if revisited: a job that
+  is not installed at all has no baseline, so everything is "new" rather than
+  "changed" — decide whether that reads dirty from the first keystroke.
+
+- [x] **Unicode display width: layout counts graphemes, not terminal cells.**
+  `Low-Med` — done (operator-verifiable: build green; runtime needs a real TTY)
+  - `fit` (ConfigTUI.swift:1643-1647), the reverse-video cursor padding
+    (`.padding(toLength: cols, …)` in every render*Row), and `divider`
+    (ConfigTUI.swift:1569-1573) all assume 1 character = 1 column. A CJK/emoji
+    folder name or album title (2 cells per glyph, or 0 for combining marks)
+    overflows `cols` and corrupts the layout / highlight bar. Names are
+    user-controlled (iCloud Drive folders, Photos albums).
+  - Fix sketch: a small `wcwidth`-style width function used by fit/pad/divider.
+
+- [x] **ESC vs. arrow keys: a lone ESC at a read() boundary is treated as
+  back/quit.** `Low` — done (operator-verifiable: build green; runtime needs a real TTY)
+  - `readKey` only decodes an arrow when `[` is already buffered after ESC; a
+    `\u{1B}[A` split across two `read(2)` calls makes the first ESC return `.esc`
+    (ConfigTUI.swift:1594-1619). The comment documents this as an accepted
+    trade-off. Rare (a single keypress's 3 bytes almost always arrive together),
+    but on a slow/loaded PTY an arrow could trigger an accidental "back".
+  - Fix sketch: after a bare ESC, do a short `VTIME`/`poll`-bounded read for a
+    following `[` before deciding it was a lone ESC.
+
+- [x] **SIGWINCH not handled: a resize redraws only on the next keypress.** `Low`
+  — done (operator-verifiable: build green; runtime needs a real TTY)
+  - `terminalSize()` is read per render (ConfigTUI.swift:1621-1627), but nothing
+    triggers a render on resize, so the layout is stale until the next key.
+  - Fix sketch: install a SIGWINCH handler that sets a flag and nudges the loop.
+
+## Refactor
+
+- [x] **P3: extract the top-level backup orchestration into a `BackupRun`
+  type.** `refactor, no behaviour change` — done
+  - The ~340-line `do { … } catch { … }` at file scope drove init, quota, Drive,
+    Photos, manifest, summary, run-history and exit codes inline. Moved verbatim
+    into `BackupRun.execute()` (BackupRun.swift); main.swift resolves the inputs
+    and calls `BackupRun(…).execute()`. The moved body was diffed byte-for-byte
+    against the original (modulo +8 indent) to keep "no behaviour change" honest;
+    main.swift's head is byte-identical to the prior commit. Compile + exit-code
+    smoke green. Runtime under launchd / Photos / restic is operator-verified.
+
+## Ops (operational — not a code change)
+
+- [x] **Update the rest-server on the store host to 0.14.0.** `Security` — done
+  - Resolution (2026-08-04): operator-verified on garage —
+    `docker inspect` shows `restic/rest-server:0.14.0`, and the container's
+    startup log carries the 0.14 quota-init line ("Initializing quota…").
+    Append-only enforcement is independently proven by every `--doctor` run's
+    DELETE probe. One residual hand-check (5 s, not worth its own item):
+    `docker exec restic-rest-server ls -l /data/.htpasswd` — the 0.14 perms
+    fix covers only NEWLY created htpasswd files; if it shows more than
+    `-rw-------`, run `chmod 600` on it once.
+  - The tested baseline was bumped to 0.14.0 (`UpdateCheck.swift:restServerBaseline`),
+    but the actual running rest-server on the store host is likely still on an older
+    line. The tool cannot read the server's version (rest-server doesn't advertise
+    it), so this is not remotely verifiable — `baaackaaab --check-updates` only shows
+    the latest *available* release (0.14.0) for manual comparison.
+  - Why it matters: 0.14.0 fixes world-readable permissions on newly created
+    `.htpasswd` files (the endpoint password hash was readable by other local users
+    on the server) and prints the append-only mode status at startup — both central
+    to this tool's append-only threat model.
+  - Steps: swap the rest-server binary on the store host for the
+    [v0.14.0 release](https://github.com/restic/rest-server/releases/tag/v0.14.0),
+    keep `--append-only --private-repos`, restart the service, confirm the startup
+    log now prints the append-only status. The `.htpasswd` perms fix only applies to
+    *newly created* files, so also `chmod 600` the existing htpasswd file by hand.
+
+## Review round 2 (2026-07-15) — four-perspective sweep
+
+A second full review (core backup path / restic+security / CLI+TUI / tests+docs),
+executed in five commits. Fixed:
+
+- [x] **Photos: timed-out download could reappear in the batch dir and be backed
+  up unverified** — resources now download into `photos/.inflight` (outside every
+  batch dir) and are renamed in only after verification; fully-failed assets no
+  longer leave empty dirs, all-failed batches flush as a no-op. `Med-High`
+- [x] **Drive: enumerator had no errorHandler** — a silently skipped subtree could
+  hold stubs restic still reads; both walks now fail the folder/recheck instead
+  of under-verifying. `Med`
+- [x] **`.limited` Photos grant backed up a subset silently** — loud warning on
+  the backup path. `Med`
+- [x] **Empty-but-clean source exited 2 + failure banner nightly** — clean 0-file
+  sources are now exit 0; an empty SET still fails. `Med`
+- [x] **Notifier dropped banners containing newlines** (AppleScript literal can't
+  span lines) — `\n`/`\r` escaped; unit-tested. `Low-Med`
+- [x] **`quota_bytes` had no setter** — persistent `--repo-quota` /
+  `--clear-repo-quota`; the timer's pre-flight gauge now actually works. `Med`
+- [x] **Redaction defeated by `/` in the password** (URL returned unchanged,
+  cleartext in logs) — shared `Credentials.userinfoDelimiter` for redact +
+  restEndpoint; deliberately over-masks the ambiguous no-userinfo-`@`-in-path
+  shape (tested, see RedactTests). `Med`
+- [x] **SemVer parser trapped on ≥19-digit runs from remote-controlled input**
+  (Server header / GitHub tag) — clamps to Int.max. `Low-Med`
+- [x] Robustness sweep: backup exit 11/12 → typed errors; find/diff probeTimeout;
+  `--` before user positionals (restore/ls/find); htpasswd-missing guard;
+  `--order` validation; TUI dry-run saves dirty edits first; TUI selection via
+  normalized `containsFolder`/`removeFolder`. `Low`
+- [x] Tests: schedule plist round-trip, `Staging.sanitize`, `randomURLSafe`/
+  `repoURL`, `Notifier.escape`, `pack_size_mib` round-trip, RunHistory
+  mid-file-corruption tolerance (98 → 119).
+
+Deliberately NOT fixed (accepted, with reasons):
+
+- **Manifest counts include Drive files that restic later excludes.** The
+  manifest counts what was verified, restic applies excludes downstream; an
+  excluded file legitimately isn't in the snapshot. Diagnostic mismatch only.
+- **RunHistory's short-write `ftruncate` rollback could clip a concurrent
+  writer's just-appended line.** Reachable only on a write error during two
+  simultaneous runs (restic repo-locks make that rare); the reader is
+  line-tolerant anywhere (now pinned by a test), so the cost is one diagnostic
+  line. The rollback stays.
+- **Two valid command flags resolve by dispatch order** (`--restore
+  --test-restore` runs the first). First-match is the documented rule; unknown
+  flags still fail loudly. Not worth a conflict matrix.
+- **Modal TUI prompts don't redraw on SIGWINCH** — cosmetic, the prompt
+  reflows on the next keypress; the main loop handles `.resize`.
+- **`--limit-upload` validates by hand instead of `positiveInt`** — the custom
+  error message (KiB/s example) is deliberate.
+- **BackupCancellation tracks ONE process** — correct while destinations run
+  sequentially; a `FIXME` at the field anchors the parallel-by-link precondition.
+
+## Review round 3 (2026-08-04) — pre-v1.1.0 sweep
+
+Fixed in the v1.1.0 line: trailing value-flag fallthrough to a full backup
+(`Med-High`), unbounded quota-preflight `stats`, check/drill children not
+registered with BackupCancellation, misleading `.failed`/`.timedOut` texts,
+`launchFailed` conflated with `.notFound`, recovery-kit export lines breaking
+on embedded single quotes, doctor's staging path ignoring `--staging`,
+transport-env perm check sitting behind the password guard, stale
+RunAtLoad/remoteStatus/class-doc comments. Plus three no-behaviour-change
+refactors: Doctor.swift extraction, one spawn core behind the four runners,
+read-only query split (ResticBackendQueries.swift).
+
+Deferred (each verified plausible, none data-loss in normal operation):
+
+- [ ] **AppendOnlyProbe: credential-less `rest:` URL reads as "not a rest:
+  destination".** `Low-Med` — `target(from:)` returns nil for a `rest:` URL
+  without embedded userinfo; doctor then prints the S3/R2 storage-layer note,
+  which is simply false there. Return a typed reason (`.notRest` vs
+  `.restWithoutCredentials`) and word the latter honestly.
+- [ ] **AppendOnlyProbe follows redirects with the Basic header.** `Low` —
+  `URLSession.shared` re-sends Authorization on a same-origin 30x and a
+  redirect can turn a real 403 into `.inconclusive`. Reuse OutboundNotifier's
+  NoRedirectDelegate shape (ephemeral session, refuse redirects).
+- [ ] **doctor/updateCheck ignore `--restic-repo` / inherited RESTIC_REPOSITORY.**
+  `Low` — they read `DestinationStore.all()` while every other command resolves
+  the override, so with an override exported doctor reports repos the next run
+  won't touch. Resolve the override or print an explicit note.
+- [ ] **`lsDetailed` is likely a no-op duplicate of `ls`.** `Low` — `-l` adds
+  nothing under `--json` (size is always present). Verify against the installed
+  restic, then delete it (behaviour change, own slice) or reword its doc.
+- [ ] **RunHistory rotation vs a concurrent O_APPEND writer.** `Low` — rotate's
+  temp+rename can strand another process's just-appended record on the unlinked
+  inode; drill/check append without the single-instance lock and all three
+  timers RunAtLoad-co-fire at login. Take an flock around rotate+append, or
+  skip rotation when the lock is not held.
+
+## Decisions — do NOT re-investigate
+
+- **`--config` forwarding to the restore/read children is a no-op (dead code).**
+  `--restore`/`--diff`/`--ls`/`--find`/`--snapshots`/`--test-restore`/`--verify-repo`
+  all dispatch (main.swift:1263-1332) *before* `configPath` is resolved
+  (main.swift:1335), and they read `DestinationStore`, not the backup-set config.
+  Forwarding `--config` to them would forward a flag they never read. `--config`
+  *is* correctly forwarded where it matters (the TUI sync child `syncArgs()` and
+  `--install-timer`, which do read the set). Do not "fix" this.
+
+- **Photos `.readWrite` is not over-privileged.** PhotoKit has no read-only
+  access level: `PHAccessLevel` is `.addOnly` (write-only) or `.readWrite`.
+  Reading the library requires `.readWrite`, so it is the minimum, not an
+  over-grant (PhotosAcquirer.swift:171-172, 192, 209).

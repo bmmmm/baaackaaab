@@ -1,0 +1,2 @@
+# path-guard: the usage tests build fake user paths (/Users/demo, /Users/alice …) on purpose
+Tests/baaackaaabTests/RepoUsageTests.swift

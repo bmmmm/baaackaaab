@@ -1,0 +1,811 @@
+import Foundation
+
+enum ResticError: Error, CustomStringConvertible {
+    case notFound
+    case launchFailed(String)
+    case failed(command: String, code: Int32)
+    case timedOut(command: String, seconds: Int)
+    case locked
+    case wrongPassword
+
+    var description: String {
+        switch self {
+        case .notFound:
+            return "restic executable not found in PATH — install it (`brew install restic`) and re-run"
+        case .launchFailed(let why):
+            return "could not launch restic: \(why) — the binary was found but did not start (check its permissions/architecture, e.g. after a partial brew upgrade)"
+        case .failed(let cmd, let code):
+            return "restic \(cmd) exited with code \(code) — see restic's output above where shown; the quiet JSON queries suppress it, re-run `--check` for the transport detail"
+        case .timedOut(let cmd, let secs):
+            return "restic \(cmd) did not respond within \(secs)s — the destination is unreachable or wedged; the (read-only) operation was abandoned and nothing was changed. When this is the run-start probe, the destination is skipped this run; it is NOT treated as a missing repo, so nothing is re-initialized."
+        case .locked:
+            return "repository is locked by another restic operation (a backup/prune is running) — retry once it finishes, or clear a stale lock with `--unlock`. The repo is NOT re-initialized."
+        case .wrongPassword:
+            return "repository password is wrong — this destination's stored key cannot decrypt the repo. Check the key; the repo is NOT re-initialized."
+        }
+    }
+}
+
+/// The outcome of the read-only `cat config` existence probe, mapped from restic's
+/// typed exit codes (restic 0.17+): 0 present, 10 absent, 11 locked, 12 wrong
+/// password. Anything else (a transport error, a timeout, or an older restic that
+/// only returns 1) is `.unreachable` — a state we can't classify further.
+enum RepoProbe: Equatable {
+    case present
+    case absent
+    case locked
+    case wrongPassword
+    case unreachable
+}
+
+/// Thin wrapper around the `restic` CLI.
+///
+/// The Mac stays read + append only toward the store: this runs `init` and
+/// `backup` (new data only), the read-only queries (`cat config`, check, and
+/// the snapshot/ls/find/diff/stats/lock reads in ResticBackendQueries.swift),
+/// `restore` (which writes to LOCAL disk only), and exactly one repo delete —
+/// `unlock`, which restic hardcodes to lock files. Never `forget`/`prune`
+/// (those run server-side on the append-only host). Both secrets reach restic
+/// through the environment,
+/// never argv (argv is world-readable via `ps`): the encryption password via
+/// `RESTIC_PASSWORD[_FILE]`, the repository URL via `RESTIC_REPOSITORY[_FILE]`.
+/// The URL embeds the rest-server endpoint password, so it is just as sensitive
+/// as the password — hence we never pass `-r` on the command line.
+///
+/// A `Destination` decides which env vars carry the secrets (file store vs.
+/// explicit vs. legacy Keychain); the backend builds a private per-instance
+/// environment from it and hands that to every restic child. So `repository`
+/// here is only the URL string we keep for the redacted log line — restic itself
+/// reads the repository + password from the environment of its own process.
+final class ResticBackend {
+    /// The repo URL for redacted display/logging (never used to reach restic —
+    /// restic reads the repository from the environment we hand the child).
+    let repository: String
+    /// The destination this backend targets, for per-destination labelling.
+    let destinationName: String
+    /// Absolute path to the restic binary, resolved once at init. nil when it
+    /// could not be found anywhere — every run then throws `ResticError.notFound`.
+    private let executablePath: String?
+    /// The exact environment handed to every restic child: the parent env with
+    /// all RESTIC_* repo/password vars stripped, plus this destination's overlay.
+    /// Carried per-instance (not via process-global setenv) so backing up to two
+    /// destinations in one run can never cross-contaminate their secrets.
+    private let environment: [String: String]
+
+    init(destination: Destination, executable: String = "restic") {
+        self.repository = destination.displayURL ?? destination.name
+        self.destinationName = destination.name
+        self.executablePath = Self.resolveExecutable(executable)
+        self.environment = Self.childEnvironment(overlay: destination.envOverlay,
+                                                 transportEnv: destination.transportEnv)
+    }
+
+    /// The env vars that name the repository and its encryption key. Always
+    /// stripped from the parent environment and only ever (re-)introduced via a
+    /// destination's own overlay — never via its transport-env file, whose
+    /// entries under these names are dropped below (the loader already warns
+    /// about them).
+    static let repoCredentialKeys = ["RESTIC_REPOSITORY", "RESTIC_REPOSITORY_FILE",
+                                     "RESTIC_PASSWORD", "RESTIC_PASSWORD_FILE"]
+
+    /// Build the environment for a restic child: the parent environment with ALL
+    /// four RESTIC_* repo/password vars stripped, then this destination's
+    /// transport env (backend credentials, e.g. AWS_* for `s3:`), then its
+    /// repo/password overlay. Stripping first guarantees restic never sees a
+    /// stale RESTIC_REPOSITORY next to a RESTIC_REPOSITORY_FILE (it aborts on
+    /// the pair), and that one destination's secret can never bleed into
+    /// another's run. The overlay merges LAST, and the repo credential keys are
+    /// dropped from the transport env here too, so a transport-env line can
+    /// never redirect the repo or its key — regardless of how the Destination
+    /// was constructed. Internal (not private) so the tests can pin exactly
+    /// this precedence.
+    static func childEnvironment(overlay: [String: String],
+                                 transportEnv: [String: String] = [:]) -> [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        for key in repoCredentialKeys { env.removeValue(forKey: key) }
+        env.merge(transportEnv.filter { !repoCredentialKeys.contains($0.key) }) { _, new in new }
+        env.merge(overlay) { _, new in new }
+        return env
+    }
+
+    /// The resolved restic binary path, or nil if not found anywhere. Static so a
+    /// diagnostic (doctor) can report restic availability with no destination
+    /// configured. Mirrors the per-instance resolution exactly.
+    static func locateExecutable() -> String? { resolveExecutable("restic") }
+
+    /// The restic version line (`restic version` → "restic 0.18.0 ..."), or nil if
+    /// restic is missing / the call failed. Read-only, no repo touched. For doctor.
+    static func resticVersion() -> String? {
+        guard let exe = locateExecutable() else { return nil }
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: exe)
+        proc.arguments = ["version"]
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = FileHandle.nullDevice
+        proc.standardInput = FileHandle.nullDevice
+        do { try proc.run() } catch { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        proc.waitUntilExit()
+        guard proc.terminationStatus == 0 else { return nil }
+        return String(data: data, encoding: .utf8)?
+            .split(separator: "\n").first.map { $0.trimmingCharacters(in: .whitespaces) }
+    }
+
+    /// Resolve the restic binary to an absolute path.
+    ///
+    /// We must NOT rely on `/usr/bin/env restic` / a bare PATH lookup: under
+    /// launchd the inherited PATH is the minimal `/usr/bin:/bin:/usr/sbin:/sbin`,
+    /// which does not include Homebrew — so the lookup fails with exit 127 and the
+    /// scheduled backup would silently never run. Resolving an absolute path here,
+    /// independent of the inherited PATH, is what makes the timer actually work.
+    ///
+    /// Order: an explicit absolute path (trusted if executable) → the `RESTIC_BIN`
+    /// override → the common install locations (Homebrew arm64 + Intel, manual
+    /// /usr/local, system) → finally a PATH walk for bespoke installs.
+    private static func resolveExecutable(_ name: String) -> String? {
+        let fm = FileManager.default
+        if name.hasPrefix("/") {
+            return fm.isExecutableFile(atPath: name) ? name : nil
+        }
+        if let override = ProcessInfo.processInfo.environment["RESTIC_BIN"],
+           !override.isEmpty, fm.isExecutableFile(atPath: override) {
+            return override
+        }
+        let candidates = [
+            "/opt/homebrew/bin/\(name)",
+            "/usr/local/bin/\(name)",
+            "/usr/bin/\(name)",
+        ]
+        for path in candidates where fm.isExecutableFile(atPath: path) { return path }
+        if let pathEnv = ProcessInfo.processInfo.environment["PATH"] {
+            for dir in pathEnv.split(separator: ":") {
+                let full = String(dir) + "/" + name
+                if fm.isExecutableFile(atPath: full) { return full }
+            }
+        }
+        return nil
+    }
+
+    /// Initialize the repo if it does not exist yet. Uses repository format v2
+    /// so zstd compression is available (helps text/PDF; photos won't shrink).
+    ///
+    /// The existence probe is `cat config`: exit 0 means the repo is present, any
+    /// other exit means "try to init". A missing restic binary no longer slips
+    /// through here as a false "repo absent" — `run` throws `notFound` (resolved
+    /// path nil), which propagates instead of triggering a bogus init. `init`
+    /// itself refuses to clobber an existing repo, so a misread transient failure
+    /// cannot destroy data — it just surfaces init's own error.
+    func ensureInitialized() throws {
+        // Bound the existence probe: on an unreachable/wedged destination restic
+        // retries the failing backend request ~10× with exponential backoff,
+        // which can stall for minutes. With several destinations that would make
+        // one dead repo hold up the whole run, so we cap the probe — a timeout
+        // throws `timedOut` (destination skipped), never a false "repo absent".
+        let code = try run(["cat", "config"], quiet: true, timeout: Self.probeTimeout)
+        switch code {
+        case 0:
+            return                              // repo present and readable
+        case 11:
+            throw ResticError.locked            // repo EXISTS but is locked — never init
+        case 12:
+            throw ResticError.wrongPassword     // repo EXISTS, key is wrong — never init
+        default:
+            break                               // 10 (absent) / 1 (older restic) / other → init
+        }
+        // Reached only for exit 10 (repo absent, restic 0.17+) or a generic
+        // non-zero from an older restic. `init` refuses to clobber an existing
+        // repo, so even a misclassified probe cannot destroy data — it just
+        // surfaces init's own "already initialized" error.
+        Console.step("restic: initializing repository (format v2) at \(Credentials.redact(repository))")
+        let initCode = try run(["init", "--repository-version", "2"])
+        if initCode != 0 { throw ResticError.failed(command: "init", code: initCode) }
+    }
+
+    /// Back up the given paths into a single snapshot. `dryRun` passes
+    /// `--dry-run --verbose` so restic reports what WOULD be backed up (new /
+    /// changed bytes) and uploads nothing — a true preview that touches the repo
+    /// read-only. `limitUploadKiBps`, when > 0, throttles the upload via
+    /// `--limit-upload` (KiB/s); it is irrelevant on a dry run (nothing uploads).
+    /// `restConnections`, when > 0, caps the REST backend's connection pool via
+    /// the global `-o rest.connections=N` option, applied on a dry run too since
+    /// it bounds the backend's concurrency, not the upload itself.
+    ///
+    /// A real backup always runs restic with `--json` so the churn summary can be
+    /// captured (the anomaly baseline must also build under the unattended timer).
+    /// `showProgress` (a TTY) only decides the rendering: a parsed, self-rewriting
+    /// progress bar on a TTY, one concise tally line off a TTY (launchd / a pipe).
+    /// The dry-run path keeps restic's plain `--verbose` output — there its value
+    /// is the file list, not a bar — and returns no summary.
+    /// macOS filesystem junk that appears in every iCloud Drive folder and carries
+    /// no user data — Finder/Spotlight indexes, trash + revision metadata, temp
+    /// scratch. Excluded on EVERY backup: on the append-only store the Mac can
+    /// never prune, so anything snapshotted is permanent. Keeping this junk out is
+    /// therefore not just tidiness — once in, it can never be removed. Slash-less
+    /// patterns match the base name at any depth (restic matches on path
+    /// components), so these catch the files/dirs wherever they appear in the tree.
+    static let junkExcludes = [
+        ".DS_Store", ".Trashes", ".Spotlight-V100",
+        ".fseventsd", ".DocumentRevisions-V100", ".TemporaryItems",
+    ]
+
+    /// Returns the parsed restic `summary` for a real backup (nil on a dry run, or
+    /// when restic wrote no snapshot — e.g. `--skip-if-unchanged` skipped it — so no
+    /// summary was emitted). The caller aggregates these per destination to persist
+    /// the run's churn metrics and feed the anomaly tripwire.
+    @discardableResult
+    func backup(paths: [URL], tags: [String], host: String?,
+                dryRun: Bool = false, limitUploadKiBps: Int? = nil,
+                packSizeMiB: Int? = nil, restConnections: Int? = nil,
+                readConcurrency: Int? = nil,
+                excludes: [String] = [], excludeFiles: [String] = [],
+                showProgress: Bool = false) throws -> ResticSummary? {
+        // `--skip-if-unchanged`: when a source is byte-for-byte identical to its
+        // parent snapshot, restic creates NO new snapshot. On the append-only
+        // store — which the Mac can never prune — this stops every scheduled run
+        // from piling up an identical snapshot per unchanged folder. Data is never
+        // lost: an unchanged tree is already fully captured by the parent.
+        var args = ["backup", "--compression", "auto", "--skip-if-unchanged"]
+        // Excludes: the always-on macOS-junk defaults + `--exclude-caches` (drops
+        // any directory tagged with CACHEDIR.TAG), then the user's own set globs
+        // and exclude-files. Applied on every run so the un-prunable store never
+        // accumulates junk it can never shed. The caller has already dropped any
+        // missing exclude-file, so restic never fails the run over a stale path.
+        args += ["--exclude-caches"]
+        for pattern in Self.junkExcludes { args += ["--exclude", pattern] }
+        for pattern in excludes where !pattern.isEmpty { args += ["--exclude", pattern] }
+        for file in excludeFiles where !file.isEmpty { args += ["--exclude-file", file] }
+        if let limitUploadKiBps, limitUploadKiBps > 0, !dryRun {
+            args += ["--limit-upload", String(limitUploadKiBps)]
+        }
+        // Larger target pack size ⇒ fewer, bigger objects on the backend ⇒ fewer
+        // round-trips over a network REST/S3 store (at the cost of more RAM and
+        // more re-upload on an interrupted transfer). Optional; restic's default
+        // target is 16 MiB when unset.
+        if let packSizeMiB, packSizeMiB > 0 {
+            args += ["--pack-size", String(packSizeMiB)]
+        }
+        // How many files restic reads concurrently while building the backup.
+        // restic's own default is 2 ($RESTIC_READ_CONCURRENCY); raising it can
+        // help saturate a fast local disk, lowering it eases CPU/IO pressure
+        // from many small iCloud Drive files. Optional, same guarded pattern as
+        // --pack-size / rest.connections.
+        if let readConcurrency, readConcurrency > 0 {
+            args += ["--read-concurrency", String(readConcurrency)]
+        }
+        if dryRun { args += ["--dry-run", "--verbose"] }
+        if let host { args += ["--host", host] }
+        for tag in tags { args += ["--tag", tag] }
+        args += paths.map { $0.path }
+        // REST-backend connection cap: `-o key=value` is a restic persistent
+        // (global) flag and is accepted before OR after the subcommand — the
+        // prepend is a convention (global options up front), not a parser
+        // requirement. restic's own default is 5 parallel connections; a small
+        // store host can 502 under that much concurrency on pack uploads (see
+        // issue #6). This is backend-specific (restic ignores it for a non-REST
+        // repo, e.g. the local-filesystem repos the integration tests use), so
+        // it is safe to pass unconditionally whenever configured. Deliberately
+        // wired into `backup` only: the run-start probe/init and the read-only
+        // commands issue few concurrent requests and were never observed to
+        // trigger the 502s, so they stay unthrottled.
+        if let restConnections, restConnections > 0 {
+            args = ["-o", "rest.connections=\(restConnections)"] + args
+        }
+
+        let names = paths.map { $0.lastPathComponent }.joined(separator: ", ")
+        let mode = dryRun ? " (dry run — nothing uploaded)" : ""
+        Console.step("restic: backup [\(names)] tags=\(tags.joined(separator: ","))\(mode)")
+
+        // A dry run keeps restic's plain `--verbose` output — its value there is the
+        // file list, not a progress bar or a churn tally — and produces no snapshot,
+        // so there is no summary to capture.
+        if dryRun {
+            let code = try run(args)
+            try finishBackup(code: code)
+            return nil
+        }
+
+        // A real backup always runs `--json` so the churn summary (files/bytes/data
+        // added) can be captured for the anomaly baseline — which MUST work under the
+        // unattended timer, where stdout is not a TTY. On a TTY the summary also
+        // drives the live progress bar; off a TTY (launchd / a pipe) we render no bar
+        // but print one concise tally line, because restic's own plain summary now
+        // goes to the JSON pipe we consume rather than to the log.
+        let bar = showProgress ? BackupProgressBar(label: destinationName) : nil
+        var captured: ResticSummary?
+        let code = try runBackupJSON(args + ["--json"],
+                                     onStatus: { bar?.update($0) },
+                                     onSummary: { [destinationName] summary in
+                                         captured = summary
+                                         if let bar {
+                                             bar.finish(summary)
+                                         } else {
+                                             Self.logSummaryLine(summary, label: destinationName)
+                                         }
+                                     })
+        bar?.clear()   // wipe a half-drawn bar if no summary arrived (cancel/fail)
+        try finishBackup(code: code)
+        return captured
+    }
+
+    /// One concise completion line for the non-TTY real-backup path (launchd / a
+    /// pipe), where the progress bar is suppressed but the log should still carry a
+    /// human-readable tally. Mirrors the bar's finish line.
+    private static func logSummaryLine(_ sum: ResticSummary, label: String) {
+        let added = ByteCountFormatter.string(fromByteCount: Int64(sum.dataAdded), countStyle: .file)
+        let snap = sum.snapshotID.map { " → " + String($0.prefix(8)) } ?? ""
+        let prefix = label.isEmpty ? "" : label + ": "
+        Console.detail("\(prefix)\(added) new (\(sum.filesNew) new, \(sum.filesChanged) changed)\(snap)")
+    }
+
+    /// Interpret a `restic backup` exit code. 0 is a clean success. Exit 3 means
+    /// restic created a VALID but incomplete snapshot because some source files
+    /// could not be read — they changed or vanished mid-backup, which is routine
+    /// against a live iCloud FileProvider / Photos tree. The snapshot landed and
+    /// is restorable, so this is a warning, not a destination failure: returning
+    /// (instead of throwing) keeps the destination marked ok. Any other non-zero
+    /// code is a real failure. A cancel surfaces as 130 here and IS thrown, so the
+    /// caller's isCancelled check turns it into a clean RunCancelled.
+    private func finishBackup(code: Int32) throws {
+        switch code {
+        case 0:
+            return
+        case 3:
+            Console.warn("\(destinationName): restic finished with warnings (exit 3) — a valid snapshot was created, but some source files could not be read (changed or vanished mid-backup). They will be picked up next run.")
+        case 11:
+            // Same typed codes the probe maps: a mid-run lock (a server-side
+            // prune, a concurrent restic) or a wrong key deserve their precise
+            // message here too, not a generic "exited with code 11".
+            throw ResticError.locked
+        case 12:
+            throw ResticError.wrongPassword
+        default:
+            throw ResticError.failed(command: "backup", code: code)
+        }
+    }
+
+    /// Run `restic backup --json`, parsing the newline-delimited JSON stream and
+    /// forwarding status / summary messages to the caller (which renders the bar).
+    /// Returns restic's exit code. stderr is left inherited so restic's warnings /
+    /// errors stay visible alongside the bar. The child is registered with
+    /// BackupCancellation exactly like `run`, so Ctrl-C interrupts restic (exit
+    /// 130) instead of hard-killing us; the pipe then hits EOF and the loop ends.
+    /// (`@escaping` is a formality — the stream handler is invoked synchronously
+    /// on the calling thread inside `spawn` and never outlives it.)
+    private func runBackupJSON(_ args: [String],
+                               onStatus: @escaping (ResticStatus) -> Void,
+                               onSummary: @escaping (ResticSummary) -> Void) throws -> Int32 {
+        do {
+            let r = try spawn(args,
+                              stdout: .stream { Self.dispatchJSONLine($0, onStatus: onStatus, onSummary: onSummary) },
+                              stderr: .inherit, cancellable: true, deadline: nil)
+            return r.code
+        } catch let e as SpawnError {
+            throw Self.mapToResticError(e, args: args)
+        }
+    }
+
+    /// Decode one `restic backup --json` line and dispatch it by message_type.
+    /// Non-JSON lines and types we don't render (e.g. verbose_status) are ignored;
+    /// `error` messages are echoed to stderr so a failure isn't swallowed.
+    private static func dispatchJSONLine(_ data: Data,
+                                         onStatus: (ResticStatus) -> Void,
+                                         onSummary: (ResticSummary) -> Void) {
+        guard !data.isEmpty,
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let type = obj["message_type"] as? String else { return }
+        func int(_ k: String) -> Int { (obj[k] as? NSNumber)?.intValue ?? 0 }
+        func dbl(_ k: String) -> Double { (obj[k] as? NSNumber)?.doubleValue ?? 0 }
+        switch type {
+        case "status":
+            onStatus(ResticStatus(
+                percentDone: dbl("percent_done"), totalFiles: int("total_files"),
+                filesDone: int("files_done"), totalBytes: int("total_bytes"),
+                bytesDone: int("bytes_done")))
+        case "summary":
+            onSummary(ResticSummary(
+                filesNew: int("files_new"), filesChanged: int("files_changed"),
+                dataAdded: int("data_added"),
+                totalBytesProcessed: int("total_bytes_processed"),
+                totalDuration: dbl("total_duration"),
+                snapshotID: obj["snapshot_id"] as? String))
+        case "error":
+            let msg = (obj["error"] as? [String: Any])?["message"] as? String
+                ?? (obj["error"] as? String) ?? "unknown error"
+            FileHandle.standardError.write(Data(("\nrestic: " + msg + "\n").utf8))
+        default:
+            break   // verbose_status and any future types: not rendered
+        }
+    }
+
+    /// Read-only existence probe: true when the repository is present and
+    /// reachable (`cat config` exits 0), WITHOUT ever initializing it.
+    func exists() -> Bool { probe() == .present }
+
+    /// Classify the repository with a single read-only `cat config`, WITHOUT ever
+    /// initializing it. Maps restic's typed exit codes (0.17+) to a `RepoProbe` so
+    /// the dry-run preview can tell "not created yet" from "locked" / "wrong key" /
+    /// "unreachable" and give a precise skip reason instead of one catch-all. A
+    /// timeout or an older restic that only returns 1 lands in `.unreachable`.
+    /// Bounded like the init probe so a dead destination is skipped quickly rather
+    /// than stalling on restic's backend retries.
+    func probe() -> RepoProbe {
+        let code: Int32
+        do { code = try run(["cat", "config"], quiet: true, timeout: Self.probeTimeout) }
+        catch { return .unreachable }   // timedOut / notFound → can't classify
+        switch code {
+        case 0:  return .present
+        case 10: return .absent
+        case 11: return .locked
+        case 12: return .wrongPassword
+        default: return .unreachable
+        }
+    }
+
+    /// Restore a snapshot into `target`. `dryRun` previews (writes nothing);
+    /// `include` restores only that LITERAL subpath; `verify` re-reads the restored
+    /// files against the repo afterward. Streams restic's output. This only READS
+    /// the repository — restore never modifies or deletes a snapshot, so it keeps
+    /// the read + append-only invariant. (`--verify` and `--dry-run` are mutually
+    /// exclusive in restic, so verify is dropped on a dry run.)
+    ///
+    /// `--include` is a restic glob (filepath.Match), but every documented use of
+    /// this path passes a literal path the user copied from `--ls`/`--find`. So we
+    /// escape the glob metacharacters (as restoreVerify already does) — otherwise a
+    /// real path like "IMG[1].jpg" would match nothing and silently restore zero
+    /// files (exit 0). Folder subtrees have no metacharacters, so escaping is a
+    /// no-op for them.
+    func restore(snapshot: String, target: URL, include: String?, dryRun: Bool, verify: Bool) throws {
+        // Flags first, the user-controlled positional after `--`: a snapshot id
+        // pasted with a leading '-' must reach restic as a value, never be
+        // parsed as an option.
+        var args = ["restore", "--target", target.path]
+        if let include, !include.isEmpty { args += ["--include", Self.escapeResticPattern(include)] }
+        if dryRun {
+            args += ["--dry-run", "--verbose"]
+        } else if verify {
+            args += ["--verify"]
+        }
+        args += ["--", snapshot]
+        let code = try run(args)
+        if code != 0 { throw ResticError.failed(command: "restore", code: code) }
+    }
+
+    /// Restore specific paths (each passed as `--include`) into `target` WITH
+    /// `--verify`, capturing the exit code and combined output instead of throwing
+    /// — for the sampled test-restore, where a non-zero exit IS the result to
+    /// report. restic recreates each file at `target` + its original absolute path,
+    /// then re-reads it against the repo. Read-only towards the repository; the
+    /// caller restores into (and then deletes) a throwaway temp dir.
+    func restoreVerify(snapshot: String, target: URL, includes: [String]) -> (code: Int32, output: String) {
+        var args = ["restore", "--target", target.path, "--verify"]
+        for inc in includes where !inc.isEmpty { args += ["--include", Self.escapeResticPattern(inc)] }
+        args += ["--", snapshot]
+        return runCapturingResult(args)
+    }
+
+    /// Escape restic include-pattern metacharacters so an EXACT file path matches
+    /// itself literally. restic treats `--include` as a glob (filepath.Match-style:
+    /// `*`, `?`, `[...]`, with `\` as the escape char), so a path containing those
+    /// characters — common in Photos/iCloud exports, e.g. "IMG[1].jpg" — would
+    /// otherwise match nothing and silently restore zero files (exit 0). The
+    /// test-restore passes literal paths, so backslash-escape the metacharacters
+    /// (and the escape char itself) to force a literal match.
+    // Internal (not private) so the unit tests can pin the escaping rules — a
+    // regression here silently restores ZERO files with exit 0 (see doc above).
+    static func escapeResticPattern(_ s: String) -> String {
+        var out = ""
+        out.reserveCapacity(s.count)
+        for ch in s {
+            if ch == "\\" || ch == "*" || ch == "?" || ch == "[" || ch == "]" { out.append("\\") }
+            out.append(ch)
+        }
+        return out
+    }
+
+    /// The outcome of a `restic check` integrity pass.
+    struct CheckResult {
+        /// restic exited 0 — no integrity problems were reported.
+        let clean: Bool
+        /// The combined restic output (progress + final verdict).
+        let output: String
+        /// The subset of output lines that name a concrete problem (errors,
+        /// broken/damaged packs, missing blobs) — what to surface on a failure.
+        let errorLines: [String]
+        /// A non-zero exit caused by NOT being able to acquire the repository lock
+        /// (a backup/prune is in progress), as opposed to actual damage. The repo
+        /// is fine; the check just couldn't run — so it must NOT be reported as a
+        /// damage verdict.
+        let lockedOut: Bool
+    }
+
+    /// Verify repository integrity with `restic check`. Always checks the repo
+    /// STRUCTURE (index ↔ pack consistency); when `readDataSubset` is given
+    /// (e.g. "5%", "1/10", "10M") it additionally re-reads and re-hashes that
+    /// fraction of the actual pack data to catch on-disk bit-rot the structural
+    /// pass alone cannot see. Strictly READ-ONLY — `check` never writes to, prunes,
+    /// or repairs the repo, so it preserves the read + append-only invariant. The
+    /// verdict is keyed off restic's exit code (0 = no errors); the output is
+    /// captured so concrete problem lines can be shown.
+    func checkRepo(readDataSubset: String?) -> CheckResult {
+        var args = ["check"]
+        if let s = readDataSubset, !s.isEmpty { args.append("--read-data-subset=\(s)") }
+        let (code, out) = runCapturingResult(args)
+        let clean = code == 0
+        let lower = out.lowercased()
+        // A non-zero exit because the repo is locked (a concurrent backup/prune
+        // holds it) is NOT damage — distinguish it so the operator isn't told to
+        // repair a healthy repo. restic 0.17+ returns exit 11 specifically for a
+        // lock failure; prefer that stable signal and keep the string match as a
+        // fallback for older restic (whose message wording could still drift).
+        let lockedOut = !clean && (code == 11
+            || lower.contains("unable to create lock")
+            || lower.contains("already locked")
+            || lower.contains("unable to acquire"))
+        let errorLines = out.split(separator: "\n").map(String.init).filter {
+            let l = $0.lowercased()
+            return l.contains("error") || l.contains("broken")
+                || l.contains("damaged") || l.contains("does not exist")
+        }
+        return CheckResult(clean: clean, output: out, errorLines: errorLines, lockedOut: lockedOut)
+    }
+
+    /// Remove repository locks: STALE locks only (`restic unlock`) or EVERY lock
+    /// (`--remove-all`). This is the ONE operation baaackaaab runs that deletes
+    /// from a repo — and restic's `unlock` only ever removes lock files (it is
+    /// hardcoded to the locks/ prefix), never a snapshot or a pack, so it cannot
+    /// destroy backup data. On an append-only rest-server the locks/ prefix must
+    /// be carved out of the append-only restriction for this to work; if it is
+    /// not, the server returns 403 and unlock simply fails — which is safe (it
+    /// changes nothing). Returns the exit code and combined output.
+    func unlock(removeAll: Bool) -> (code: Int32, output: String) {
+        var args = ["unlock"]
+        if removeAll { args.append("--remove-all") }
+        return runCapturingResult(args)
+    }
+
+    /// Run restic capturing stdout as a string (stderr discarded). Throws on a
+    /// non-zero exit, labelled with `command` so the caller's subcommand surfaces
+    /// in the error (not a generic one). Used for the small JSON-emitting queries,
+    /// not for streaming commands. `timeout`, when set, caps the wall clock — on
+    /// expiry the child is terminated and `timedOut` is thrown; only ever used
+    /// for read-only queries, never for writes.
+    // Internal (not private): the read-only query surface in
+    // ResticBackendQueries.swift calls this; the spawn core and the child env
+    // stay private to this file.
+    func runCapturing(_ args: [String], command: String, timeout: TimeInterval? = nil) throws -> String {
+        do {
+            let r = try spawn(args, stdout: .collect, stderr: .discard,
+                              cancellable: false, deadline: timeout)
+            if r.code != 0 { throw ResticError.failed(command: command, code: r.code) }
+            return String(data: r.output, encoding: .utf8) ?? ""
+        } catch let e as SpawnError {
+            throw Self.mapToResticError(e, args: args, command: command)
+        }
+    }
+
+    /// Run restic capturing stdout AND stderr together, returning the exit code and
+    /// the combined output WITHOUT throwing on a non-zero exit. Used by the commands
+    /// where a non-zero exit is itself the signal to report (check, unlock) rather
+    /// than an error to propagate. Never used for a streaming or
+    /// writing-to-user-data command — these are repo-side maintenance queries.
+    /// Cancellable: `check --read-data-subset` (hours) and `restore --verify` run
+    /// through here, and an unregistered child would mean a SIGTERM to the
+    /// scheduled check/drill kills us while restic lives on holding the repo lock.
+    // Internal (not private): lock READS in ResticBackendQueries.swift call
+    // this; `unlock`/`checkRepo`/`restoreVerify` in this file remain callers too.
+    func runCapturingResult(_ args: [String]) -> (code: Int32, output: String) {
+        do {
+            let r = try spawn(args, stdout: .collect, stderr: .merge,
+                              cancellable: true, deadline: nil)
+            return (r.code, String(data: r.output, encoding: .utf8) ?? "")
+        } catch SpawnError.executableMissing {
+            return (127, "restic executable not found — install it (`brew install restic`) and re-run")
+        } catch SpawnError.launchFailed(let why) {
+            return (127, "could not launch restic: \(why)")
+        } catch {
+            // Unreachable: no deadline, so spawn can only throw the two above.
+            return (127, "could not launch restic: \(error)")
+        }
+    }
+
+    /// Wall-clock cap for the read-only existence probe (`cat config`). Long
+    /// enough that a briefly-slow but reachable server still answers; short
+    /// enough that a genuinely dead destination is skipped quickly instead of
+    /// stalling the whole multi-destination run on restic's backend retries.
+    /// Internal (not private) so it can serve as a default argument
+    /// (`repoSizeBytes`) — default-argument expressions cannot reference
+    /// private members.
+    static let probeTimeout: TimeInterval = 60
+
+    /// Run restic and return its exit code. With `quiet`, output is discarded
+    /// (used for the existence probe); otherwise it is inherited so the user sees
+    /// live progress. `timeout`, when set, bounds the wall clock: on expiry the
+    /// child is terminated (SIGTERM) and `timedOut` is thrown — only ever used
+    /// for the read-only probe, never for a writing command we must not kill
+    /// mid-flight. The child reads repo + password from `environment`, never argv.
+    private func run(_ args: [String], quiet: Bool = false, timeout: TimeInterval? = nil) throws -> Int32 {
+        do {
+            // `quiet` silences BOTH channels — splitting them is how a probe
+            // starts leaking backend noise into the unattended log.
+            let r = try spawn(args, stdout: quiet ? .discard : .inherit,
+                              stderr: quiet ? .discard : .inherit,
+                              cancellable: true, deadline: timeout)
+            return r.code
+        } catch let e as SpawnError {
+            throw Self.mapToResticError(e, args: args)
+        }
+    }
+
+    // MARK: - Child-process core
+
+    /// How a spawned child's stdout is handled. `.stream` consumes complete
+    /// lines on the CALLING thread — the progress-bar closures it feeds are
+    /// not Sendable, so the streaming case must never move to the background
+    /// timeout machinery (enforced: `.stream` + a deadline is a programmer
+    /// error).
+    private enum SpawnStdout {
+        case inherit                    // stream to the user (restore/init/dry-run)
+        case discard                    // quiet probe
+        case collect                    // read to EOF, returned in SpawnResult.output
+        case stream((Data) -> Void)     // NDJSON consumer, one call per line
+    }
+
+    /// How stderr is handled. `.merge` shares stdout's pipe so progress and
+    /// verdict interleave in arrival order — `checkRepo` greps that combined
+    /// stream, so two separate pipes would reorder it and break the verdict.
+    private enum SpawnStderr {
+        case inherit
+        case discard
+        case merge
+    }
+
+    /// Launch-layer failures, mapped by each wrapper into its public shape
+    /// (`ResticError` for the throwing runners, the `(127, message)` tuple for
+    /// `runCapturingResult`).
+    private enum SpawnError: Error {
+        case executableMissing
+        case launchFailed(String)
+        case timedOut(seconds: Int)
+    }
+
+    private struct SpawnResult {
+        let code: Int32
+        let output: Data   // empty unless stdout == .collect
+    }
+
+    /// The public error mapping shared by the throwing wrappers. `command`
+    /// labels a timeout with the caller's subcommand where one is known
+    /// (runCapturing's `command:` parameter); the fallback `args.first` can be
+    /// misleading for `-o`-prefixed invocations, so callers that know better
+    /// pass it explicitly.
+    private static func mapToResticError(_ e: SpawnError, args: [String],
+                                         command: String? = nil) -> ResticError {
+        switch e {
+        case .executableMissing:
+            return .notFound
+        case .launchFailed(let why):
+            return .launchFailed(why)
+        case .timedOut(let seconds):
+            return .timedOut(command: command ?? args.first ?? "restic", seconds: seconds)
+        }
+    }
+
+    /// The one place a restic child is configured, launched, and reaped.
+    /// Invariants every caller relies on:
+    /// - stdin is /dev/null: a missing password fails fast and visibly instead
+    ///   of hanging on an interactive prompt no one sees;
+    /// - the child env is this destination's private `environment` — secrets
+    ///   never touch argv;
+    /// - a collect/merge pipe is read to EOF BEFORE `waitUntilExit` (a >64 KiB
+    ///   payload would otherwise deadlock on a full pipe buffer);
+    /// - `deadline` is only ever set for read-only probes/queries — without a
+    ///   deadline `forceTerminate` is unreachable, so a writing child can
+    ///   never be killed mid-flight by this layer;
+    /// - a `cancellable` child registers with BackupCancellation only after a
+    ///   successful launch and deregisters on every exit path (no-op unless a
+    ///   command has armed cancellation).
+    private func spawn(_ args: [String], stdout: SpawnStdout, stderr: SpawnStderr,
+                       cancellable: Bool, deadline: TimeInterval?) throws -> SpawnResult {
+        guard let exe = executablePath else { throw SpawnError.executableMissing }
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: exe)
+        proc.arguments = args
+        proc.environment = environment   // this destination's repo + password
+        proc.standardInput = FileHandle.nullDevice
+
+        var outPipe: Pipe?
+        var streamHandler: ((Data) -> Void)?
+        switch stdout {
+        case .inherit:
+            break
+        case .discard:
+            proc.standardOutput = FileHandle.nullDevice
+        case .collect:
+            let p = Pipe(); outPipe = p; proc.standardOutput = p
+        case .stream(let handler):
+            let p = Pipe(); outPipe = p; proc.standardOutput = p
+            streamHandler = handler
+        }
+        switch stderr {
+        case .inherit:
+            break
+        case .discard:
+            proc.standardError = FileHandle.nullDevice
+        case .merge:
+            guard let outPipe else { preconditionFailure("stderr .merge requires a collecting stdout") }
+            proc.standardError = outPipe
+        }
+
+        do { try proc.run() } catch { throw SpawnError.launchFailed("\(error)") }
+        // Track the child so a SIGINT/SIGTERM interrupts restic (it writes its
+        // partial state and exits 130) instead of hard-killing us. Registered
+        // only after a successful launch; cleared on every exit path.
+        if cancellable { BackupCancellation.shared.setCurrent(proc) }
+        defer { if cancellable { BackupCancellation.shared.clearCurrent(proc) } }
+
+        if let streamHandler, let outPipe {
+            precondition(deadline == nil, "streaming spawns are never deadline-bounded")
+            Self.streamLines(from: outPipe, to: streamHandler)
+            proc.waitUntilExit()
+            return SpawnResult(code: proc.terminationStatus, output: Data())
+        }
+
+        guard let deadline else {
+            let data = outPipe?.fileHandleForReading.readDataToEndOfFile() ?? Data()
+            proc.waitUntilExit()
+            return SpawnResult(code: proc.terminationStatus, output: data)
+        }
+
+        // Bounded wait: a background thread reads to EOF (when collecting) and
+        // reaps the child; if the deadline passes first the (read-only) child
+        // is terminated and `timedOut` reported.
+        let capture = SyncBox<Data>(Data())
+        let sem = DispatchSemaphore(value: 0)
+        let reader = outPipe?.fileHandleForReading
+        DispatchQueue.global(qos: .userInitiated).async {
+            if let reader { capture.value = reader.readDataToEndOfFile() }
+            proc.waitUntilExit()
+            sem.signal()
+        }
+        if sem.wait(timeout: .now() + deadline) == .timedOut {
+            forceTerminate(proc, reaped: sem)
+            throw SpawnError.timedOut(seconds: Int(deadline))
+        }
+        return SpawnResult(code: proc.terminationStatus, output: capture.value)
+    }
+
+    /// Read a pipe line-by-line on the calling thread, invoking `handler` per
+    /// complete '\n'-terminated line (and once more for a trailing unterminated
+    /// line at EOF). `availableData` blocks until data arrives or returns empty
+    /// at EOF; the rolling buffer lets a JSON object spanning two reads still
+    /// be dispatched once it completes.
+    private static func streamLines(from pipe: Pipe, to handler: (Data) -> Void) {
+        let reader = pipe.fileHandleForReading
+        var buffer = Data()
+        while true {
+            let chunk = reader.availableData
+            if chunk.isEmpty { break }   // EOF — the child exited and closed the pipe
+            buffer.append(chunk)
+            while let nl = buffer.firstIndex(of: 0x0A) {
+                let line = buffer.subdata(in: buffer.startIndex..<nl)
+                buffer.removeSubrange(buffer.startIndex...nl)
+                handler(line)
+            }
+        }
+        if !buffer.isEmpty { handler(buffer) }
+    }
+
+    /// Stop a timed-out child and make sure it actually dies. We SIGTERM it first
+    /// (graceful), then wait up to 5 s for the reaper thread to observe the exit;
+    /// if it is still running it is wedged ignoring SIGTERM, so escalate to SIGKILL
+    /// — otherwise the child AND the blocked reaper thread leak. Only ever called
+    /// for read-only probes/queries, never a writing backup we must let finish.
+    private func forceTerminate(_ proc: Process, reaped sem: DispatchSemaphore) {
+        proc.terminate()                                   // SIGTERM
+        if sem.wait(timeout: .now() + 5) == .timedOut, proc.isRunning {
+            kill(proc.processIdentifier, SIGKILL)
+            _ = sem.wait(timeout: .now() + 5)              // let the reaper see the exit
+        }
+    }
+}
